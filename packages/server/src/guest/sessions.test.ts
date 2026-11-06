@@ -33,4 +33,24 @@ describe('guest session boundaries', () => {
     expect(store.get(token)).toBeUndefined();
     vi.restoreAllMocks();
   });
+  it('caps sessions per party by dropping the oldest unjoined one', () => {
+    const store = new GuestSessions();
+    const expires = Date.now() + 60000;
+    const joined = store.create('party', expires, 3);
+    joined.member = 'one';
+    const first = store.create('party', expires, 3);
+    const second = store.create('party', expires, 3);
+    const other = store.create('other', expires, 3);
+    const third = store.create('party', expires, 3);
+    expect(store.get(first.token)).toBeUndefined();
+    expect(store.get(joined.token)).toBe(joined);
+    expect(store.get(second.token)).toBe(second);
+    expect(store.get(third.token)).toBe(third);
+    expect(store.get(other.token)).toBe(other);
+    second.member = 'two';
+    third.member = 'three';
+    expect(() => store.create('party', expires, 3)).toThrow(
+      expect.objectContaining({ status: 403 })
+    );
+  });
 });

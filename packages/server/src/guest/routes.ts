@@ -49,6 +49,10 @@ interface Binding {
   expiresAt: number;
   entries: Map<string, Entry>;
   sources: Map<string, Promise<Source>>;
+  /** Recent resolution or probe failures, so polling guests don't retry them. */
+  failures: Map<string, { error: unknown; until: number }>;
+  /** When `ownerToken` was last confirmed to belong to a signed-in host. */
+  ownerCheckedAt: number;
   bingeGroup?: string;
 }
 interface Source {
@@ -59,8 +63,10 @@ interface Source {
   itemId: string;
   title: string;
   record: MediaSourceRecord;
-  media?: GuestMedia;
+  media?: Promise<GuestMedia>;
 }
+const FAILURE_BACKOFF_MS = 30000;
+const OWNER_CHECK_MS = 30000;
 const bindings = new Map<string, Binding>();
 const sources = new Map<string, Source>();
 const requests = new Map<string, number>();
@@ -85,22 +91,21 @@ function limit(req: Request) {
     for (const [k] of requests)
       if (!k.endsWith(`:${Math.floor(Date.now() / 60000)}`)) requests.delete(k);
 }
+const transcoder = (path: string) =>
+  `${config.party.transcoderUrl!.replace(/\/+$/, '')}${path}`;
 async function worker(path: string, body?: unknown): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 75000);
   try {
-    const res = await fetch(
-      `${config.party.transcoderUrl!.replace(/\/$/, '')}${path}`,
-      {
-        method: body === undefined ? 'GET' : 'POST',
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${config.party.transcoderSecret}`,
-          'Content-Type': 'application/json',
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      }
-    );
+    const res = await fetch(transcoder(path), {
+      method: body === undefined ? 'GET' : 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${config.party.transcoderSecret}`,
+        'Content-Type': 'application/json',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
     if (!res.ok) {
       const error = (await res.json().catch(() => ({}))) as { error?: string };
       fail(
@@ -135,6 +140,15 @@ async function host(req: Request, proof: z.infer<typeof hostSchema>) {
     fail(403, 'Only the signed-in party host can share a stream');
   return { user, party, token };
 }
+/** The host's sign-in, rechecked at most every OWNER_CHECK_MS. */
+async function ownerSignedIn(binding: Binding): Promise<boolean> {
+  if (Date.now() - binding.ownerCheckedAt < OWNER_CHECK_MS) return true;
+  const token = binding.ownerToken;
+  if (!(await userForToken(token))) return false;
+  // /publish may have swapped in a newer token while this one was checked.
+  if (binding.ownerToken === token) binding.ownerCheckedAt = Date.now();
+  return true;
+}
 async function active(req: Request, requireMember = true) {
   if (!enabled()) fail(410, 'Guest streaming is disabled');
   const token =
@@ -147,7 +161,7 @@ async function active(req: Request, requireMember = true) {
     !binding ||
     !party ||
     binding.expiresAt <= Date.now() ||
-    !(await userForToken(binding.ownerToken))
+    !(await ownerSignedIn(binding))
   )
     fail(410, 'This guest invitation has ended');
   if (
@@ -169,6 +183,20 @@ async function current(req: Request) {
     entry.sourceId,
     entry.filename,
   ]);
+  const failure = state.binding.failures.get(revision);
+  if (failure && failure.until > Date.now()) throw failure.error;
+  state.binding.failures.delete(revision);
+  // Remember a failure for a while: every guest polls /current every couple
+  // of seconds, and each retry runs the host's whole addon pipeline.
+  const remember = (error: unknown) => {
+    state.binding.failures.set(revision, {
+      error,
+      until: Date.now() + FAILURE_BACKOFF_MS,
+    });
+    if (state.binding.failures.size > 100)
+      for (const [k, f] of state.binding.failures)
+        if (f.until <= Date.now()) state.binding.failures.delete(k);
+  };
   let pending = state.binding.sources.get(revision);
   if (!pending) {
     pending = (async () => {
@@ -240,11 +268,26 @@ async function current(req: Request) {
       return source;
     })();
     state.binding.sources.set(revision, pending);
-    pending.catch(() => state.binding.sources.delete(revision));
+    pending.catch((error) => {
+      if (state.binding.sources.get(revision) === pending)
+        state.binding.sources.delete(revision);
+      remember(error);
+    });
   }
   const source = await pending;
-  source.media ??= await worker('/probe', { input: input(source) });
-  return { ...state, source };
+  // Concurrent polls share one probe.
+  const probe = (source.media ??= worker('/probe', { input: input(source) }));
+  let media: GuestMedia;
+  try {
+    media = await probe;
+  } catch (error) {
+    if (source.media === probe) {
+      source.media = undefined;
+      remember(error);
+    }
+    throw error;
+  }
+  return { ...state, source, media };
 }
 const capabilitySchema = z.object({
   video: z.boolean(),
@@ -290,6 +333,8 @@ router.post('/host', async (req, res) => {
       expiresAt: party.expiresAt,
       entries: new Map(),
       sources: new Map(),
+      failures: new Map(),
+      ownerCheckedAt: Date.now(),
     };
     bindings.set(body.party, binding);
   }
@@ -304,7 +349,10 @@ router.post('/publish', async (req, res) => {
   if (!binding || binding.owner !== body.member)
     fail(404, 'Guest streaming is not enabled for this party');
   binding.ownerToken = bearer(req);
+  binding.ownerCheckedAt = Date.now();
   binding.entries = new Map(body.entries.map((e) => [e.ref, e]));
+  // The host may have just re-selected a source that failed.
+  binding.failures.clear();
   res.json({ ok: true });
 });
 router.post('/disable', async (req, res) => {
@@ -343,18 +391,18 @@ router.post('/exchange', async (req, res) => {
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });
 router.get('/current', async (req, res) => {
-  const { source } = await current(req);
+  const { source, media } = await current(req);
   res.json({
     revision: source.revision,
     playlistItemId: source.playlistItemId,
     itemId: source.itemId,
     title: source.title,
-    media: source.media,
+    media,
   });
 });
 router.post('/prepare', async (req, res) => {
   const body = playbackSchema.parse(req.body);
-  const { source, session } = await current(req);
+  const { source, session, media } = await current(req);
   if (body.revision !== source.revision)
     fail(409, 'The party has changed titles');
   const generation = (session.generation ?? 0) + 1;
@@ -396,14 +444,14 @@ router.post('/prepare', async (req, res) => {
     playlistItemId: source.playlistItemId,
     itemId: source.itemId,
     title: source.title,
-    media: source.media!,
+    media,
     mode: result.mode,
     offsetMs: result.offsetMs ?? 0,
     url: `${base}${result.mode === 'direct' ? 'original' : `${result.id}/index.m3u8`}${query}`,
   };
   if (
     body.subtitle != null &&
-    source.media!.tracks.some(
+    media.tracks.some(
       (t) =>
         t.type === 'subtitle' &&
         t.index === body.subtitle &&
@@ -431,6 +479,7 @@ router.post('/touch', async (req, res) => {
     });
   res.json({ ok: true });
 });
+const CROSS_ORIGIN_HEADERS = new Set(['range', 'user-agent', 'accept']);
 async function forward(source: Source, req: Request, res: Response) {
   const headers: Record<string, string> = Object.fromEntries(
     Object.entries(source.record.requestHeaders ?? {}).map(([name, value]) => [
@@ -461,10 +510,11 @@ async function forward(source: Source, req: Request, res: Response) {
       fail(502, 'Invalid source redirect');
     }
     await upstream.body.dump();
-    if (location.origin !== next.origin) {
-      delete headers.authorization;
-      delete headers.cookie;
-    }
+    // The source's headers may carry the host's credentials (API keys,
+    // proxy tokens, ...): another origin only gets the harmless ones.
+    if (location.origin !== next.origin)
+      for (const name of Object.keys(headers))
+        if (!CROSS_ORIGIN_HEADERS.has(name)) delete headers[name];
     next = location;
     upstream = await request(next, {
       method: req.method === 'HEAD' ? 'HEAD' : 'GET',
@@ -506,7 +556,7 @@ router.all('/source/:handle', async (req, res) => {
   await forward(source, req, res);
 });
 router.get('/subtitle/:index', async (req, res) => {
-  const { source, session } = await current(req);
+  const { source, session, media } = await current(req);
   if (
     session.revision !== source.revision ||
     session.source !== source.handle ||
@@ -515,7 +565,7 @@ router.get('/subtitle/:index', async (req, res) => {
     fail(410, 'Source changed');
   const index = Number(req.params.index);
   if (
-    !source.media!.tracks.some(
+    !media.tracks.some(
       (t) =>
         t.type === 'subtitle' &&
         t.index === index &&
@@ -523,7 +573,7 @@ router.get('/subtitle/:index', async (req, res) => {
     )
   )
     fail(404, 'Subtitle not found');
-  const upstream = await fetch(`${config.party.transcoderUrl}/subtitle`, {
+  const upstream = await fetch(transcoder('/subtitle'), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${config.party.transcoderSecret}`,
@@ -548,13 +598,10 @@ router.get('/media/:job/:file', async (req, res) => {
   const file = String(req.params.file);
   if (!/^(index\.m3u8|init\.mp4|segment-\d+\.m4s)$/.test(file))
     fail(404, 'Media not found');
-  const upstream = await fetch(
-    `${config.party.transcoderUrl}/jobs/${session.job}/${file}`,
-    {
-      headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
-      signal: AbortSignal.timeout(30000),
-    }
-  );
+  const upstream = await fetch(transcoder(`/jobs/${session.job}/${file}`), {
+    headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
+    signal: AbortSignal.timeout(30000),
+  });
   if (!upstream.ok) fail(502, 'Conversion is unavailable');
   if (file.endsWith('.m3u8')) {
     const playlist = (await upstream.text())

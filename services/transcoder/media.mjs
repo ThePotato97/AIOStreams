@@ -2,7 +2,7 @@
 export function metadata(raw) {
   const streams = raw.streams ?? [];
   return {
-    durationMs: Math.max(0, Number(raw.format?.duration || 0) * 1000),
+    durationMs: duration(raw),
     container: raw.format?.format_name ?? '',
     bitrate: Number(raw.format?.bit_rate || 0),
     tracks: streams
@@ -33,6 +33,28 @@ export function metadata(raw) {
       .filter((c) => Number.isFinite(c.startMs) && c.startMs >= 0)
       .sort((a, b) => a.startMs - b.startMs),
   };
+}
+/**
+ * The container's duration, else the longest stream's. Matroska often carries
+ * it only as a per-stream DURATION tag ("01:23:45.678000000").
+ */
+export function duration(raw) {
+  const seconds = (value) => {
+    if (value == null || value === '') return 0;
+    const text = String(value);
+    if (/^\d+(\.\d+)?$/.test(text)) return Number(text);
+    const match = /^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/.exec(text);
+    return match ? +match[1] * 3600 + +match[2] * 60 + +match[3] : 0;
+  };
+  let best = seconds(raw.format?.duration);
+  if (!(best > 0))
+    for (const s of raw.streams ?? [])
+      best = Math.max(
+        best,
+        seconds(s.duration),
+        seconds(s.tags?.DURATION ?? s.tags?.duration)
+      );
+  return Number.isFinite(best) && best > 0 ? Math.round(best * 1000) : 0;
 }
 function rate(value) {
   const [a, b = 1] = String(value ?? '0')

@@ -11,6 +11,11 @@ import { GuestApi } from './api';
 
 const active = new Set<string>();
 const links = new Map<string, string>();
+/**
+ * Bumped whenever the server binding is (re)created. A new binding starts with
+ * no entries, so the queue must be published again even if it is unchanged.
+ */
+let binding = 0;
 export function useGuestPublication() {
   const state = useParty();
   const identity = usePartyIdentity();
@@ -47,7 +52,7 @@ export function useGuestPublication() {
             ]
           : []
       );
-      const serialized = JSON.stringify(entries);
+      const serialized = `${binding}\n${JSON.stringify(entries)}`;
       if (serialized === last) return;
       busy = true;
       try {
@@ -55,8 +60,10 @@ export function useGuestPublication() {
         last = serialized;
       } catch (error) {
         if ((error as { status?: number }).status === 404) {
+          // The server lost the binding (disabled elsewhere or restarted).
           active.delete(proof.party);
           links.delete(proof.party);
+          last = '';
         }
         if (!stopped) toast.error((error as Error).message);
       } finally {
@@ -109,6 +116,9 @@ export function GuestInvite() {
         identity.token!
       );
       const result = await api.request<{ secret: string }>('/host', proof);
+      // The server may have restarted with an empty binding even when this
+      // party still looks active here; an extra publish is harmless.
+      binding++;
       active.add(proof.party);
       const next = `${state.invite.relay}/watch#${new URLSearchParams({ code: state.invite.code, secret: result.secret })}`;
       links.set(proof.party, next);

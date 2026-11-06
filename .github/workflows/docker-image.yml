@@ -1,0 +1,174 @@
+name: Docker Image
+
+# Builds one image for amd64 and arm64, pushes each by digest, then publishes
+# a multi-arch manifest under every requested tag. Called by deploy-docker.yml
+# and dev-docker.yml.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build
+        required: true
+        type: string
+      image:
+        description: Image name inside the registry (e.g. aiostreams)
+        required: true
+        type: string
+      registry:
+        description: Registry namespace (e.g. ghcr.io/viren070)
+        required: true
+        type: string
+      dockerhub-image:
+        description: Also publish to this Docker Hub repository (e.g. viren070/aiostreams); empty to skip
+        required: false
+        type: string
+        default: ''
+      tags:
+        description: Space-separated image tags
+        required: true
+        type: string
+      context:
+        description: Build context
+        required: false
+        type: string
+        default: .
+      dockerfile:
+        description: Dockerfile path
+        required: false
+        type: string
+        default: Dockerfile
+      cache-scope:
+        description: Prefix for the GHA cache scope (the platform suffix is appended)
+        required: false
+        type: string
+        default: ''
+      metadata-channel:
+        description: Run scripts/generateMetadata.cjs with this channel; empty to skip
+        required: false
+        type: string
+        default: ''
+      metadata-ref:
+        description: Pass --ref and --commit to generateMetadata.cjs
+        required: false
+        type: string
+        default: ''
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+
+jobs:
+  build:
+    name: Build ${{ inputs.image }} (${{ matrix.suffix }})
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # generateMetadata.cjs reads git tags, so it needs the full history.
+          fetch-depth: ${{ inputs.metadata-channel != '' && '0' || '1' }}
+          ref: ${{ inputs.ref }}
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+      - uses: actions/setup-node@v7
+        if: inputs.metadata-channel != ''
+        with:
+          node-version: 24
+      - name: Generate metadata
+        if: inputs.metadata-channel != ''
+        env:
+          CHANNEL: ${{ inputs.metadata-channel }}
+          META_REF: ${{ inputs.metadata-ref }}
+        run: |
+          set -euo pipefail
+          args=(--channel="$CHANNEL")
+          if [[ -n "$META_REF" ]]; then
+            args+=(--ref="$META_REF" --commit="$(git rev-parse --short HEAD)")
+          fi
+          node scripts/generateMetadata.cjs "${args[@]}"
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          platforms: ${{ matrix.platform }}
+          push: true
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          outputs: type=image,name=${{ inputs.registry }}/${{ inputs.image }},push-by-digest=true,name-canonical=true
+          cache-from: type=gha,scope=${{ inputs.cache-scope }}${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}${{ matrix.suffix }}
+      # With archive: false the artifact is named after the file, so the file
+      # name must be unique across every image built in the same run.
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          FILE: ${{ inputs.image }}-${{ matrix.suffix }}
+        run: |
+          mkdir -p /tmp/digests
+          printf '%s' "$DIGEST" > "/tmp/digests/$FILE"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: /tmp/digests/${{ inputs.image }}-${{ matrix.suffix }}
+          archive: false
+          retention-days: 1
+
+  merge:
+    name: Publish ${{ inputs.image }} manifest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: '{${{ inputs.image }}-amd64,${{ inputs.image }}-arm64}'
+          merge-multiple: true
+      - name: Login to Docker Hub
+        if: inputs.dockerhub-image != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Create and push manifests
+        env:
+          IMAGE: ${{ inputs.registry }}/${{ inputs.image }}
+          HUB_IMAGE: ${{ inputs.dockerhub-image }}
+          TAGS: ${{ inputs.tags }}
+          AMD64: /tmp/digests/${{ inputs.image }}-amd64
+          ARM64: /tmp/digests/${{ inputs.image }}-arm64
+        run: |
+          set -euo pipefail
+          for tag in $TAGS; do
+            targets=(-t "$IMAGE:$tag")
+            [[ -n "$HUB_IMAGE" ]] && targets+=(-t "$HUB_IMAGE:$tag")
+            docker buildx imagetools create "${targets[@]}" \
+              "$IMAGE@$(cat "$AMD64")" \
+              "$IMAGE@$(cat "$ARM64")"
+          done

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
-import { metadata, select, ffmpegArgs } from './media.mjs';
+import { metadata, select, ffmpegArgs, duration } from './media.mjs';
 const exec = promisify(execFile);
 let dir, media;
 before(async () => {
@@ -78,6 +78,20 @@ const request = (extra = {}) => ({
   positionMs: 0,
   capabilities: { video: true, audio: true, container: true, hdr: false },
   ...extra,
+});
+test('duration falls back to stream durations and Matroska tags', () => {
+  assert.equal(duration({ format: { duration: '12.5' } }), 12500);
+  assert.equal(
+    duration({
+      format: {},
+      streams: [
+        { duration: '10.0' },
+        { tags: { DURATION: '01:02:03.500000000' } },
+      ],
+    }),
+    3723500
+  );
+  assert.equal(duration({ format: { duration: 'N/A' }, streams: [{}] }), 0);
 });
 test('probe retains chapter timestamps and track choices', () => {
   assert.deepEqual(
