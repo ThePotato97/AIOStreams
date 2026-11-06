@@ -499,6 +499,10 @@ msgstr ""
 msgid "All playlists"
 msgstr ""
 
+#: src/lib/guest/host.tsx
+msgid "Allow guests and copy link"
+msgstr ""
+
 #: src/lib/downloads/index.ts
 msgid "Already downloaded or on the way"
 msgstr ""
@@ -1020,6 +1024,10 @@ msgstr ""
 
 #: src/components/party/party-sheet.tsx
 msgid "Copy code"
+msgstr ""
+
+#: src/lib/guest/host.tsx
+msgid "Copy guest link"
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
@@ -1778,6 +1786,14 @@ msgstr ""
 msgid "Group by day"
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "Guest"
+msgstr ""
+
+#: src/lib/guest/host.tsx
+msgid "Guest link copied"
+msgstr ""
+
 #: src/pages/settings/playback.tsx
 msgid "Hardware decoding"
 msgstr ""
@@ -1828,6 +1844,10 @@ msgstr ""
 
 #: src/components/party/party-sheet.tsx
 msgid "Hide QR code"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "HLS playback failed"
 msgstr ""
 
 #. Holding the next key down, as in Hold + Enter
@@ -1995,12 +2015,20 @@ msgstr ""
 msgid "Join a party"
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "Join party"
+msgstr ""
+
 #: src/components/party/party-sheet.tsx
 msgid "Joining leaves the party you're in."
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
 msgid "Joining the party…"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Joining…"
 msgstr ""
 
 #: src/lib/input/actions.ts
@@ -2114,6 +2142,10 @@ msgstr ""
 
 #: src/components/player/options.tsx
 msgid "Less dialogue boost"
+msgstr ""
+
+#: src/lib/guest/host.tsx
+msgid "Let guests watch your stream in a browser without signing in."
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
@@ -2794,6 +2826,10 @@ msgstr ""
 msgid "Opens versions in {target}. It can't tell this app where you stopped, so you mark what you watched yourself."
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "Optimized for your browser"
+msgstr ""
+
 #: src/components/send-report.tsx
 msgid "Optional."
 msgstr ""
@@ -2830,8 +2866,16 @@ msgstr ""
 msgid "Or type one"
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "Original"
+msgstr ""
+
 #: src/pages/settings/audio.tsx
 msgid "Original language"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Original stream"
 msgstr ""
 
 #: src/lib/playback/player-choice.ts
@@ -3050,6 +3094,7 @@ msgstr ""
 #: src/components/remote-sheet.tsx
 #: src/lib/input/actions.ts
 #: src/lib/input/keys.ts
+#: src/pages/guest.tsx
 #: src/pages/item.tsx
 msgid "Play"
 msgstr ""
@@ -3159,6 +3204,10 @@ msgstr ""
 
 #: src/pages/player.tsx
 msgid "Playback failed: {failure}"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Playback failed. Try another quality or ask the host to select another source."
 msgstr ""
 
 #: src/pages/history.tsx
@@ -3307,6 +3356,10 @@ msgstr ""
 
 #: src/components/party/party-sheet.tsx
 msgid "QR code"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Quality"
 msgstr ""
 
 #: src/pages/sign-in.tsx
@@ -3579,6 +3632,7 @@ msgstr ""
 msgid "Retimed and synced automatically"
 msgstr ""
 
+#: src/lib/guest/engine.ts
 #: src/lib/i18n.ts
 msgid "Retry"
 msgstr ""
@@ -4180,6 +4234,10 @@ msgstr ""
 msgid "Stop"
 msgstr ""
 
+#: src/lib/guest/host.tsx
+msgid "Stop guest streaming"
+msgstr ""
+
 #: src/pages/search.tsx
 msgid "Stop listening"
 msgstr ""
@@ -4232,6 +4290,7 @@ msgstr ""
 
 #: src/components/player/options.tsx
 #: src/components/remote-sheet.tsx
+#: src/lib/guest/engine.ts
 #: src/pages/settings/index.tsx
 #: src/pages/settings/subtitles.tsx
 msgid "Subtitles"
@@ -4680,6 +4739,10 @@ msgstr ""
 msgid "This device couldn't read what the party is playing."
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "This guest invitation is incomplete"
+msgstr ""
+
 #: src/pages/settings/subtitles.tsx
 msgid "This is how subtitles will look."
 msgstr ""
@@ -5116,6 +5179,10 @@ msgstr ""
 msgid "Waiting for approval…"
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "Waiting for the host to choose a title…"
+msgstr ""
+
 #: src/components/party/party-sheet.tsx
 msgid "Watch along"
 msgstr ""
@@ -5131,6 +5198,7 @@ msgstr ""
 #: src/components/layout.tsx
 #: src/components/party/party-sheet.tsx
 #: src/components/player/options.tsx
+#: src/pages/guest.tsx
 #: src/pages/item.tsx
 msgid "Watch party"
 msgstr ""
@@ -5352,8 +5420,16 @@ msgstr ""
 msgid "You"
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "You left the party"
+msgstr ""
+
 #: src/lib/party/party.ts
 msgid "You left the party."
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "You're invited to watch together"
 msgstr ""
 
 #: src/pages/settings/playback.tsx
@@ -5362,6 +5438,10 @@ msgstr ""
 
 #: src/components/version-settings.tsx
 msgid "Your badges"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Your name"
 msgstr ""
 
 #: src/lib/playback/player-choice.ts

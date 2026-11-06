@@ -1,0 +1,36 @@
+# Optional overlay: docker compose -f compose.yaml -f compose.guest.yaml up -d --build
+services:
+  aiostreams:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aiostreams:guest-local
+    environment:
+      PARTY_GUEST_STREAMING: 'true'
+      PARTY_TRANSCODER_URL: http://transcoder:3100
+      PARTY_TRANSCODER_SECRET: ${PARTY_TRANSCODER_SECRET:?Set a shared secret of at least 32 characters in .env}
+      PARTY_INTERNAL_URL: http://aiostreams:3000
+    depends_on:
+      transcoder:
+        condition: service_healthy
+  transcoder:
+    build:
+      context: .
+      dockerfile: services/transcoder/Dockerfile
+    restart: unless-stopped
+    environment:
+      TRANSCODER_SECRET: ${PARTY_TRANSCODER_SECRET:?Set PARTY_TRANSCODER_SECRET in .env}
+      AIOSTREAMS_INTERNAL_URL: http://aiostreams:3000
+      TRANSCODER_ENCODER: ${TRANSCODER_ENCODER:-cpu}
+      TRANSCODER_MAX_JOBS: ${TRANSCODER_MAX_JOBS:-2}
+      TRANSCODER_CACHE_BYTES: ${TRANSCODER_CACHE_BYTES:-10737418240}
+    volumes:
+      - guest-transcodes:/cache
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3100/health',{headers:{Authorization:'Bearer '+process.env.TRANSCODER_SECRET}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+volumes:
+  guest-transcodes:

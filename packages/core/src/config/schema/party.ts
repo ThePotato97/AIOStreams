@@ -4,6 +4,44 @@ import type { RuntimeConfigSection } from '../types.js';
 
 /** Watch parties: SyncPlay for Jellyfin apps, and the relay the AIOStreams apps use. */
 export const partySchema = {
+  guestStreaming: {
+    schema: z.boolean(),
+    default: false,
+    label: 'Guest streaming',
+    description:
+      'Allow hosts to share their selected source with guests in a browser. Requires a private transcoder companion.',
+    env: 'PARTY_GUEST_STREAMING',
+    requiresRestart: false,
+    secret: false,
+  },
+  transcoderUrl: {
+    schema: optionalUrlString,
+    default: undefined,
+    label: 'Transcoder URL',
+    description: 'Private address of the guest streaming companion.',
+    env: 'PARTY_TRANSCODER_URL',
+    requiresRestart: false,
+    secret: false,
+  },
+  transcoderSecret: {
+    schema: z.string().optional(),
+    default: undefined,
+    label: 'Transcoder secret',
+    description:
+      'Shared secret of at least 32 characters for the private companion.',
+    env: 'PARTY_TRANSCODER_SECRET',
+    requiresRestart: false,
+    secret: true,
+  },
+  internalUrl: {
+    schema: optionalUrlString,
+    default: undefined,
+    label: 'Internal server URL',
+    description: 'Address the transcoder uses to reach this AIOStreams server.',
+    env: 'PARTY_INTERNAL_URL',
+    requiresRestart: false,
+    secret: false,
+  },
   relay: {
     schema: z.enum(['off', 'users', 'public']),
     default: 'off',

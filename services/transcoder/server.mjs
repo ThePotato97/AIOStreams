@@ -1,0 +1,443 @@
+import http from 'node:http';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdir, rm, readFile, stat, readdir } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { pathToFileURL } from 'node:url';
+import { metadata, ffmpegArgs, select } from './media.mjs';
+
+const exec = promisify(execFile);
+const secret = process.env.TRANSCODER_SECRET ?? '';
+const root = process.env.CACHE_DIR ?? '/tmp/aiostreams-transcoder';
+const limit = Math.max(1, Number(process.env.TRANSCODER_MAX_JOBS ?? 2));
+const maxBytes = Math.max(
+  1024 * 1024,
+  Number(process.env.TRANSCODER_CACHE_BYTES ?? 10 * 1024 ** 3)
+);
+const jobs = new Map();
+const probes = new Map();
+const pending = new Map();
+const subtitles = new Map();
+let subtitleJobs = 0;
+let cacheBytes = 0;
+const maximumPosition = (job) =>
+  Math.max(0, ...[...job.viewers.values()].map((v) => v.positionMs));
+const id = () => randomBytes(24).toString('base64url');
+const hash = (value) =>
+  createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function authorized(req) {
+  const got = Buffer.from(req.headers.authorization ?? '');
+  const expected = Buffer.from(`Bearer ${secret}`);
+  return (
+    !!secret && got.length === expected.length && timingSafeEqual(got, expected)
+  );
+}
+function inputUrl(value) {
+  const url = new URL(value);
+  const allowed = new URL(
+    process.env.AIOSTREAMS_INTERNAL_URL ?? 'http://aiostreams:3000'
+  );
+  if (
+    url.origin !== allowed.origin ||
+    !url.pathname.startsWith(
+      `${allowed.pathname.replace(/\/$/, '')}/party/guest/source/`
+    ) ||
+    url.username ||
+    url.password
+  )
+    throw Error('Invalid source handle');
+  return url.href;
+}
+async function json(req) {
+  let text = '';
+  for await (const chunk of req) {
+    text += chunk;
+    if (text.length > 65536) throw Error('Request too large');
+  }
+  return JSON.parse(text || '{}');
+}
+async function probe(input) {
+  inputUrl(input);
+  if (!probes.has(input)) {
+    const task = exec(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-show_format',
+        '-show_streams',
+        '-show_chapters',
+        '-of',
+        'json',
+        input,
+      ],
+      { timeout: 45000, maxBuffer: 4 * 1024 * 1024 }
+    )
+      .then(({ stdout }) => metadata(JSON.parse(stdout)))
+      .catch(() => {
+        probes.delete(input);
+        throw Error('Source probe failed');
+      });
+    probes.set(input, task);
+    if (probes.size > 200) probes.delete(probes.keys().next().value);
+  }
+  return probes.get(input);
+}
+function stop(job) {
+  if (job.paused) job.child?.kill('SIGCONT');
+  job.child?.kill('SIGTERM');
+  const child = job.child;
+  if (child)
+    setTimeout(() => {
+      if (child.exitCode === null) child.kill('SIGKILL');
+    }, 3000).unref();
+}
+async function drop(job) {
+  jobs.delete(job.id);
+  stop(job);
+  await rm(job.dir, { recursive: true, force: true });
+}
+function start(job, encoder) {
+  const command = ffmpegArgs(
+    job.input,
+    job.meta,
+    job.request,
+    job.dir,
+    encoder
+  );
+  job.offsetMs = command.offsetMs;
+  job.mode = command.policy.mode;
+  job.encoder = encoder;
+  const args = [...command.args];
+  args.splice(args.length - 1, 0, '-progress', 'pipe:3');
+  const child = spawn('ffmpeg', args, {
+    stdio: ['ignore', 'ignore', 'pipe', 'pipe'],
+  });
+  job.child = child;
+  let progress = '';
+  child.stdio[3].on('data', (chunk) => {
+    progress += chunk;
+    const lines = progress.split('\n');
+    progress = lines.pop() ?? '';
+    for (const line of lines) {
+      if (line.startsWith('speed=')) job.speed = line.slice(6);
+      if (line.startsWith('out_time_us=')) {
+        job.producedMs = job.offsetMs + Number(line.slice(12)) / 1000;
+        if (!job.paused && job.producedMs > maximumPosition(job) + 120000) {
+          child.kill('SIGSTOP');
+          job.paused = true;
+        }
+      }
+    }
+  });
+  // Do not log FFmpeg stderr: it can contain credentials from upstream errors.
+  child.stderr.resume();
+  child.on('error', () => {
+    job.error = 'FFmpeg could not start';
+  });
+  child.on('exit', async (code) => {
+    if (!jobs.has(job.id) || job.child !== child) return;
+    job.child = null;
+    if (code !== 0 && encoder !== 'cpu' && !job.ready) {
+      await rm(job.dir, { recursive: true, force: true });
+      await mkdir(job.dir, { recursive: true });
+      if (jobs.has(job.id)) start(job, 'cpu');
+    } else if (code !== 0) job.error = 'Conversion failed';
+    else job.finished = true;
+  });
+}
+async function prepare(body) {
+  const input = inputUrl(body.input);
+  const meta = await probe(input);
+  const request = body.request ?? {};
+  if (
+    !['original', '1080p', '720p'].includes(request.quality) ||
+    !Number.isFinite(request.positionMs) ||
+    request.positionMs < 0 ||
+    request.positionMs > meta.durationMs + 4000
+  )
+    throw Error('Invalid playback request');
+  if (
+    typeof body.viewer !== 'string' ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(body.viewer)
+  )
+    throw Error('Invalid viewer');
+  const policy = select(meta, request);
+  if (!policy.video) throw Error('Source has no video');
+  if (policy.mode === 'direct') return { mode: 'direct', meta };
+  const key = hash([
+    input,
+    request.quality,
+    request.audio,
+    request.subtitle,
+    policy.copyVideo,
+    policy.copyAudio,
+    policy.burn,
+  ]);
+  const positionMs = request.positionMs;
+  let job = [...jobs.values()].find(
+    (j) =>
+      j.key === key &&
+      !j.error &&
+      positionMs >= j.offsetMs &&
+      positionMs <= (j.producedMs ?? j.offsetMs) + 8000
+  );
+  if (!job) {
+    for (const old of [...jobs.values()])
+      if (!old.viewers.size || old.error) await drop(old);
+    if (jobs.size >= limit) {
+      const err = Error(
+        'Conversion capacity reached; try Original or retry later'
+      );
+      err.status = 503;
+      throw err;
+    }
+    const jobId = id();
+    job = {
+      id: jobId,
+      key,
+      input,
+      meta,
+      request,
+      dir: `${root}/${jobId}`,
+      viewers: new Map(),
+      last: Date.now(),
+      offsetMs: Math.floor(positionMs / 4000) * 4000,
+      producedMs: Math.floor(positionMs / 4000) * 4000,
+    };
+    jobs.set(jobId, job);
+    try {
+      await mkdir(job.dir, { recursive: true });
+      start(job, process.env.TRANSCODER_ENCODER ?? 'cpu');
+    } catch (error) {
+      await drop(job);
+      throw error;
+    }
+  }
+  if (
+    typeof body.viewer !== 'string' ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(body.viewer)
+  )
+    throw Error('Invalid viewer');
+  job.viewers.set(body.viewer, { positionMs, at: Date.now() });
+  job.last = Date.now();
+  if (job.paused && job.producedMs < maximumPosition(job) + 120000) {
+    job.child?.kill('SIGCONT');
+    job.paused = false;
+  }
+  for (let i = 0; i < 300; i++) {
+    if (job.error) throw Error(job.error);
+    const playlist = await readFile(`${job.dir}/index.m3u8`, 'utf8').catch(
+      () => ''
+    );
+    if (playlist.includes('.m4s') && playlist.includes('#EXTINF:')) {
+      job.ready = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!job.ready) {
+    const error = Error('Conversion is still starting; retry shortly');
+    error.status = 503;
+    throw error;
+  }
+  return { id: job.id, mode: job.mode, offsetMs: job.offsetMs, meta };
+}
+export function createServer() {
+  return http.createServer(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!authorized(req)) {
+      res.writeHead(401).end();
+      return;
+    }
+    try {
+      const url = new URL(req.url, 'http://worker');
+      const send = (body) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(body));
+      };
+      if (req.method === 'GET' && url.pathname === '/health')
+        return send({
+          ok: true,
+          cacheBytes,
+          maxCacheBytes: maxBytes,
+          maxJobs: limit,
+          jobs: [...jobs.values()].map((j) => ({
+            id: j.id,
+            mode: j.mode,
+            encoder: j.encoder,
+            viewers: j.viewers.size,
+            producedMs: j.producedMs,
+            speed: j.speed,
+            error: j.error,
+          })),
+        });
+      if (req.method === 'POST' && url.pathname === '/probe')
+        return send(await probe(inputUrl((await json(req)).input)));
+      if (req.method === 'POST' && url.pathname === '/subtitle') {
+        const body = await json(req);
+        const input = inputUrl(body.input);
+        const meta = await probe(input);
+        if (
+          !meta.tracks.some(
+            (t) =>
+              t.type === 'subtitle' &&
+              t.index === body.index &&
+              ['subrip', 'webvtt', 'mov_text', 'text'].includes(t.codec)
+          )
+        )
+          throw Error('Unknown text subtitle');
+        const key = hash([input, body.index]);
+        if (!subtitles.has(key)) {
+          if (subtitleJobs >= 2) {
+            const error = Error('Subtitle extraction capacity reached');
+            error.status = 503;
+            throw error;
+          }
+          subtitleJobs++;
+          const task = exec(
+            'ffmpeg',
+            [
+              '-v',
+              'error',
+              '-i',
+              input,
+              '-map',
+              `0:${body.index}`,
+              '-f',
+              'webvtt',
+              'pipe:1',
+            ],
+            { timeout: 60000, maxBuffer: 8 * 1024 * 1024 }
+          )
+            .then((result) => result.stdout)
+            .catch(() => {
+              subtitles.delete(key);
+              throw Error('Subtitle extraction failed');
+            })
+            .finally(() => subtitleJobs--);
+          subtitles.set(key, task);
+          if (subtitles.size > 16)
+            subtitles.delete(subtitles.keys().next().value);
+        }
+        const stdout = await subtitles.get(key);
+        res.setHeader('Content-Type', 'text/vtt');
+        res.end(stdout);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/prepare') {
+        const body = await json(req);
+        // Serialize admission so simultaneous requests cannot exceed the job limit.
+        const previous = pending.get('prepare') ?? Promise.resolve();
+        const task = previous.catch(() => {}).then(() => prepare(body));
+        pending.set('prepare', task);
+        try {
+          return send(await task);
+        } finally {
+          if (pending.get('prepare') === task) pending.delete('prepare');
+        }
+      }
+      const match = /^\/jobs\/([A-Za-z0-9_-]+)(?:\/([\w.-]+))?$/.exec(
+        url.pathname
+      );
+      const job = match && jobs.get(match[1]);
+      if (!job) {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.method === 'POST' && match[2] === 'touch') {
+        const body = await json(req);
+        if (!job.viewers.has(body.viewer)) {
+          res.writeHead(403).end();
+          return;
+        }
+        if (body.release) job.viewers.delete(body.viewer);
+        else if (Number.isFinite(body.positionMs))
+          job.viewers.set(body.viewer, {
+            positionMs: body.positionMs,
+            at: Date.now(),
+          });
+        job.last = Date.now();
+        if (job.paused && job.producedMs < maximumPosition(job) + 120000) {
+          job.child?.kill('SIGCONT');
+          job.paused = false;
+        }
+        return send({ ok: true });
+      }
+      if (
+        req.method === 'GET' &&
+        /^(index\.m3u8|init\.mp4|segment-\d+\.m4s)$/.test(match[2] ?? '')
+      ) {
+        if (job.error) throw Error(job.error);
+        const file = `${job.dir}/${match[2]}`;
+        const size = await stat(file);
+        res.setHeader(
+          'Content-Type',
+          match[2].endsWith('.m3u8')
+            ? 'application/vnd.apple.mpegurl'
+            : 'video/mp4'
+        );
+        res.setHeader('Content-Length', size.size);
+        await pipeline(createReadStream(file), res);
+        return;
+      }
+      res.writeHead(404).end();
+    } catch (error) {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.writeHead(error.status ?? 400, {
+        'Content-Type': 'application/json',
+      });
+      // Native errors may contain source URLs. Expose only our explicit errors.
+      const message =
+        error.code || error.cmd ? 'Media operation failed' : error.message;
+      res.end(JSON.stringify({ error: message }));
+    }
+  });
+}
+async function sweep() {
+  let bytes = 0;
+  for (const job of [...jobs.values()]) {
+    for (const [viewer, state] of job.viewers)
+      if (Date.now() - state.at > 60000) job.viewers.delete(viewer);
+    if (!job.viewers.size && Date.now() - job.last > 60000) {
+      await drop(job);
+      continue;
+    }
+    const files = await readdir(job.dir).catch(() => []);
+    for (const file of files)
+      bytes += (await stat(`${job.dir}/${file}`).catch(() => ({ size: 0 })))
+        .size;
+  }
+  cacheBytes = bytes;
+  if (bytes > maxBytes)
+    for (const job of [...jobs.values()].sort((a, b) => a.last - b.last)) {
+      job.error = 'Segment cache capacity reached';
+      stop(job);
+      await rm(job.dir, { recursive: true, force: true });
+    }
+}
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  if (secret.length < 32)
+    throw Error('TRANSCODER_SECRET must contain at least 32 characters');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const server = createServer();
+  server.listen(Number(process.env.PORT ?? 3100), '0.0.0.0');
+  const timer = setInterval(() => void sweep().catch(() => {}), 5000);
+  timer.unref();
+  for (const signal of ['SIGTERM', 'SIGINT'])
+    process.on(signal, () => {
+      clearInterval(timer);
+      for (const j of jobs.values()) stop(j);
+      server.close(() => process.exit());
+      setTimeout(() => process.exit(), 5000).unref();
+    });
+}

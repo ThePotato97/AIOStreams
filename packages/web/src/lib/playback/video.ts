@@ -42,7 +42,8 @@ interface FileTrack {
  * the user adds are text tracks after them.
  */
 export function videoEngine(
-  video: React.RefObject<HTMLVideoElement | null>
+  video: React.RefObject<HTMLVideoElement | null>,
+  attach?: (video: HTMLVideoElement, url: string) => void
 ): EngineFactory {
   return (emit) => {
     let file: EngineFile | null = null;
@@ -217,7 +218,8 @@ export function videoEngine(
         onFullscreen();
         el.autoplay = !next.paused;
         if (next.paused) set({ paused: true });
-        el.src = next.url;
+        if (attach) attach(el, next.url);
+        else el.src = next.url;
       },
       // Browsers keep a closed player in their media controls until its video drops the stream.
       close() {

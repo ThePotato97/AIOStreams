@@ -1,3 +1,4 @@
+import { GuestInvite } from '../../lib/guest/host';
 import React from 'react';
 import { plural, t } from '@lingui/core/macro';
 import { Trans } from '@lingui/react/macro';
@@ -741,6 +742,7 @@ function Invite({ state }: { state: PartyState }) {
   const relay = relayHost(state.invite.relay);
   return (
     <Section name="invite" title={t`Invite`}>
+      <GuestInvite />
       <div className="rounded-xl bg-white/5 p-4 text-center">
         <p
           data-ui="party-code"

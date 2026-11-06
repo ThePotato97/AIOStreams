@@ -1,3 +1,4 @@
+import { guestSessions } from '../guest/sessions.js';
 import type { IncomingMessage, Server as HttpServer } from 'http';
 import type { Duplex } from 'stream';
 import { createHmac, randomBytes } from 'crypto';
@@ -114,6 +115,7 @@ interface SavedParty extends Omit<Party, 'id' | 'group' | 'seats'> {
 }
 
 interface Conn {
+  guestRevoke?: () => void;
   ws: WebSocket;
   id: string;
   address: string;
@@ -580,11 +582,13 @@ function unseat(conn: Conn | null | undefined, closeCode?: number): void {
 }
 
 function close(party: Party, tx: SharedTx, reason: PartyCloseReason): void {
+  guestSessions.revokeParty(party.id);
   tx.send(everyone(party), encode({ t: 'closed', reason }), RESEAT);
   tx.drop();
 }
 
 function removeSeat(party: Party, tx: SharedTx, seat: Seat): void {
+  guestSessions.revokeMember(party.id, seat.id);
   if (!party.seats.delete(seat.id)) return;
   party.group.leave(seat.id);
   if (!party.seats.size) return tx.drop();
@@ -666,6 +670,11 @@ async function join(
   m: Extract<PartyClientMessage, { t: 'join' | 'resume' }>
 ): Promise<void> {
   if (!addresses.join(conn.address)) return refuse(conn, 'rate');
+  if (
+    m.token?.startsWith('guest.') &&
+    (!appConfig.party.guestStreaming || !guestSessions.get(m.token))
+  )
+    return refuse(conn, 'denied');
   localOf(m.party);
   try {
     const [found, entries] = await Promise.all([
@@ -687,6 +696,16 @@ async function join(
     }
     const chat = chatOf(entries);
     const seatId = held?.id ?? randomId();
+    const guest = guestSessions.get(m.token ?? '');
+    if (guest) {
+      if (guest.party !== m.party || (guest.member && guest.member !== seatId))
+        return refuse(conn, 'denied');
+      guest.member = seatId;
+      conn.guestRevoke?.();
+      conn.guestRevoke = guestSessions.onRevoke(guest.token, () =>
+        conn.ws.close(4000)
+      );
+    }
     const replaced = seatHere(conn, m.party, seatId);
     const result = await settled(conn, () =>
       parties.update(m.party, (party, tx) => {
@@ -765,7 +784,15 @@ async function barredFrom(
   token: string | undefined,
   member = false
 ): Promise<PartyErrorCode | null> {
-  if (relayMode() === 'off' && !(await userOf(token))) return 'denied';
+  if (
+    relayMode() === 'off' &&
+    !(
+      appConfig.party.guestStreaming &&
+      guestSessions.get(token ?? '')?.party === party.id
+    ) &&
+    !(await userOf(token))
+  )
+    return 'denied';
   return barredIn(party, conn, member);
 }
 
@@ -1032,6 +1059,7 @@ function run(conn: Conn, m: PartyClientMessage): void {
 
 /** The connection dropped; its seat waits a while for it to come back. */
 function dropped(conn: Conn): void {
+  conn.guestRevoke?.();
   clearTimeout(conn.hello);
   addresses.disconnect(conn.address);
   if (!conn.party || stopping) return unseat(conn);
@@ -1231,4 +1259,21 @@ export function attachPartyRelay(server: HttpServer): void {
     );
   });
   logger.debug('party relay attached');
+}
+
+/** Narrow view used by guest streaming; encrypted queue refs remain encrypted. */
+export async function guestPartyState(id: string) {
+  const party = await parties.get(id);
+  if (!party || party.expiresAt <= Date.now()) return null;
+  return {
+    id: party.id,
+    host: party.host,
+    expiresAt: party.expiresAt,
+    homeUuid: party.home?.uuid,
+    joinsClosed: party.lock.joins,
+    playing:
+      party.group.stateType === 'Idle' ? null : party.group.queue.playing(),
+    queue: party.group.queue.items,
+    members: [...party.seats.values()].map((s) => ({ id: s.id, key: s.key })),
+  };
 }

@@ -204,9 +204,9 @@ export function relayHost(relay: string): string {
 class Session {
   state: PartyState;
   readonly connection: RelayConnection;
-  private seat?: string;
+  seat?: string;
   private ticket?: string;
-  private hostTicket?: string;
+  hostTicket?: string;
   /** What the party played last, which brings it back after the relay restarts. */
   private resumeState?: PartyResumeState;
   private resuming = false;
@@ -685,6 +685,17 @@ async function enter(
 
 export const party = {
   state: (): PartyState | null => session?.state ?? null,
+  hostProof: () =>
+    session?.seat &&
+    session.hostTicket &&
+    session.state.you === session.state.host
+      ? {
+          party: session.keys.id,
+          member: session.state.you!,
+          seat: session.seat,
+          ticket: session.hostTicket,
+        }
+      : null,
   clock: () => session?.connection.clock ?? null,
 
   start: (relay: string, identity: PartyIdentity) =>

@@ -104,3 +104,11 @@ export type {
   RunPlayChainConfig,
   RunPlayChainResult,
 } from './main/failover.js';
+
+export type {
+  GuestTrack,
+  GuestMedia,
+  GuestCapabilities,
+  GuestPlaybackRequest,
+  GuestPlayback,
+} from './guest.js';

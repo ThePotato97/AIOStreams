@@ -441,3 +441,30 @@ export function SessionProvider({
 export function isUnauthorized(error: unknown): boolean {
   return error instanceof JellyfinError && error.status === 401;
 }
+
+/** Context for shared controls only; guests never synchronize account preferences. */
+export function GuestSessionProvider({
+  client,
+  name,
+  children,
+  onLeave,
+}: {
+  client: JellyfinClient;
+  name: string;
+  children: React.ReactNode;
+  onLeave(): void;
+}) {
+  const value = React.useMemo(
+    () => ({
+      client,
+      user: { Id: 'guest', Name: name },
+      clientFor: async () => client,
+      switchUser: onLeave,
+      signOut: onLeave,
+    }),
+    [client, name, onLeave]
+  );
+  return (
+    <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
+  );
+}

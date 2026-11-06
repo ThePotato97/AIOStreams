@@ -1,3 +1,4 @@
+import { useGuestPublication } from '../../lib/guest/host';
 import { t } from '@lingui/core/macro';
 import { toast } from 'sonner';
 import { useHeldInvites } from '../../lib/party/actions';
@@ -14,6 +15,7 @@ const onPlayer = () => /^#\/play\//.test(window.location.hash);
 
 /** What a party needs whatever page is open. Once, in the layout. */
 export function PartyHost() {
+  useGuestPublication();
   useHeldInvites((invite) => openPartySheet({ invite }));
   // The video is what someone joining came for.
   usePartyFollow(closePartySheet);

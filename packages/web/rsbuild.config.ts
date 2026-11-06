@@ -144,6 +144,8 @@ export default defineConfig(async ({ envMode }) => {
       port: devServerPort,
       proxy: {
         '/api': backendBaseUrl,
+        '/party': { target: backendBaseUrl, ws: true },
+        '/watch': { target: backendBaseUrl, bypass: () => '/index.html' },
         '/jellyfin': {
           target: backendBaseUrl,
           // The context matches by prefix, so it also catches this app's own assets.

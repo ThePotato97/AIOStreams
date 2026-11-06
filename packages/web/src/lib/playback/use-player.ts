@@ -258,7 +258,8 @@ export function usePlayer(
       case 'chapters':
         return setChapters(event.chapters);
       case 'loaded': {
-        patch({ loaded: true });
+        patch({ loaded: true, error: null });
+        setRetry(undefined);
         const { tracks, audio, subtitle } = live.current;
         const shown = shownSubtitle(tracks, subtitle, retimed);
         const picks = chooseTracks(

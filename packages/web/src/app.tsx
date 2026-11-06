@@ -1,3 +1,4 @@
+import { GuestPage } from './pages/guest';
 import React from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import { RouterProvider } from '@tanstack/react-router';
@@ -78,7 +79,13 @@ export default function JellyfinWebApp() {
           <InputSetup router={webRouter} />
           {shellHost() && <ShellSetup />}
           {currentHost().name === 'desktop' && <WindowControls />}
-          {__STANDALONE__ ? <Standalone /> : <Served />}
+          {!__STANDALONE__ && /\/watch\/?$/.test(window.location.pathname) ? (
+            <GuestPage />
+          ) : __STANDALONE__ ? (
+            <Standalone />
+          ) : (
+            <Served />
+          )}
         </MotionConfig>
       </ThemeProvider>
     </DirectionProvider>

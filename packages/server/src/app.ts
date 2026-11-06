@@ -44,6 +44,7 @@ import publicCommunityRouter from './routes/community.js';
 import webdavRouter from './routes/webdav.js';
 import { createJellyfinRouter } from './routes/jellyfin/index.js';
 import partyRouter from './party/routes.js';
+import guestRouter from './guest/routes.js';
 import { createNabRouter } from './routes/api/nab.js';
 import {
   gdrive,
@@ -252,7 +253,14 @@ app.use('/jellyfin/p/:code', jellyfinRouter);
 app.use('/jellyfin/u/:alias', jellyfinRouter);
 app.use('/jellyfin/:uuid/:encryptedPassword', jellyfinRouter);
 app.use('/jellyfin', jellyfinRouter);
+app.use('/party/guest', guestRouter);
 app.use('/party', partyRouter);
+app.get('/watch', (_req, res) => {
+  res
+    .set('Cache-Control', 'no-store')
+    .set('Referrer-Policy', 'no-referrer')
+    .sendFile(path.join(jellyfinWebRoot, 'index.html'));
+});
 
 // Content-hashed build assets. These filenames change on every content
 // change, so they are immutable and safe to cache aggressively. Deliberately
