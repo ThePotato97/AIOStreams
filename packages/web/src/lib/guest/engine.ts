@@ -32,6 +32,8 @@ export function guestEngine(
     let audio: number | undefined, subtitle: number | undefined;
     let paused = true,
       preparing = false;
+    /** Where the in-flight prepare should start playing; seeks move it. */
+    let target = 0;
     const position = () =>
       (video.current?.currentTime ?? 0) * 1000 + (playback?.offsetMs ?? 0);
     const listTracks = () => {
@@ -126,6 +128,7 @@ export function guestEngine(
       controller?.abort();
       controller = new AbortController();
       preparing = true;
+      target = positionMs;
       emit({ type: 'state', state: { waiting: true, loaded: false } });
       raw.setPaused(true);
       const info = current();
@@ -159,7 +162,7 @@ export function guestEngine(
         raw.load({
           ...file,
           url: new URL(result.url, window.location.href).href,
-          startMs: Math.max(0, positionMs - result.offsetMs),
+          startMs: Math.max(0, target - result.offsetMs),
           paused,
           subtitles: track,
         });
@@ -215,7 +218,14 @@ export function guestEngine(
         void prepare(next.startMs);
       },
       seek(ms) {
-        if (preparing) return;
+        if (preparing) {
+          // A small move just changes where the prepared stream starts (the
+          // companion reuses a job up to 8 s past what it has produced); a
+          // larger one needs a prepare at the new position.
+          if (Math.abs(ms - target) <= 8000) target = ms;
+          else void prepare(ms);
+          return;
+        }
         const local = ms - (playback?.offsetMs ?? 0);
         const el = video.current;
         const available =

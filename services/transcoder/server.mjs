@@ -156,7 +156,8 @@ async function prepare(body) {
     !['original', '1080p', '720p'].includes(request.quality) ||
     !Number.isFinite(request.positionMs) ||
     request.positionMs < 0 ||
-    request.positionMs > meta.durationMs + 4000
+    // Some sources report no duration (0); don't bound those.
+    (meta.durationMs > 0 && request.positionMs > meta.durationMs + 4000)
   )
     throw Error('Invalid playback request');
   if (
@@ -401,6 +402,7 @@ export function createServer() {
 }
 async function sweep() {
   let bytes = 0;
+  const sizes = new Map();
   for (const job of [...jobs.values()]) {
     for (const [viewer, state] of job.viewers)
       if (Date.now() - state.at > 60000) job.viewers.delete(viewer);
@@ -409,17 +411,22 @@ async function sweep() {
       continue;
     }
     const files = await readdir(job.dir).catch(() => []);
+    let size = 0;
     for (const file of files)
-      bytes += (await stat(`${job.dir}/${file}`).catch(() => ({ size: 0 })))
+      size += (await stat(`${job.dir}/${file}`).catch(() => ({ size: 0 })))
         .size;
+    sizes.set(job, size);
+    bytes += size;
+  }
+  // Evict the least recently used jobs, only until the cache fits again.
+  for (const job of [...sizes.keys()].sort((a, b) => a.last - b.last)) {
+    if (bytes <= maxBytes) break;
+    job.error = 'Segment cache capacity reached';
+    stop(job);
+    await rm(job.dir, { recursive: true, force: true });
+    bytes -= sizes.get(job);
   }
   cacheBytes = bytes;
-  if (bytes > maxBytes)
-    for (const job of [...jobs.values()].sort((a, b) => a.last - b.last)) {
-      job.error = 'Segment cache capacity reached';
-      stop(job);
-      await rm(job.dir, { recursive: true, force: true });
-    }
 }
 if (
   process.argv[1] &&

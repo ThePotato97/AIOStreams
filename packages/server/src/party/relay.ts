@@ -697,56 +697,75 @@ async function join(
     const chat = chatOf(entries);
     const seatId = held?.id ?? randomId();
     const guest = guestSessions.get(m.token ?? '');
+    // A guest session holds one seat. It claims the seat before the update so
+    // a concurrent join with the same token is refused, and gives the claim
+    // back if the party turns it away (full, locked, ...).
+    const claimed = !!guest && !guest.member;
     if (guest) {
       if (guest.party !== m.party || (guest.member && guest.member !== seatId))
         return refuse(conn, 'denied');
       guest.member = seatId;
-      conn.guestRevoke?.();
-      conn.guestRevoke = guestSessions.onRevoke(guest.token, () =>
-        conn.ws.close(4000)
-      );
     }
+    const unclaim = () => {
+      if (claimed && guest?.member === seatId) guest.member = undefined;
+    };
     const replaced = seatHere(conn, m.party, seatId);
-    const result = await settled(conn, () =>
-      parties.update(m.party, (party, tx) => {
-        const seat = party.seats.get(seatId);
-        if (seat && held && seat.key === seatKey) {
+    let result;
+    try {
+      result = await settled(conn, () =>
+        parties.update(m.party, (party, tx) => {
+          const seat = party.seats.get(seatId);
+          if (seat && held && seat.key === seatKey) {
+            return changing(
+              party,
+              tx,
+              () => {
+                seat.at = store.replica;
+                seat.conn = conn.id;
+                seat.awayUntil = undefined;
+                seat.offsetMs = undefined;
+                seat.name = m.name;
+                seat.avatar = m.avatar;
+                party.group.rejoin(seat.id);
+                return 'ok' as const;
+              },
+              { chat }
+            );
+          }
+          const barred = barredIn(party, conn, m.t === 'resume');
+          if (barred) return barred;
+          if (party.seats.size >= PARTY_LIMITS.members) return 'full';
           return changing(
             party,
             tx,
             () => {
-              seat.at = store.replica;
-              seat.conn = conn.id;
-              seat.awayUntil = undefined;
-              seat.offsetMs = undefined;
-              seat.name = m.name;
-              seat.avatar = m.avatar;
-              party.group.rejoin(seat.id);
+              const seat = newSeat(conn, seatId, m);
+              party.seats.set(seat.id, seat);
+              if (m.t === 'resume' && m.host)
+                claimHost(party, tx, seat, m.host);
+              party.group.join(groupMember(seat.id));
               return 'ok' as const;
             },
             { chat }
           );
-        }
-        const barred = barredIn(party, conn, m.t === 'resume');
-        if (barred) return barred;
-        if (party.seats.size >= PARTY_LIMITS.members) return 'full';
-        return changing(
-          party,
-          tx,
-          () => {
-            const seat = newSeat(conn, seatId, m);
-            party.seats.set(seat.id, seat);
-            if (m.t === 'resume' && m.host) claimHost(party, tx, seat, m.host);
-            party.group.join(groupMember(seat.id));
-            return 'ok' as const;
-          },
-          { chat }
-        );
-      })
-    );
+        })
+      );
+    } catch (error) {
+      unclaim();
+      throw error;
+    }
     if (result !== 'ok') {
+      unclaim();
       unseat(conn);
       return refuse(conn, result ?? 'not-found');
+    }
+    if (guest) {
+      conn.guestRevoke?.();
+      conn.guestRevoke = guestSessions.onRevoke(guest.token, () =>
+        conn.ws.close(4000)
+      );
+      // Revoked while the update was running.
+      if (!guestSessions.get(guest.token)) conn.ws.close(4000);
     }
     unseat(replaced, 4000);
   } finally {

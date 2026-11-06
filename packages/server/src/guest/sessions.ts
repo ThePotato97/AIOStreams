@@ -2,6 +2,8 @@ import { randomBytes, createHash } from 'node:crypto';
 
 export const randomSecret = () => randomBytes(32).toString('base64url');
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
+const status = (code: number, message: string) =>
+  Object.assign(new Error(message), { status: code });
 export interface GuestSession {
   token: string;
   party: string;
@@ -37,10 +39,26 @@ export class GuestSessions {
     this.listeners.delete(key);
   }
   private sessions = new Map<string, GuestSession>();
-  create(party: string, expiresAt: number): GuestSession {
+  /**
+   * One party may hold at most `perParty` sessions. At that limit the oldest
+   * session that never joined is dropped, so one invite holder cannot fill the
+   * server or lock other guests out of their own party.
+   */
+  create(party: string, expiresAt: number, perParty = 64): GuestSession {
     this.sweep();
+    let count = 0;
+    let unjoined: string | undefined;
+    for (const [key, session] of this.sessions)
+      if (session.party === party) {
+        count++;
+        if (!session.member) unjoined ??= key;
+      }
+    if (count >= perParty) {
+      if (!unjoined) throw status(403, 'This party is closed or full');
+      this.remove(unjoined);
+    }
     if (this.sessions.size >= 16000)
-      throw new Error('Guest session capacity reached');
+      throw status(503, 'Guest session capacity reached; retry later');
     const token = `guest.${randomSecret()}`;
     const session = { token, party, expiresAt };
     this.sessions.set(digest(token), session);

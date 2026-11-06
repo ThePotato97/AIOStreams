@@ -17,6 +17,8 @@ const fixture = vi.hoisted(() => ({
   members: [{ id: 'host', key: 'h'.repeat(22) }],
   prepares: [] as { resolve(): void }[],
   slow: false,
+  noSources: false,
+  memoCalls: 0,
 }));
 vi.mock('@aiostreams/core', () => ({
   config: {
@@ -61,18 +63,23 @@ vi.mock('../party/ticket.js', () => ({
 }));
 vi.mock('../routes/jellyfin/playback.js', () => ({
   locate: async () => ({}),
-  ensureMemo: async () => ({
-    sources: [
-      {
-        msid: 'source',
-        url: 'https://provider.invalid/private-token',
-        filename: 'episode.mkv',
-        container: 'mkv',
-        subtitles: [],
-        extension: { bingeGroup: 'series' },
-      },
-    ],
-  }),
+  ensureMemo: async () => (
+    ++fixture.memoCalls,
+    {
+      sources: fixture.noSources
+        ? []
+        : [
+            {
+              msid: 'source',
+              url: 'https://provider.invalid/private-token',
+              filename: 'episode.mkv',
+              container: 'mkv',
+              subtitles: [],
+              extension: { bingeGroup: 'series' },
+            },
+          ],
+    }
+  ),
 }));
 import guestRouter from './routes.js';
 import { guestSessions } from './sessions.js';
@@ -162,6 +169,8 @@ beforeEach(() => {
   fixture.playing = { ref: 'encrypted-title', playlistItemId: 'b'.repeat(32) };
   fixture.slow = false;
   fixture.prepares = [];
+  fixture.noSources = false;
+  fixture.memoCalls = 0;
 });
 describe('guest playback authorization', () => {
   it('requires host credentials and rejects malformed invitations', async () => {
@@ -281,5 +290,19 @@ describe('guest playback authorization', () => {
     expect((await second).status).toBe(200);
     fixture.prepares[0].resolve();
     expect((await first).status).toBe(409);
+  });
+  it('does not re-resolve a failed source on every poll', async () => {
+    fixture.noSources = true;
+    const secret = await invitation(),
+      token = await guest(secret);
+    join(token);
+    expect((await api('/current', token)).status).toBe(404);
+    expect((await api('/current', token)).status).toBe(404);
+    expect(fixture.memoCalls).toBe(1);
+    // Publishing again (e.g. the host re-selected a source) retries at once.
+    fixture.noSources = false;
+    await invitation();
+    expect((await api('/current', token)).status).toBe(200);
+    expect(fixture.memoCalls).toBe(2);
   });
 });
