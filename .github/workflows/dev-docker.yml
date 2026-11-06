@@ -118,7 +118,6 @@ jobs:
         with:
           name: ${{ matrix.image }}-${{ matrix.suffix }}
           path: /tmp/digests/${{ matrix.suffix }}
-          archive: false
           retention-days: 1
 
   merge:
@@ -135,8 +134,11 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: ${{ matrix.image }}-*
-          merge-multiple: true
+          name: ${{ matrix.image }}-amd64
+      - uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          name: ${{ matrix.image }}-arm64
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
