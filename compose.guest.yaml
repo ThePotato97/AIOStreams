@@ -15,8 +15,7 @@ services:
         condition: service_healthy
   transcoder:
     build:
-      context: .
-      dockerfile: services/transcoder/Dockerfile
+      context: services/transcoder
     restart: unless-stopped
     environment:
       TRANSCODER_SECRET: ${PARTY_TRANSCODER_SECRET:?Set PARTY_TRANSCODER_SECRET in .env}
