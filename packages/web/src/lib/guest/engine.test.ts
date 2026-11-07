@@ -245,6 +245,41 @@ describe('which player opens the stream', () => {
   });
 });
 
+describe('buffering', () => {
+  it("keeps Shaka's buffering rate of 0 out of the viewer's speed", async () => {
+    const { engine, events } = setup();
+    await start(engine);
+    const before = events.length;
+    fakes.raw!.emit({ type: 'state', state: { rate: 0 } });
+    fakes.raw!.emit({ type: 'state', state: { rate: 1.5 } });
+    const rates = events
+      .slice(before)
+      .map((e) => (e as { state?: { rate?: number } }).state?.rate);
+    expect(rates).toEqual([undefined, 1.5]);
+  });
+  it('shows Shaka buffering as waiting', async () => {
+    const { engine, events } = setup();
+    await start(engine);
+    const buffering = (on: boolean) =>
+      player().dispatchEvent(
+        Object.assign(new Event('buffering'), { buffering: on })
+      );
+    buffering(true);
+    buffering(false);
+    expect(events.slice(-2)).toEqual([
+      { type: 'state', state: { waiting: true } },
+      { type: 'state', state: { waiting: false } },
+    ]);
+  });
+  it('passes a rate of 0 on for the original file', async () => {
+    mode = 'direct';
+    const { engine, events } = setup();
+    await start(engine);
+    fakes.raw!.emit({ type: 'state', state: { rate: 0 } });
+    expect(events.at(-1)).toEqual({ type: 'state', state: { rate: 0 } });
+  });
+});
+
 describe('seeking in a converted stream', () => {
   // The live manifest's seekable range follows the clock: 40 s to 78 s,
   // though segments to 148 s are written.

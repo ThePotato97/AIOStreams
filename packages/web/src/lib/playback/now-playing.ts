@@ -267,7 +267,8 @@ export function useNowPlaying(
       session.setPositionState({
         duration: durationMs / 1000,
         position: Math.min(positionMs, durationMs) / 1000,
-        playbackRate: rate,
+        // Media Session refuses 0, which a player can report while it buffers.
+        playbackRate: rate || 1,
       });
     };
     tell();

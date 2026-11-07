@@ -238,6 +238,9 @@ export function guestEngine(
           state.audio = audio == null ? null : String(audio);
         if (state.subtitle !== undefined)
           state.subtitle = subtitle == null ? null : String(subtitle);
+        // Shaka holds playback while buffering by setting the rate to 0; the
+        // viewer's speed is unchanged, and buffering shows as waiting.
+        if (player && state.rate === 0) delete state.rate;
         return emit({ type: 'state', state });
       }
       if (event.type === 'loaded') listTracks();
@@ -278,6 +281,11 @@ export function guestEngine(
           if (error.severity !== CRITICAL || interrupted(error)) return;
           handled.add(error);
           recover(shakaFailure(error));
+        });
+        next.addEventListener('buffering', (event) => {
+          if (at !== generation || player !== next) return;
+          const { buffering } = event as Event & { buffering?: boolean };
+          emit({ type: 'state', state: { waiting: !!buffering } });
         });
         // Recoveries are counted again once the stream plays on.
         next.addEventListener('segmentappended', () => {
