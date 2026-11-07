@@ -4,7 +4,10 @@
 
 pub mod complex;
 pub mod direct;
+pub mod filterbank;
+pub mod objects;
 pub mod qmf;
+pub mod render;
 mod qmf_window;
 pub mod room;
 pub mod tuning;

@@ -196,8 +196,10 @@ pub fn input_gains(t: &Tuning, pos: [f32; 3], mode: Mode, gain: f32) -> InputGai
     let (tau, far) = itd(t, &geo, mode);
     if let Some(ear) = far {
         for b in 0..ITD_BANDS {
-            // e^(-j w_b tau), w_b < 0: a delay in this filterbank's convention
-            out.ears[ear][b] = out.ears[ear][b] * C32::cis(-t.itd_omega[b] * tau);
+            // e^(+j w_b tau) with w_b < 0. Through DAP-VR's filterbank this is the delay; the notes'
+            // e^(-j w_b tau) advances the farther ear instead (test in render.rs). To confirm in
+            // hpv_itd_phase_ramp.
+            out.ears[ear][b] = out.ears[ear][b] * C32::cis(t.itd_omega[b] * tau);
         }
     }
     let sends = !(mode == Mode::Near && t.near_send_off);
