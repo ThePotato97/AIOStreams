@@ -45,37 +45,72 @@ describe('HDR video', () => {
       },
     ],
   } as unknown as Parameters<typeof browserCapabilities>[0];
-  const browser = (userAgent: string, hdrDisplay: boolean) => {
+  /**
+   * A browser: whether it says it plays PQ HDR video (null: it rejects the
+   * question; undefined: no Media Capabilities at all), and its screen.
+   */
+  const browser = (pq: boolean | null | undefined, hdrScreen: boolean) => {
     vi.stubGlobal('document', {
       createElement: () => ({ canPlayType: () => 'probably' }),
     });
-    vi.stubGlobal('navigator', { userAgent });
-    vi.stubGlobal('matchMedia', () => ({ matches: hdrDisplay }));
+    const asked: unknown[] = [];
+    vi.stubGlobal('navigator', {
+      mediaCapabilities:
+        pq === undefined
+          ? undefined
+          : {
+              decodingInfo: async (config: {
+                video?: { transferFunction?: string };
+              }) => {
+                asked.push(config);
+                if (!config.video?.transferFunction) return { supported: true };
+                if (pq === null) throw new TypeError('Unsupported field');
+                return { supported: pq };
+              },
+            },
+    });
+    vi.stubGlobal('matchMedia', () => ({ matches: hdrScreen }));
+    return asked;
   };
-  const chrome =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
-  const firefox =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0';
   afterEach(() => vi.unstubAllGlobals());
 
-  it('plays as it is on an SDR display where the browser tone-maps it', async () => {
-    browser(chrome, false);
+  it('plays as it is where the browser says it plays PQ, on an SDR screen too', async () => {
+    browser(true, false);
     expect((await browserCapabilities(media)).hdr).toBe(true);
   });
-  it('is tone-mapped by the server for Firefox on an SDR display', async () => {
-    browser(firefox, false);
+  it('is tone-mapped by the server where the browser says it does not', async () => {
+    browser(false, true);
     expect((await browserCapabilities(media)).hdr).toBe(false);
   });
-  it('plays as it is on an HDR display, Firefox included', async () => {
-    browser(firefox, true);
-    expect((await browserCapabilities(media)).hdr).toBe(true);
+  it('asks about PQ with the rec2020 gamut and the video itself', async () => {
+    const asked = browser(true, false);
+    await browserCapabilities(media);
+    expect(asked.at(-1)).toMatchObject({
+      type: 'media-source',
+      video: {
+        contentType: expect.stringContaining('hvc1.2.4'),
+        transferFunction: 'pq',
+        colorGamut: 'rec2020',
+      },
+    });
   });
-  it('is not HDR for SDR video', async () => {
-    browser(chrome, true);
+  it("goes by the screen where the browser can't be asked", async () => {
+    browser(null, true);
+    expect((await browserCapabilities(media)).hdr).toBe(true);
+    browser(null, false);
+    expect((await browserCapabilities(media)).hdr).toBe(false);
+    browser(undefined, true);
+    expect((await browserCapabilities(media)).hdr).toBe(true);
+    browser(undefined, false);
+    expect((await browserCapabilities(media)).hdr).toBe(false);
+  });
+  it('is not HDR for SDR video, and does not ask', async () => {
+    const asked = browser(true, true);
     const sdr = {
       ...media,
       tracks: [{ ...media.tracks[0], hdr: false }],
     } as typeof media;
     expect((await browserCapabilities(sdr)).hdr).toBe(false);
+    expect(asked.some((c) => JSON.stringify(c).includes('pq'))).toBe(false);
   });
 });

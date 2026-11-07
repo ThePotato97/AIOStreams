@@ -97,34 +97,38 @@ export async function browserCapabilities(
         MediaSource.isTypeSupported(type)));
   let videoSupport = supports(videoType),
     audioSupport = !audio || supports(audioType);
-  const hdrDisplay =
-    !!video?.hdr && matchMedia('(dynamic-range: high)').matches;
-  // HDR video plays as it is on an HDR display, or where the browser maps it
-  // to SDR itself (Chrome, Edge, Safari). Firefox doesn't, and looks washed
-  // out, so the server tone-maps it there.
-  const hdr =
-    !!video?.hdr && (hdrDisplay || !/\bFirefox\//.test(navigator.userAgent));
+  // Whether HDR video plays as it is: the browser says so itself. The screen
+  // being in HDR mode is only the answer where the browser can't be asked.
+  const hdrScreen = () => matchMedia('(dynamic-range: high)').matches;
+  let hdr: boolean =
+    !!video?.hdr && !navigator.mediaCapabilities && hdrScreen();
   if (video && vc && navigator.mediaCapabilities) {
+    const config = {
+      contentType: videoType,
+      width: video.width ?? 1920,
+      height: video.height ?? 1080,
+      bitrate: video.bitrate || media.bitrate || 8000000,
+      framerate: video.frameRate || 24,
+    };
     try {
       const result = await navigator.mediaCapabilities.decodingInfo({
         type: 'media-source',
-        video: {
-          contentType: videoType,
-          width: video.width ?? 1920,
-          height: video.height ?? 1080,
-          bitrate: video.bitrate || media.bitrate || 8000000,
-          framerate: video.frameRate || 24,
-          ...(hdrDisplay
-            ? {
-                colorGamut: 'rec2020' as const,
-                transferFunction: 'pq' as const,
-              }
-            : {}),
-        },
+        video: config,
       });
       videoSupport = videoSupport && result.supported;
     } catch {
       /* Some browsers reject detailed capability requests. */
+    }
+    if (video.hdr && videoSupport) {
+      try {
+        const result = await navigator.mediaCapabilities.decodingInfo({
+          type: 'media-source',
+          video: { ...config, colorGamut: 'rec2020', transferFunction: 'pq' },
+        });
+        hdr = result.supported;
+      } catch {
+        hdr = hdrScreen();
+      }
     }
   }
   if (audio && ac && navigator.mediaCapabilities) {
