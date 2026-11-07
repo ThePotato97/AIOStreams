@@ -157,6 +157,7 @@ export function usePlayer(
   const [statsPage, setStatsPage] = React.useState<string | null>(null);
   const [statsText, setStatsText] = React.useState<string>();
   const [retry, setRetry] = React.useState<PlayerController['retry']>();
+  const [transcoderFailure, setTranscoderFailure] = React.useState(false);
   const [lift, setLift] = React.useState(0);
   const [fit] = useSetting(settings.video.fit);
   // Read on every render: an engine can hand over to another that lists
@@ -273,6 +274,7 @@ export function usePlayer(
       }
       case 'failed': {
         patch({ error: event.error });
+        setTranscoderFailure(!!event.transcoder);
         const again = event.retry;
         return setRetry(
           again && {
@@ -624,5 +626,6 @@ export function usePlayer(
     virtualSurround: engine.virtualSurround,
     fit: engine.fits,
     retry,
+    transcoderFailure,
   };
 }

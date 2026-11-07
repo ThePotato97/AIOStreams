@@ -831,7 +831,8 @@ function Player({
               item={item}
               source={source}
               message={t`Playback failed: ${failure}`}
-              onVersions={switchVersion}
+              // Another version needs the same transcoder.
+              onVersions={player.transcoderFailure ? undefined : switchVersion}
               retry={player.retry}
             />
           ) : (

@@ -149,9 +149,10 @@ before(async () => {
   const tones = [220, 330, 440, 550, 60, 770]
     .map((f) => `0.3*sin(2*PI*${f}*t)`)
     .join('|');
-  for (const [name, codec] of [
-    ['truehd', ['-c:a', 'truehd', '-strict', '-2']],
-    ['eac3', ['-c:a', 'eac3', '-b:a', '384k']],
+  for (const [name, codec, seconds] of [
+    ['truehd', ['-c:a', 'truehd', '-strict', '-2'], '6'],
+    ['eac3', ['-c:a', 'eac3', '-b:a', '384k'], '6'],
+    ['truehd-long', ['-c:a', 'truehd', '-strict', '-2'], '20'],
   ])
     await exec('ffmpeg', [
       '-v',
@@ -165,7 +166,7 @@ before(async () => {
       '-i',
       `aevalsrc=${tones}:c=5.1:s=48000`,
       '-t',
-      '6',
+      seconds,
       '-c:v',
       'libx264',
       '-preset',
@@ -176,7 +177,7 @@ before(async () => {
       `${dir}/${name}.mkv`,
     ]);
   source = createHttpServer(async (req, res) => {
-    const file = `${dir}/${req.url.includes('eac3') ? 'eac3' : 'truehd'}.mkv`;
+    const file = `${dir}/${req.url.includes('eac3') ? 'eac3' : req.url.includes('truehd-long') ? 'truehd-long' : 'truehd'}.mkv`;
     const size = (await stat(file)).size;
     const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? '');
     const start = range ? Number(range[1]) : 0,
@@ -299,6 +300,69 @@ for (const codec of ['truehd', 'eac3'])
       }
     }
   );
+
+test(
+  'real chain: a renderer that dies while playing fails the job, and the track converts without it next time',
+  { skip: !haveRenderer && 'atmos-render not installed' },
+  async () => {
+    // Passes on ~8 s of rendered audio, waits until the first segment is out, then fails.
+    const wrapper = `${dir}/dying-renderer.mjs`;
+    const { writeFile, chmod } = await import('node:fs/promises');
+    await writeFile(
+      wrapper,
+      `#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+const real = spawn(${JSON.stringify(renderer)}, process.argv.slice(2), { stdio: ['pipe', 'pipe', 'ignore'] });
+process.stdin.pipe(real.stdin);
+real.stdin.on('error', () => {});
+let sent = 0;
+real.stdout.on('data', (chunk) => {
+  if (sent >= 3_000_000) return;
+  process.stdout.write(chunk);
+  sent += chunk.length;
+  if (sent >= 3_000_000) setTimeout(() => { real.kill('SIGKILL'); process.exit(1); }, 1500);
+});
+`
+    );
+    await chmod(wrapper, 0o755);
+    const saved = process.env.ATMOS_RENDER;
+    process.env.ATMOS_RENDER = wrapper;
+    try {
+      const input = `${process.env.AIOSTREAMS_INTERNAL_URL}/party/guest/source/truehd-long`;
+      const asked = request(
+        { audio: false, binaural: true, lossless: true },
+        { positionMs: 0 }
+      );
+      const first = await call('/prepare', {
+        input,
+        viewer: 'dying-viewer-xxxxxxxx',
+        request: asked,
+      });
+      assert.equal(first.binaural, true);
+      // the job fails, rather than going on with the video alone
+      let job;
+      for (let i = 0; i < 100; i++) {
+        job = (await call('/health')).jobs.find((j) => j.id === first.id);
+        if (job?.error || job?.finished) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.equal(job?.error, 'Binaural rendering stopped');
+      // the player reconnects: the same track converts, without binaural rendering
+      const again = await call('/prepare', {
+        input,
+        viewer: 'dying-viewer-again-xx',
+        request: asked,
+      });
+      assert.notEqual(again.id, first.id);
+      assert.equal(again.binaural, false);
+      const { audio } = await finished(again.id);
+      assert.equal(audio.channels, 2);
+    } finally {
+      if (saved === undefined) delete process.env.ATMOS_RENDER;
+      else process.env.ATMOS_RENDER = saved;
+    }
+  }
+);
 
 test(
   'real chain: without the renderer, the conversion runs without binaural',

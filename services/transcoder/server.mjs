@@ -187,6 +187,13 @@ export async function drop(job) {
   await stop(job);
   await removeDir(job.dir);
 }
+/**
+ * Audio tracks whose binaural rendering failed once playing: converted
+ * without it from then on (the player's virtualiser takes over), rather than
+ * failing the same way again. Bounded; the oldest is forgotten first.
+ */
+const binauralFailed = new Set();
+const binauralKey = (job, policy) => `${job.input}#${policy.audio?.index}`;
 /** How long a binaural conversion waits for its first audio packet. */
 const AUDIO_START_TIMEOUT_MS = 60_000;
 /** Stops a binaural conversion's demuxer and renderer. */
@@ -211,7 +218,14 @@ function killHelpers(job) {
  */
 function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
   killHelpers(job);
-  const policy = select(job.meta, job.request);
+  let policy = select(job.meta, job.request);
+  if (policy.binaural && binauralFailed.has(binauralKey(job, policy))) {
+    job.request = {
+      ...job.request,
+      capabilities: { ...job.request.capabilities, binaural: false },
+    };
+    policy = select(job.meta, job.request);
+  }
   job.binaural = policy.binaural;
   if (!policy.binaural) {
     startMain(job, encoder, gpu, {});
@@ -239,7 +253,22 @@ function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
   const fail = () => {
     if (helpers.stopping || helpers.failed || job.helpers !== helpers) return;
     helpers.failed = true;
-    if (!job.ready) void withoutBinaural(job, encoder, gpu);
+    if (!job.ready) {
+      void withoutBinaural(job, encoder, gpu);
+      return;
+    }
+    // Once playing, the converting FFmpeg would carry on with the video alone
+    // and the audio would just stop. The job fails instead, so the player
+    // reconnects, and this track converts without binaural rendering.
+    binauralFailed.add(binauralKey(job, policy));
+    if (binauralFailed.size > 200)
+      binauralFailed.delete(binauralFailed.values().next().value);
+    job.error = 'Binaural rendering stopped';
+    const main = job.child;
+    if (running(main)) {
+      main.kill('SIGCONT');
+      main.kill('SIGKILL');
+    }
   };
   for (const c of [demux, renderer]) {
     c.on('error', fail);
@@ -352,7 +381,7 @@ function startMain(job, encoder, gpu, extra) {
     } else if (code !== 0 && !job.ready && job.binaural)
       // all on the CPU and still failing: without binaural rendering
       await withoutBinaural(job, encoder, gpu);
-    else if (code !== 0) job.error = 'Conversion failed';
+    else if (code !== 0) job.error ??= 'Conversion failed';
     // A clean exit well before the end: the source stopped sending.
     else if (stoppedEarly(job)) job.error = 'The source stopped before the end';
     else job.finished = true;

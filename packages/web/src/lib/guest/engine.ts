@@ -179,6 +179,10 @@ export function guestEngine(
         type: 'failed',
         error: failedMessage(failure.detail),
         retry: { label: t`Retry`, run: () => void prepare(at) },
+        // The converted stream couldn't be fetched: the server or transcoder failed.
+        transcoder:
+          failure.kind === 'network' &&
+          (failure.status == null || failure.status >= 500),
       });
     };
     /** Loads the manifest at a position; a failure goes to recovery. */
@@ -409,9 +413,10 @@ export function guestEngine(
         listTracks();
       } catch (error) {
         if (at !== generation || controller.signal.aborted) return;
-        const { status, message, retryAfter } = error as Error & {
+        const { status, message, retryAfter, code } = error as Error & {
           status?: number;
           retryAfter?: number;
+          code?: string;
         };
         // A full transcoder frees a place as viewers leave: wait for one.
         const ms = Math.max(1, retryAfter ?? 0) * 1000;
@@ -435,6 +440,7 @@ export function guestEngine(
             type: 'failed',
             error: (error as Error).message,
             retry: { label: t`Retry`, run: () => void prepare(positionMs) },
+            transcoder: status === 503 || !!code?.startsWith('transcoder_'),
           });
       } finally {
         if (at === generation) preparing = false;

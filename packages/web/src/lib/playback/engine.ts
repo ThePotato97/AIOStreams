@@ -79,7 +79,13 @@ export type EngineEvent =
   /** The file's tracks are listed, so the user's picks can apply. */
   | { type: 'loaded' }
   | { type: 'ended' }
-  | { type: 'failed'; error: string; retry?: { label: string; run(): void } }
+  | {
+      type: 'failed';
+      error: string;
+      retry?: { label: string; run(): void };
+      /** The transcoder failed, not the file: other versions wouldn't help. */
+      transcoder?: boolean;
+    }
   | { type: 'advanced'; next: QueuedItem }
   /** The user closed the player's own window. */
   | { type: 'closed' }

@@ -534,8 +534,14 @@ describe('guest playback authorization', () => {
     join(token);
     fixture.workerDown = true;
     const response = await api('/current', token);
-    expect(response.status).toBe(502);
-    expect(await response.json()).toEqual({ error: 'Transcoder unavailable' });
+    // usually restarting: a retryable 503 that says why
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('5');
+    expect(await response.json()).toEqual({
+      error: "The transcoder isn't reachable",
+      retryAfter: 5,
+      code: 'transcoder_unreachable',
+    });
     expect(fixture.logs).toContainEqual({
       level: 'warn',
       data: { path: '/probe', cause: 'ECONNREFUSED', url: 'http://worker' },

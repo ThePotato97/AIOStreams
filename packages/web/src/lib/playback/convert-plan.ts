@@ -1,17 +1,19 @@
 /*
  * What the player does when a conversion can't start. A file still
- * downloading (425) or a busy service (503) is waited for, as the server
- * says; a network blip is retried; anything else plays the file directly,
- * which at worst means no sound, rather than no picture.
+ * downloading (425), a busy or restarting transcoder (503 with a retry time)
+ * is waited for, as the server says; a network blip is retried; anything else
+ * fails, and the player says why and offers to play without the audio.
  */
 
 export type OpenPlan =
-  { action: 'wait'; ms: number } | { action: 'direct'; reason?: string };
+  { action: 'wait'; ms: number } | { action: 'fail'; reason?: string };
 
 export interface OpenError {
   status?: number;
   retryAfter?: number;
   message?: string;
+  /** The server's code for the cause, such as transcoder_unreachable. */
+  code?: string;
 }
 
 /** The longest a download is waited for before playing directly. */
@@ -35,10 +37,10 @@ export function afterOpenError(
     const ms = Math.max(1, error.retryAfter ?? DEFAULT_RETRY_MS / 1000) * 1000;
     return waitedMs + ms <= MAX_WAIT_MS
       ? { action: 'wait', ms }
-      : { action: 'direct', reason };
+      : { action: 'fail', reason };
   }
   // No status: the request itself failed (offline, server restarting).
   if (error.status == null && attempt < NETWORK_RETRIES)
     return { action: 'wait', ms: NETWORK_RETRY_MS };
-  return { action: 'direct', reason };
+  return { action: 'fail', reason };
 }

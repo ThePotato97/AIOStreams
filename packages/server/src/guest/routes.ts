@@ -144,6 +144,8 @@ function limit(req: Request) {
 }
 const transcoder = (path: string) =>
   `${config.party.transcoderUrl!.replace(/\/+$/, '')}${path}`;
+/** How soon a player asks again while the transcoder is unreachable. */
+const TRANSCODER_RETRY_S = 5;
 async function worker(path: string, body?: unknown): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 75000);
@@ -170,6 +172,14 @@ async function worker(path: string, body?: unknown): Promise<any> {
       );
       throw Object.assign(new Error(error.error ?? 'Transcoder unavailable'), {
         status: res.status === 503 ? 503 : 502,
+        // The transcoder's own condition (busy, misconfigured), or a conversion
+        // that failed, which can be the file's.
+        code:
+          res.status === 503
+            ? 'transcoder_busy'
+            : res.status === 401
+              ? 'transcoder_misconfigured'
+              : 'conversion_failed',
         // A full transcoder says when to come back.
         retryAfter:
           res.status === 503 && typeof error.retryAfter === 'number'
@@ -184,8 +194,11 @@ async function worker(path: string, body?: unknown): Promise<any> {
       { path, cause: errorCause(error), url: config.party.transcoderUrl },
       'transcoder unreachable'
     );
-    throw Object.assign(new Error('Transcoder unavailable'), {
-      status: 502,
+    // Usually restarting (a new image, a crash): the player waits and asks again.
+    throw Object.assign(new Error("The transcoder isn't reachable"), {
+      status: 503,
+      retryAfter: TRANSCODER_RETRY_S,
+      code: 'transcoder_unreachable',
       unreachable: true,
     });
   } finally {
@@ -1351,6 +1364,8 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
           ? 'Invalid request'
           : error.message,
     retryAfter: error.retryAfter,
+    // Machine-readable cause, where one is known (transcoder_unreachable, ...).
+    code: typeof error.code === 'string' ? error.code : undefined,
   });
 });
 const sweep = setInterval(() => {

@@ -22,7 +22,16 @@ describe('afterOpenError', () => {
       ms: 15_000,
     });
   });
-  it('plays directly once the download has been waited for too long', () => {
+  it('waits for a restarting transcoder, as the server says', () => {
+    expect(
+      afterOpenError(
+        { status: 503, retryAfter: 5, code: 'transcoder_unreachable' },
+        2,
+        10_000
+      )
+    ).toEqual({ action: 'wait', ms: 5_000 });
+  });
+  it('fails once the download has been waited for too long', () => {
     expect(
       afterOpenError(
         {
@@ -33,9 +42,9 @@ describe('afterOpenError', () => {
         40,
         MAX_WAIT_MS - 5_000
       )
-    ).toEqual({ action: 'direct', reason: 'The file is still downloading' });
+    ).toEqual({ action: 'fail', reason: 'The file is still downloading' });
   });
-  it('retries a failed request twice, then plays directly', () => {
+  it('retries a failed request twice, then fails', () => {
     expect(afterOpenError({ message: 'Failed to fetch' }, 0, 0)).toEqual({
       action: 'wait',
       ms: 2_000,
@@ -45,11 +54,11 @@ describe('afterOpenError', () => {
       ms: 2_000,
     });
     expect(afterOpenError({ message: 'Failed to fetch' }, 2, 4_000)).toEqual({
-      action: 'direct',
+      action: 'fail',
       reason: 'Failed to fetch',
     });
   });
-  it('plays directly on a source or probe failure, keeping the reason', () => {
+  it('fails on a source or probe failure, keeping the reason', () => {
     expect(
       afterOpenError(
         {
@@ -61,17 +70,17 @@ describe('afterOpenError', () => {
         0
       )
     ).toEqual({
-      action: 'direct',
+      action: 'fail',
       reason: 'Source probe failed: Invalid data found when processing input',
     });
     expect(afterOpenError({ status: 401 }, 0, 0)).toEqual({
-      action: 'direct',
+      action: 'fail',
       reason: undefined,
     });
   });
-  it('plays directly on a 503 without a retry time (no transcoder, or full)', () => {
+  it('fails on a 503 without a retry time (no transcoder set up)', () => {
     expect(
       afterOpenError({ status: 503, message: 'Conversion is not set up' }, 0, 0)
-    ).toEqual({ action: 'direct', reason: 'Conversion is not set up' });
+    ).toEqual({ action: 'fail', reason: 'Conversion is not set up' });
   });
 });

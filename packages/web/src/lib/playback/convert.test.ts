@@ -58,14 +58,8 @@ vi.mock('../guest/engine', () => ({
     };
   },
 }));
-vi.mock('./video', () => ({
-  videoEngine: () => (emit: (e: unknown) => void) => fake('direct', emit),
-}));
 vi.mock('../party/party', () => ({
   party: { state: () => (engines.inParty ? {} : null) },
-}));
-vi.mock('./server-subtitles', () => ({
-  serverSubtitles: vi.fn(() => [{ id: 'server:3', embedded: true }]),
 }));
 
 import { toast } from 'sonner';
@@ -100,15 +94,21 @@ function answer(next: Answer) {
     status: next.status,
   });
 }
+interface Event {
+  type: string;
+  error?: string;
+  transcoder?: boolean;
+  retry?: { label: string; run(): void };
+}
 function engineUnderTest() {
-  const events: { type: string }[] = [];
+  const events: Event[] = [];
   const engine = convertingEngine({ current: null }, client)(
-    (e) => events.push(e as { type: string }),
+    (e) => events.push(e as Event),
     {}
   );
   const [converting] = engines.made.slice(-1);
-  const direct = () => engines.made.find((e) => e.name === 'direct');
-  return { engine, events, converting, direct };
+  const failure = () => events.find((e) => e.type === 'failed');
+  return { engine, events, converting, failure };
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
@@ -118,6 +118,7 @@ beforeEach(() => {
   answers = [];
   opens = [];
   vi.mocked(toast.warning).mockClear();
+  vi.mocked(toast.message).mockClear();
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     opens.push(String(input));
     return answer(
@@ -135,77 +136,73 @@ afterEach(() => {
 
 describe('convertingEngine', () => {
   it('converts when the server can, and passes calls to the converting engine', async () => {
-    const { engine, converting, direct } = engineUnderTest();
+    const { engine, converting } = engineUnderTest();
     engine.load(file());
     await settle();
     expect(opens).toEqual(['https://aio.example/party/guest/own/open']);
     expect(converting.loads).toHaveLength(1);
-    expect(direct()).toBeUndefined();
     engine.seek(5000);
     expect(converting.seek).toHaveBeenCalledWith(5000);
   });
 
-  it('plays directly when conversion cannot open, with the reason', async () => {
+  it("says why when conversion can't open, and tries again on request", async () => {
     answers = [
       { status: 502, body: { error: 'Source probe failed: Invalid data' } },
     ];
-    const { engine, converting, direct } = engineUnderTest();
+    const { engine, converting, failure } = engineUnderTest();
     engine.load(file());
     await settle();
     expect(converting.loads).toHaveLength(0);
-    expect(direct()!.loads).toHaveLength(1);
-    expect(toast.warning).toHaveBeenCalledWith(expect.any(String), {
-      description: 'Source probe failed: Invalid data',
-    });
-    // Calls now go to the engine that is playing.
-    engine.seek(1000);
-    expect(direct()!.seek).toHaveBeenCalledWith(1000);
-    expect(converting.seek).not.toHaveBeenCalled();
-  });
-
-  it('gives the direct engine every subtitle, embedded ones included', async () => {
-    answers = [{ status: 502, body: { error: 'x' } }];
-    const { engine, direct } = engineUnderTest();
-    engine.load(file());
+    expect(failure()?.error).toContain('Source probe failed: Invalid data');
+    // the file's problem: other versions may help
+    expect(failure()?.transcoder).toBe(false);
+    expect(failure()?.retry?.label).toBe('Try again');
+    // nothing plays the file without its audio
+    expect(engines.made.map((e) => e.name)).toEqual(['converting']);
+    failure()!.retry!.run();
     await settle();
-    expect(direct()!.loads[0].subtitles).toEqual([
-      { id: 'server:3', embedded: true },
-    ]);
-    expect((engine as unknown as FakeEngine).ownSubtitles).toBeUndefined();
+    expect(opens).toHaveLength(2);
+    expect(converting.loads).toHaveLength(1);
   });
 
-  it('falls back when preparing the stream fails before it plays', async () => {
-    const { engine, events, converting, direct } = engineUnderTest();
+  it('reports a stream that fails before it plays', async () => {
+    const { engine, converting, failure } = engineUnderTest();
     engine.load(file());
     await settle();
     converting.emit({
       type: 'failed',
       error: 'Media operation failed (ENOTEMPTY in rmdir)',
+      transcoder: true,
     });
-    expect(direct()!.loads).toHaveLength(1);
     expect(converting.closes).toBe(1);
-    expect(events.some((e) => e.type === 'failed')).toBe(false);
+    expect(failure()?.error).toContain('ENOTEMPTY');
+    expect(failure()?.transcoder).toBe(true);
+    expect(opens).toHaveLength(1);
   });
 
-  it('plays directly from the same spot when the stream fails while playing', async () => {
-    const { engine, events, converting, direct } = engineUnderTest();
+  it('reconnects once from the same spot when the stream fails while playing', async () => {
+    const { engine, converting, failure } = engineUnderTest();
     engine.load(file());
     await settle();
     converting.emit({ type: 'loaded' });
     converting.emit({ type: 'state', state: { paused: false } });
     converting.emit({ type: 'position', positionMs: 754_000 });
     converting.emit({ type: 'failed', error: 'bufferAppendError' });
-    expect(direct()!.loads).toEqual([
+    await settle();
+    expect(opens).toHaveLength(2);
+    expect(converting.loads).toEqual([
+      expect.objectContaining({ startMs: 0 }),
       expect.objectContaining({ startMs: 754_000, paused: false }),
     ]);
-    expect(converting.closes).toBe(1);
-    expect(toast.warning).toHaveBeenCalledWith(expect.any(String), {
+    expect(toast.message).toHaveBeenCalledWith(expect.any(String), {
       description: 'bufferAppendError',
     });
-    expect(events.some((e) => e.type === 'failed')).toBe(false);
-    // Its calls now go to the direct engine.
-    engine.seek(800_000);
-    expect(direct()!.seek).toHaveBeenCalledWith(800_000);
+    expect(failure()).toBeUndefined();
+    // lost again before it played: reported, not reconnected in a loop
+    converting.emit({ type: 'failed', error: 'bufferAppendError' });
+    await settle();
+    expect(opens).toHaveLength(2);
+    expect(failure()?.error).toContain('bufferAppendError');
   });
 
   it('never converts the video for its own playback', () => {
@@ -214,7 +211,7 @@ describe('convertingEngine', () => {
   });
 
   it('opens a dropped playback again from where it was, once', async () => {
-    const { engine, converting, direct } = engineUnderTest();
+    const { engine, converting, failure } = engineUnderTest();
     engine.load(file());
     await settle();
     converting.emit({ type: 'loaded' });
@@ -223,43 +220,36 @@ describe('convertingEngine', () => {
     await settle();
     expect(opens).toHaveLength(2);
     expect(converting.loads.map((l) => l.startMs)).toEqual([0, 60_000]);
-    expect(direct()).toBeUndefined();
-    // Lost again before it loaded: it plays directly instead of looping.
+    // lost again before it loaded: the transcoder's failure, said so
     engines.guestOptions!.onExpired!('This playback has expired');
     await settle();
     expect(opens).toHaveLength(2);
-    expect(direct()!.loads).toEqual([
-      expect.objectContaining({ startMs: 60_000 }),
-    ]);
+    expect(failure()?.transcoder).toBe(true);
   });
 
   it('opens it again after a later loss, once it has played', async () => {
-    const { engine, converting, direct } = engineUnderTest();
+    const { engine, converting, failure } = engineUnderTest();
     engine.load(file());
     await settle();
+    converting.emit({ type: 'loaded' });
     engines.guestOptions!.onExpired!('gone');
     await settle();
     converting.emit({ type: 'loaded' });
     engines.guestOptions!.onExpired!('gone');
     await settle();
     expect(opens).toHaveLength(3);
-    expect(direct()).toBeUndefined();
+    expect(failure()).toBeUndefined();
   });
 
-  it('remembers a version that had to play directly', async () => {
+  it('tries the conversion again on the next load after a failure', async () => {
     answers = [{ status: 502, body: { error: 'x' } }];
-    const { engine, direct } = engineUnderTest();
+    const { engine, converting } = engineUnderTest();
     engine.load(file());
     await settle();
-    engine.load(file()); // Resume, Retry, or the same version again
-    await settle();
-    expect(opens).toHaveLength(1);
-    expect(direct()!.loads).toHaveLength(2);
-    expect(toast.warning).toHaveBeenCalledTimes(1);
-    // Another version is tried again.
-    engine.load(file('a'.repeat(32), 'v2'));
+    engine.load(file()); // Resume, or the same version again
     await settle();
     expect(opens).toHaveLength(2);
+    expect(converting.loads).toHaveLength(1);
   });
 
   it('waits while the file downloads, then converts', async () => {
@@ -274,7 +264,7 @@ describe('convertingEngine', () => {
         body: { error: 'The file is still downloading', retryAfter: 10 },
       },
     ];
-    const { engine, events, converting, direct } = engineUnderTest();
+    const { engine, events, converting, failure } = engineUnderTest();
     engine.load(file());
     await vi.advanceTimersByTimeAsync(0);
     expect(events).toContainEqual({
@@ -284,33 +274,55 @@ describe('convertingEngine', () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(opens).toHaveLength(3);
     expect(converting.loads).toHaveLength(1);
-    expect(direct()).toBeUndefined();
+    expect(failure()).toBeUndefined();
   });
 
-  it('plays directly at once when the server has no transcoder (503, no retry time)', async () => {
+  it('waits for an unreachable transcoder, saying so, then converts', async () => {
+    vi.useFakeTimers();
+    const down = {
+      status: 503,
+      body: {
+        error: "The transcoder isn't reachable",
+        retryAfter: 5,
+        code: 'transcoder_unreachable',
+      },
+    };
+    answers = [down, down, down];
+    const { engine, converting, failure } = engineUnderTest();
+    engine.load(file());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(toast.message).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.message).mock.calls[0][0]).toContain('transcoder');
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(opens).toHaveLength(4);
+    expect(converting.loads).toHaveLength(1);
+    // said once, not on every attempt
+    expect(toast.message).toHaveBeenCalledTimes(1);
+    expect(failure()).toBeUndefined();
+  });
+
+  it("reports a server without a transcoder at once, as the transcoder's failure", async () => {
     answers = [
       {
         status: 503,
         body: { error: 'Conversion is not set up on this server' },
       },
     ];
-    const { engine, direct } = engineUnderTest();
+    const { engine, failure } = engineUnderTest();
     engine.load(file());
     await settle();
     expect(opens).toHaveLength(1);
-    expect(direct()!.loads).toHaveLength(1);
+    expect(failure()?.error).toContain('Conversion is not set up');
+    expect(failure()?.transcoder).toBe(true);
   });
 
   it("treats a proxy's error page as an answer, not a network blip", async () => {
     answers = [{ status: 524, text: '<html>A timeout occurred</html>' }];
-    const { engine, direct } = engineUnderTest();
+    const { engine, failure } = engineUnderTest();
     engine.load(file());
     await settle();
     expect(opens).toHaveLength(1);
-    expect(toast.warning).toHaveBeenCalledWith(expect.any(String), {
-      description: 'The server answered 524',
-    });
-    expect(direct()!.loads).toHaveLength(1);
+    expect(failure()?.error).toContain('The server answered 524');
   });
 
   it('holds seeks past the converted part only during a party', () => {

@@ -31,7 +31,7 @@ export class GuestApi {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
-    let data: { error?: string; retryAfter?: number };
+    let data: { error?: string; retryAfter?: number; code?: string };
     try {
       data = JSON.parse(text);
     } catch {
@@ -46,6 +46,8 @@ export class GuestApi {
         {
           status: res.status,
           retryAfter: data.retryAfter as number | undefined,
+          // Why, where the server knows: transcoder_unreachable, transcoder_busy, ...
+          code: typeof data.code === 'string' ? data.code : undefined,
         }
       );
     return data as unknown as T;

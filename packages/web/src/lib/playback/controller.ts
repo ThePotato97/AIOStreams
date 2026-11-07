@@ -135,6 +135,8 @@ export interface PlayerController {
   fit?: boolean;
   /** Plays the file again after it failed, from where it stopped or on another engine. */
   retry?: { label: string; run(): void };
+  /** The failure is the transcoder's, not the file's: other versions wouldn't help. */
+  transcoderFailure?: boolean;
   /** Others watch along, so nothing acts on its own, like skipping or speeding up. */
   shared?: boolean;
 }

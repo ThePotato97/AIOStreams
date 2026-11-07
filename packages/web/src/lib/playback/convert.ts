@@ -9,10 +9,8 @@ import { guestEngine } from '../guest/engine';
 import { relayBase } from '../party/invite';
 import { t } from '@lingui/core/macro';
 import { toast } from 'sonner';
-import type { EngineFactory, EngineFile, PlayerEngine } from './engine';
-import { videoEngine } from './video';
+import type { EngineFactory, EngineFile } from './engine';
 import { afterOpenError, type OpenError } from './convert-plan';
-import { serverSubtitles } from './server-subtitles';
 import { party } from '../party/party';
 
 /*
@@ -74,11 +72,12 @@ class OwnApi extends GuestApi {
  * item and version it names, so switching version or episode converts the new
  * one; a version the browser can play whole is served as it is.
  *
- * A file still downloading is waited for. If conversion fails, at open, while
- * preparing the stream or while it plays, the file plays directly from the same
- * spot (silent at worst, rather than not at all), and that item and version
- * keep playing directly. Nothing here converts the video: a stream the browser
- * can't decode plays directly too.
+ * A file still downloading, and a transcoder that's busy or restarting, are
+ * waited for. A stream lost while playing reconnects from where it was, once.
+ * Past that the player says why and offers to try again (the failure screen
+ * also offers other versions). Playing the file directly isn't a fallback: this
+ * browser can't decode its audio. Nothing here converts the video: a stream
+ * the browser can't decode plays directly too.
  */
 export function convertingEngine(
   video: React.RefObject<HTMLVideoElement | null>,
@@ -103,80 +102,87 @@ export function convertingEngine(
       onExpired: (message) => onExpired(message),
     }
   );
-  /** Item and version keys that couldn't convert: they play directly. */
-  const direct = new Set<string>();
   const keyOf = (file: EngineFile) =>
     `${file.item.Id ?? ''}:${file.source.Id ?? ''}`;
   return (emit, opts) => {
-    let directEngine: PlayerEngine | null = null;
-    let active: PlayerEngine;
     let loading = 0;
     /** The file converting now, and where and how it was playing last. */
     let playing: EngineFile | null = null;
     let positionMs = 0;
     let paused = true;
+    /** It played since it was last loaded, and hasn't reconnected since. */
+    let loaded = false;
+    let reconnected = false;
     const here = (next: EngineFile): EngineFile => ({
       ...next,
       startMs: positionMs,
       paused,
     });
     const converting = inner.factory((event) => {
-      if (active === converting && playing) {
+      if (playing) {
         if (event.type === 'failed') {
           const next = here(playing);
           playing = null;
-          return playDirect(next, event.error);
+          return failAudio(next, event.error, event.transcoder);
         }
         if (event.type === 'position' && event.positionMs != null)
           positionMs = event.positionMs;
         if (event.type === 'state' && event.state.paused != null)
           paused = event.state.paused;
-        if (event.type === 'loaded') reopened = false;
+        if (event.type === 'loaded') {
+          loaded = true;
+          reconnected = false;
+        }
       }
       emit(event);
     }, opts);
-    /** Opened again since it last loaded: a second loss plays it directly. */
-    let reopened = false;
-    // Opened again, from where it was, once the server has forgotten it.
+    // The server forgot the playback (it restarted): reconnect, as for a lost stream.
     onExpired = (message) => {
-      if (active !== converting || !playing) return;
-      if (reopened) {
-        const next = here(playing);
-        playing = null;
-        return playDirect(next, message);
+      if (!playing) return;
+      const next = here(playing);
+      playing = null;
+      failAudio(next, message, true);
+    };
+    /**
+     * The converted stream failed or couldn't start. Lost while playing, it
+     * reconnects from where it was, once (opening it again waits for a
+     * restarting transcoder). Otherwise the player says why and offers to try
+     * again; `transcoder` says the cause is the transcoder's, not the file's,
+     * so other versions wouldn't help.
+     */
+    const failAudio = (
+      next: EngineFile,
+      reason?: string,
+      transcoder?: boolean
+    ) => {
+      const reopen = () => {
+        opened = '';
+        info = null;
+        load(next);
+      };
+      if (loaded && !reconnected) {
+        reconnected = true;
+        toast.message(t`Lost the converted stream; reconnecting…`, {
+          description: reason,
+        });
+        return reopen();
       }
-      reopened = true;
-      opened = '';
-      info = null;
-      load(here(playing));
-    };
-    active = converting;
-    const use = (engine: PlayerEngine) => {
-      if (active !== engine) active.close();
-      active = engine;
-    };
-    const loadDirect = (next: EngineFile) => {
-      directEngine ??= videoEngine(video)(emit, opts);
-      use(directEngine);
-      // This engine reads the file's own subtitles, the converting one didn't.
-      directEngine.load({
-        ...next,
-        subtitles: serverSubtitles(client, next.source, false),
+      converting.close();
+      emit({
+        type: 'failed',
+        error: t`This browser can't play this file's audio, and it couldn't be converted: ${
+          reason ?? t`conversion is unavailable on this server`
+        }`,
+        retry: { label: t`Try again`, run: reopen },
+        transcoder,
       });
-    };
-    const playDirect = (next: EngineFile, reason?: string) => {
-      direct.add(keyOf(next));
-      toast.warning(
-        t`Couldn't convert the audio for this browser, so it may play without sound.`,
-        { description: reason ?? t`Conversion is unavailable on this server.` }
-      );
-      loadDirect(next);
     };
     const open = async (next: EngineFile, at: number) => {
       const itemId = next.item.Id!;
       const key = keyOf(next);
       if (key === opened && info) return true;
       const started = Date.now();
+      let waitingForTranscoder = false;
       for (let attempt = 0; ; attempt++) {
         try {
           const result = await new GuestApi(
@@ -204,12 +210,26 @@ export function convertingEngine(
             attempt,
             Date.now() - started
           );
-          if (plan.action === 'direct') {
-            playDirect(next, plan.reason);
+          if (plan.action === 'fail') {
+            const { status, code } = error as OpenError;
+            failAudio(
+              next,
+              plan.reason,
+              status === 503 || !!code?.startsWith('transcoder_')
+            );
             return false;
           }
           if (attempt === 0 && (error as OpenError).status === 425)
             toast.message(t`Still downloading; it starts when it's ready.`);
+          if (
+            !waitingForTranscoder &&
+            (error as OpenError).code === 'transcoder_unreachable'
+          ) {
+            waitingForTranscoder = true;
+            toast.message(t`Waiting for the transcoder to come back…`, {
+              description: t`It isn't reachable right now; playback starts when it is.`,
+            });
+          }
           emit({ type: 'state', state: { waiting: true, loaded: false } });
           await new Promise((r) => setTimeout(r, plan.ms));
           if (at !== loading) return false;
@@ -219,28 +239,26 @@ export function convertingEngine(
     function load(next: EngineFile) {
       const at = ++loading;
       playing = null;
-      if (direct.has(keyOf(next))) return loadDirect(next);
+      loaded = false;
       void open(next, at).then((ready) => {
         if (!ready || at !== loading) return;
-        use(converting);
         playing = next;
         positionMs = next.startMs;
         paused = next.paused ?? true;
         converting.load(next);
       });
     }
-    // Everything but load goes to whichever engine is playing.
     return new Proxy(converting, {
-      get: (_target, prop) =>
+      get: (target, prop) =>
         prop === 'load'
           ? load
           : prop === 'close'
             ? () => {
                 loading++;
                 playing = null;
-                active.close();
+                target.close();
               }
-            : Reflect.get(active, prop),
+            : Reflect.get(target, prop),
     });
   };
 }
