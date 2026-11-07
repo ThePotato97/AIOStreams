@@ -24,10 +24,10 @@ test('a probe of something that is not media says so, without the URL', async ()
       () => assert.fail('ffprobe accepted HTML'),
       (e) => e
     );
-    const message = probeFailure(error);
-    assert.match(message, /^Source probe failed: /);
-    assert.match(message, /invalid data/i);
-    assert.doesNotMatch(message, /SECRETHANDLE|127\.0\.0\.1|http/);
+    assert.equal(
+      probeFailure(error),
+      'Source probe failed: Invalid data found when processing input'
+    );
   } finally {
     server.close();
   }
@@ -40,9 +40,7 @@ test('a probe of an unreachable source says so, without the URL', async () => {
     () => assert.fail('ffprobe reached a closed port'),
     (e) => e
   );
-  const message = probeFailure(error);
-  assert.match(message, /^Source probe failed: .*(refused|error)/i);
-  assert.doesNotMatch(message, /SECRETHANDLE|127\.0\.0\.1/);
+  assert.equal(probeFailure(error), 'Source probe failed: Connection refused');
 });
 
 test('a probe that runs out of time says it timed out', async () => {
@@ -65,6 +63,24 @@ test('a probe that runs out of time says it timed out', async () => {
     server.closeAllConnections();
     server.close();
   }
+});
+
+test('every URL in the reason is removed, wherever it sits', () => {
+  const stderr = (line) => ({ stderr: `${line}\n` });
+  assert.equal(
+    probeFailure(
+      stderr(
+        'http://aiostreams:3000/party/guest/source/SECRETHANDLE: Invalid data'
+      )
+    ),
+    'Source probe failed: Invalid data'
+  );
+  assert.equal(
+    probeFailure(
+      stderr('[http @ 0x1] Redirect to https://cdn.example/tok?k=SECRET failed')
+    ),
+    'Source probe failed: [http @ 0x1] Redirect to source failed'
+  );
 });
 
 test('a failure without stderr still reads as a probe failure', () => {

@@ -21,8 +21,17 @@ export function guestEngine(
   video: React.RefObject<HTMLVideoElement | null>,
   api: GuestApi,
   current: () => GuestCurrent,
-  onMode: (mode: string) => void
+  onMode: (mode: string) => void,
+  options: {
+    /**
+     * Whether a seek just past what is written waits for it rather than
+     * converting from there. On for party sync, which asks again every couple
+     * of seconds; off for a viewer's own seeks, which should land where asked.
+     */
+    holdUnwritten?: () => boolean;
+  } = {}
 ) {
+  const holdUnwritten = options.holdUnwritten ?? (() => true);
   let changeQuality: (
     quality: 'original' | '1080p' | '720p'
   ) => void = () => {};
@@ -251,6 +260,7 @@ export function guestEngine(
         // conversion there gets to it sooner.
         const edge = ranges.length ? Math.max(...ranges.map((r) => r.end)) : 0;
         if (
+          holdUnwritten() &&
           playback &&
           playback.mode !== 'direct' &&
           local > edge &&

@@ -18,10 +18,10 @@ import {
   saveSubtitleDelay,
   SUBTITLE_DELAY_LIMIT_MS,
 } from '../subtitles/delay';
-import { subtitleUrl, textSubtitles } from '../subtitles/tracks';
 import { SUBTITLE_LIFT_MS, subtitleHeight } from '../subtitles/style';
 import type { MediaStream, SourceInfo } from '../types';
 import { useLatest } from '../use-latest';
+import { serverSubtitles } from './server-subtitles';
 import type { Chapter } from './chapters';
 import {
   initialState,
@@ -58,30 +58,6 @@ const THUMBNAIL_INDEX_MS = 5_000;
 
 /** How long subtitles stay at a newly picked height while the controls show. */
 const PLACING_MS = 3_000;
-
-function serverSubtitles(
-  client: JellyfinClient,
-  source: SourceInfo,
-  ownSubtitles: boolean,
-  urlOf?: (stream: MediaStream) => string | null
-): ServerSubtitle[] {
-  return textSubtitles(source)
-    .filter((s) => !ownSubtitles || s.IsExternal)
-    .flatMap((stream, i) => {
-      const url = urlOf ? urlOf(stream) : subtitleUrl(client, stream);
-      return url
-        ? [
-            {
-              id: `server:${stream.Index}`,
-              url,
-              label: trackLabel(stream, i + 1),
-              lang: stream.Language ?? undefined,
-              stream,
-            },
-          ]
-        : [];
-    });
-}
 
 const asTrack = (track: EngineTrack): Track => ({
   id: track.id,
@@ -183,10 +159,12 @@ export function usePlayer(
   const [retry, setRetry] = React.useState<PlayerController['retry']>();
   const [lift, setLift] = React.useState(0);
   const [fit] = useSetting(settings.video.fit);
+  // Read on every render: an engine can hand over to another that lists
+  // subtitles differently (a conversion falling back to direct play).
+  const ownSubtitles = !!engine.ownSubtitles;
   const servers = React.useMemo(
-    () =>
-      serverSubtitles(client, source, !!engine.ownSubtitles, opts.subtitleUrl),
-    [client, source, engine, opts.subtitleUrl]
+    () => serverSubtitles(client, source, ownSubtitles, opts.subtitleUrl),
+    [client, source, ownSubtitles, opts.subtitleUrl]
   );
   const latestServers = useLatest(servers);
   const heard = React.useRef<Heard | null>(null);

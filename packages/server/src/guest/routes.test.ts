@@ -23,9 +23,16 @@ const fixture = vi.hoisted(() => ({
   logs: [] as { level: string; data: unknown; message: string }[],
   // A fake source server, so the pre-probe check sees real HTTP answers.
   upstream: '',
+  // This server's internal address: a second port on the same fake server.
+  internal: '',
+  hits: { public: 0, internal: 0 },
+  probeInputs: [] as string[],
   sourcePath: '/media/private-token',
   probes: 0,
   probeFailures: 0,
+  probeError: 'Source probe failed: Invalid data found when processing input',
+  scopes: [] as (string | undefined)[],
+  chain: { hits: 0, expireA: false, thenTo: '/media/B' },
 }));
 vi.mock('@aiostreams/core', () => ({
   createLogger: () =>
@@ -43,7 +50,9 @@ vi.mock('@aiostreams/core', () => ({
       },
       transcoderUrl: 'http://worker',
       transcoderSecret: 's'.repeat(32),
-      internalUrl: 'http://internal',
+      get internalUrl() {
+        return fixture.internal;
+      },
     },
     bootstrap: {
       get baseUrl() {
@@ -69,7 +78,7 @@ vi.mock('../party/relay.js', () => ({
           id,
           host: 'host',
           homeUuid: 'owner',
-          expiresAt: Date.now() + 60000,
+          expiresAt: Date.now() + 3_600_000,
           joinsClosed: false,
           playing: fixture.playing,
           queue: [fixture.playing],
@@ -81,7 +90,10 @@ vi.mock('../party/ticket.js', () => ({
   ticketExpiry: () => Date.now() + 60000,
 }));
 vi.mock('../routes/jellyfin/playback.js', () => ({
-  locate: async () => ({}),
+  locate: async (req: { jf?: { scope?: () => string } }) => (
+    fixture.scopes.push(req.jf?.scope?.()),
+    {}
+  ),
   ensureMemo: async () => (
     ++fixture.memoCalls,
     {
@@ -90,7 +102,9 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
         : [
             {
               msid: 'source',
-              url: `${fixture.upstream}${fixture.sourcePath}`,
+              url: /^https?:/.test(fixture.sourcePath)
+                ? fixture.sourcePath
+                : `${fixture.upstream}${fixture.sourcePath}`,
               filename: 'episode.mkv',
               container: 'mkv',
               subtitles: [],
@@ -155,11 +169,18 @@ function join(token: string) {
   session.member = 'guest';
   fixture.members.push({ id: 'guest', key: 'g'.repeat(22) });
 }
-let upstream: Server;
+let upstream: Server, internalServer: Server;
+let filesApp: express.Express;
 beforeAll(async () => {
   // What a source can answer: the file, AIOStreams' placeholder clips (as
   // the real playback route redirects to them), an error page, or a 404.
   const files = express();
+  files.use((req, _res, next) => {
+    const internal =
+      String(req.socket.localPort) === fixture.internal.split(':').pop();
+    fixture.hits[internal ? 'internal' : 'public']++;
+    next();
+  });
   files.get('/media/private-token', (_req, res) =>
     res.status(206).type('video/mp4').send('x')
   );
@@ -171,10 +192,42 @@ beforeAll(async () => {
   );
   files.get('/static/:file', (_req, res) => res.type('video/mp4').send('x'));
   files.get('/html', (_req, res) => res.type('html').send('<html></html>'));
+  // A failover chain: the first resolve picks A, later ones whatever thenTo is.
+  files.get('/chain', (_req, res) =>
+    res.redirect(
+      307,
+      `${fixture.upstream}${fixture.chain.hits++ === 0 ? '/media/A' : fixture.chain.thenTo}`
+    )
+  );
+  files.get('/media/:name', (req, res) => {
+    if (
+      req.params.name === 'A' &&
+      fixture.chain.expireA &&
+      fixture.chain.hits > 0
+    )
+      return void res.status(410).end();
+    res.status(206).type('video/mp4').send(req.params.name);
+  });
   files.get('/loop', (_req, res) => res.redirect(302, '/loop'));
   upstream = files.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => upstream.on('listening', resolve));
   fixture.upstream = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
+  internalServer = files.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => internalServer.on('listening', resolve));
+  fixture.internal = `http://127.0.0.1:${(internalServer.address() as { port: number }).port}`;
+  filesApp = files;
+  spyFetch();
+  const app = express();
+  app.use(express.json());
+  app.use('/party/guest', guestRouter);
+  server = app.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    server.on('listening', resolve);
+    server.on('error', reject);
+  });
+  base = `http://127.0.0.1:${(server.address() as { port: number }).port}/party/guest`;
+});
+function spyFetch() {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
     if (!url.startsWith('http://worker')) return originalFetch(input, init);
@@ -184,15 +237,12 @@ beforeAll(async () => {
       });
     if (url.endsWith('/probe')) {
       fixture.probes++;
+      fixture.probeInputs.push(
+        (JSON.parse(String(init?.body ?? '{}')) as { input: string }).input
+      );
       if (fixture.probeFailures > 0) {
         fixture.probeFailures--;
-        return Response.json(
-          {
-            error:
-              'Source probe failed: Invalid data found when processing input',
-          },
-          { status: 400 }
-        );
+        return Response.json({ error: fixture.probeError }, { status: 400 });
       }
       return Response.json(media);
     }
@@ -205,20 +255,12 @@ beforeAll(async () => {
     }
     return Response.json({ ok: true });
   });
-  const app = express();
-  app.use(express.json());
-  app.use('/party/guest', guestRouter);
-  server = app.listen(0, '127.0.0.1');
-  await new Promise<void>((resolve, reject) => {
-    server.on('listening', resolve);
-    server.on('error', reject);
-  });
-  base = `http://127.0.0.1:${(server.address() as { port: number }).port}/party/guest`;
-});
+}
 afterAll(async () => {
   vi.restoreAllMocks();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  await new Promise<void>((resolve) => internalServer.close(() => resolve()));
 });
 beforeEach(() => {
   fixture.party = crypto.randomUUID().replaceAll('-', '').slice(0, 22);
@@ -234,6 +276,14 @@ beforeEach(() => {
   fixture.sourcePath = '/media/private-token';
   fixture.probes = 0;
   fixture.probeFailures = 0;
+  fixture.hits = { public: 0, internal: 0 };
+  fixture.probeInputs = [];
+  fixture.probeError =
+    'Source probe failed: Invalid data found when processing input';
+  fixture.scopes = [];
+  fixture.chain = { hits: 0, expireA: false, thenTo: '/media/B' };
+  vi.restoreAllMocks();
+  spyFetch();
 });
 describe('guest playback authorization', () => {
   it('requires host credentials and rejects malformed invitations', async () => {
@@ -515,14 +565,14 @@ describe('guest playback authorization', () => {
         'The source redirects too many times'
       );
     });
-    it('retries a probe that fails once', async () => {
+    it('retries a probe that timed out, once', async () => {
       fixture.probeFailures = 1;
+      fixture.probeError = 'Source probe timed out';
       const token = await joined();
-      const response = await api('/current', token);
-      expect(response.status).toBe(200);
+      expect((await api('/current', token)).status).toBe(200);
       expect(fixture.probes).toBe(2);
     });
-    it('gives the probe reason after three failures, then backs off', async () => {
+    it('does not retry a probe of bad data, and backs off', async () => {
       fixture.probeFailures = 99;
       const token = await joined();
       const response = await api('/current', token);
@@ -530,11 +580,34 @@ describe('guest playback authorization', () => {
       expect(await errorOf(response)).toBe(
         'Source probe failed: Invalid data found when processing input'
       );
-      expect(fixture.probes).toBe(3);
+      expect(fixture.probes).toBe(1);
       // Within the 5 s backoff the next poll doesn't probe again.
       expect((await api('/current', token)).status).toBe(502);
+      expect(fixture.probes).toBe(1);
+    });
+    it('backs off longer each time, and forgets a failure long past', async () => {
+      fixture.probeFailures = 99;
+      const token = await joined();
+      const start = Date.now();
+      const at = (ms: number) =>
+        vi.spyOn(Date, 'now').mockReturnValue(start + ms);
+      await api('/current', token); // fails: next try after 5 s
+      at(6_000);
+      await api('/current', token); // fails again: next after 10 s
+      expect(fixture.probes).toBe(2);
+      at(12_000);
+      await api('/current', token); // still within 10 s of the last
+      expect(fixture.probes).toBe(2);
+      at(17_000);
+      await api('/current', token); // fails a third time: next after 30 s
       expect(fixture.probes).toBe(3);
-    }, 15000);
+      // Ten minutes later it starts again from the shortest wait.
+      at(10 * 60_000);
+      await api('/current', token);
+      at(10 * 60_000 + 6_000);
+      await api('/current', token);
+      expect(fixture.probes).toBe(5);
+    });
     it("a user's own playback reports downloading too", async () => {
       fixture.sourcePath = '/downloading';
       const response = await api('/own/open', 'host-token', {
@@ -543,6 +616,99 @@ describe('guest playback authorization', () => {
       });
       expect(response.status).toBe(425);
       expect(response.headers.get('retry-after')).toBe('10');
+    });
+  });
+  describe('where the source is read from', () => {
+    async function handleOf() {
+      const secret = await invitation(),
+        token = await guest(secret);
+      join(token);
+      const response = await api('/current', token);
+      expect(response.status).toBe(200);
+      return fixture.probeInputs[0].split('/').pop()!;
+    }
+    const read = (handle: string) =>
+      originalFetch(`${base}/source/${handle}`, {
+        headers: { Range: 'bytes=0-' },
+      });
+    it("reads this server's own URLs through its internal address", async () => {
+      await handleOf();
+      expect(fixture.hits.internal).toBeGreaterThan(0);
+      expect(fixture.hits.public).toBe(0);
+    });
+    it('follows the redirects once, then reads the same file every time', async () => {
+      fixture.sourcePath = '/chain';
+      const handle = await handleOf();
+      expect(await (await read(handle)).text()).toBe('A');
+      expect(await (await read(handle)).text()).toBe('A');
+      // Only the check went through the failover chain.
+      expect(fixture.chain.hits).toBe(1);
+    });
+    it('resolves again when the pinned link stops working', async () => {
+      fixture.sourcePath = '/chain';
+      const handle = await handleOf();
+      fixture.chain.expireA = true;
+      const response = await read(handle);
+      expect(response.status).toBe(206);
+      expect(await response.text()).toBe('B');
+      expect(fixture.chain.hits).toBe(2);
+      expect(await (await read(handle)).text()).toBe('B');
+    });
+    it('never serves a placeholder clip as the file', async () => {
+      fixture.sourcePath = '/chain';
+      const handle = await handleOf();
+      fixture.chain.expireA = true;
+      fixture.chain.thenTo = '/static/download_failed.mp4';
+      const response = await read(handle);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        'The download failed; pick another source'
+      );
+    });
+    it('refuses addresses inside the cluster, by name or by number', async () => {
+      const port = fixture.upstream.split(':').pop();
+      for (const [path, url] of [
+        ['name', `http://localhost:${port}/media/private-token`],
+        ['metadata', 'http://169.254.169.254/latest/meta-data'],
+      ]) {
+        fixture.party = crypto.randomUUID().replaceAll('-', '').slice(0, 22);
+        fixture.members = [{ id: 'host', key: 'h'.repeat(22) }];
+        const secret = await invitation(),
+          token = await guest(secret);
+        join(token);
+        fixture.sourcePath = url;
+        const response = await api('/current', token);
+        expect(response.status, path).toBe(502);
+        expect(await errorOf(response), path).toBe(
+          'The source points at a private address'
+        );
+      }
+    });
+    it('logs why a source handle was refused', async () => {
+      const response = await originalFetch(`${base}/source/${'x'.repeat(43)}`);
+      expect(response.status).toBe(404);
+      expect(fixture.logs).toContainEqual({
+        level: 'warn',
+        data: { reason: 'unknown handle' },
+        message: 'guest source handle refused',
+      });
+    });
+  });
+  describe("a user's own playback", () => {
+    it('plays the default version, whose id is the item id', async () => {
+      const response = await api('/own/open', 'host-token', {
+        itemId: 'c'.repeat(32),
+        sourceId: 'c'.repeat(32),
+      });
+      expect(response.status).toBe(200);
+    });
+    it("uses the user's own cache, guests a separate one", async () => {
+      await api('/own/open', 'host-token', { itemId: 'c'.repeat(32) });
+      const secret = await invitation(),
+        token = await guest(secret);
+      join(token);
+      await api('/current', token);
+      expect(fixture.scopes).toEqual(['owner-scope', 'guest:owner-scope']);
     });
   });
 });

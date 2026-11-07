@@ -16,7 +16,8 @@ const maxBytes = Math.max(
   1024 * 1024,
   Number(process.env.TRANSCODER_CACHE_BYTES ?? 10 * 1024 ** 3)
 );
-const jobs = new Map();
+/** Exported for tests. */
+export const jobs = new Map();
 const probes = new Map();
 const pending = new Map();
 const subtitles = new Map();
@@ -55,6 +56,19 @@ function inputUrl(value) {
  * replaced. ffprobe only ever sees AIOStreams' source handle, but a handle is
  * still a credential, and nothing upstream belongs in an error.
  */
+/** A native error's code and operation, the only parts safe to pass on. */
+export function mediaError(error) {
+  const code = /^[A-Z0-9_]+$/.test(String(error?.code ?? ''))
+    ? error.code
+    : undefined;
+  const syscall = /^[a-z]+$/.test(String(error?.syscall ?? ''))
+    ? error.syscall
+    : undefined;
+  const detail = [code, syscall].filter(Boolean).join(' in ');
+  return detail
+    ? `Media operation failed (${detail})`
+    : 'Media operation failed';
+}
 export function probeFailure(error) {
   if (error?.killed || error?.signal === 'SIGTERM')
     return 'Source probe timed out';
@@ -65,7 +79,7 @@ export function probeFailure(error) {
       .filter(Boolean)
       .pop() ?? '';
   const reason = line
-    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, 'source')
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+?(?=:?\s|:?$)/gi, 'source')
     .replace(/^source:\s*/i, '')
     .slice(0, 160);
   return reason ? `Source probe failed: ${reason}` : 'Source probe failed';
@@ -93,7 +107,8 @@ async function probe(input) {
         'json',
         input,
       ],
-      { timeout: 45000, maxBuffer: 4 * 1024 * 1024 }
+      // AIOStreams retries once and must answer within Cloudflare's 100 s.
+      { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }
     )
       .then(({ stdout }) => metadata(JSON.parse(stdout)))
       .catch((error) => {
@@ -105,19 +120,32 @@ async function probe(input) {
   }
   return probes.get(input);
 }
-function stop(job) {
-  if (job.paused) job.child?.kill('SIGCONT');
-  job.child?.kill('SIGTERM');
+const running = (child) =>
+  !!child && child.exitCode === null && child.signalCode === null;
+/**
+ * Stops a job's FFmpeg and resolves once it has exited: SIGTERM, then SIGKILL
+ * after 3 s. Its files can only be removed after that, since FFmpeg still
+ * writes the last segment and playlist while it shuts down.
+ */
+export function stop(job) {
   const child = job.child;
-  if (child)
-    setTimeout(() => {
-      if (child.exitCode === null) child.kill('SIGKILL');
-    }, 3000).unref();
+  if (!running(child)) return Promise.resolve();
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  if (job.paused) child.kill('SIGCONT');
+  child.kill('SIGTERM');
+  const timer = setTimeout(() => {
+    if (running(child)) child.kill('SIGKILL');
+  }, 3000);
+  timer.unref();
+  return exited.finally(() => clearTimeout(timer));
 }
-async function drop(job) {
+const removeDir = (dir) =>
+  rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+/** Forgets a job, waits for its FFmpeg to exit, then removes its files. */
+export async function drop(job) {
   jobs.delete(job.id);
-  stop(job);
-  await rm(job.dir, { recursive: true, force: true });
+  await stop(job);
+  await removeDir(job.dir);
 }
 function start(job, encoder) {
   const command = ffmpegArgs(
@@ -399,7 +427,12 @@ export function createServer() {
       ) {
         if (job.error) throw Error(job.error);
         const file = `${job.dir}/${match[2]}`;
-        const size = await stat(file);
+        const size = await stat(file).catch((error) => {
+          if (error.code !== 'ENOENT') throw error;
+          const missing = Error('Not written yet');
+          missing.status = 404;
+          throw missing;
+        });
         res.setHeader(
           'Content-Type',
           match[2].endsWith('.m3u8')
@@ -419,9 +452,20 @@ export function createServer() {
       res.writeHead(error.status ?? 400, {
         'Content-Type': 'application/json',
       });
-      // Native errors may contain source URLs. Expose only our explicit errors.
-      const message =
-        error.code || error.cmd ? 'Media operation failed' : error.message;
+      // Native errors may contain source URLs: pass on only their code.
+      const native = !!(error.code || error.cmd);
+      const message = native ? mediaError(error) : error.message;
+      if (native)
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            msg: 'media operation failed',
+            method: req.method,
+            path: new URL(req.url, 'http://worker').pathname,
+            code: error.code,
+            syscall: error.syscall,
+          })
+        );
       res.end(JSON.stringify({ error: message }));
     }
   });
@@ -448,8 +492,8 @@ async function sweep() {
   for (const job of [...sizes.keys()].sort((a, b) => a.last - b.last)) {
     if (bytes <= maxBytes) break;
     job.error = 'Segment cache capacity reached';
-    stop(job);
-    await rm(job.dir, { recursive: true, force: true });
+    await stop(job);
+    await removeDir(job.dir);
     bytes -= sizes.get(job);
   }
   cacheBytes = bytes;

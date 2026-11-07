@@ -13,11 +13,18 @@ export function codec(track: GuestTrack): string | null {
   switch (track.codec) {
     case 'h264': {
       const profile = track.profile?.toLowerCase() ?? '';
-      const prefix = profile.includes('high')
-        ? '6400'
-        : profile.includes('main')
-          ? '4d40'
-          : '42e0';
+      // profile_idc in hex: High 4:4:4 244, High 4:2:2 122, High 10 110.
+      const prefix = profile.includes('4:4:4')
+        ? 'f400'
+        : profile.includes('4:2:2')
+          ? '7a00'
+          : profile.includes('high 10')
+            ? '6e00'
+            : profile.includes('high')
+              ? '6400'
+              : profile.includes('main')
+                ? '4d40'
+                : '42e0';
       // Level 4.0 when unknown: an invalid string such as "avc1.6400-63"
       // reads as unsupported and forces a needless video conversion.
       const level = knownLevel(track.level, 40);

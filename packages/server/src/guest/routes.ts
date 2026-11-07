@@ -3,7 +3,9 @@ import { offsetWebVtt } from './subtitles.js';
 import { Router, type Request, type Response } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { request } from 'undici';
+import { Agent, request } from 'undici';
+import { lookup, type LookupAddress } from 'node:dns';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import {
   config,
@@ -68,6 +70,12 @@ interface Source {
   title: string;
   record: MediaSourceRecord;
   media?: Promise<GuestMedia>;
+  /**
+   * Where the source's redirects lead, followed once. Each range request of
+   * a probe or conversion goes here directly: going back through the
+   * playback route re-runs its failover chain, which can pick another file.
+   */
+  pinned?: { url: URL; headers: Record<string, string> };
 }
 const logger = createLogger('guest');
 /**
@@ -236,7 +244,9 @@ async function lookupRecord(
   req: Request,
   user: TokenUser,
   entry: { itemId: string; sourceId?: string; filename?: string },
-  bingeGroup?: string
+  bingeGroup?: string,
+  // Guest lookups keep their own cache; a user's own playback shares theirs.
+  scope: 'guest' | 'own' = 'guest'
 ): Promise<MediaSourceRecord> {
   // Sources are fetched by this server, not from the guest's public IP.
   const guestIp = req.userIp;
@@ -254,8 +264,10 @@ async function lookupRecord(
   }
 
   if (!ctx) fail(410, 'The host configuration is unavailable');
-  const ownerScope = ctx.scope();
-  ctx.scope = () => `guest:${ownerScope}`;
+  if (scope === 'guest') {
+    const ownerScope = ctx.scope();
+    ctx.scope = () => `guest:${ownerScope}`;
+  }
   const old = req.jf;
   req.jf = ctx;
   let loc;
@@ -314,7 +326,12 @@ async function current(req: Request) {
       },
       'guest source unavailable; backing off'
     );
-    const count = (state.binding.failures.get(revision)?.count ?? 0) + 1;
+    // A failure long past doesn't make the next wait longer.
+    const previous = state.binding.failures.get(revision);
+    const count =
+      previous && previous.until > Date.now() - 5 * 60_000
+        ? previous.count + 1
+        : 1;
     const after = (error as { retryAfter?: number }).retryAfter;
     state.binding.failures.set(revision, {
       error,
@@ -612,7 +629,14 @@ router.post('/own/open', async (req, res) => {
   const user = await userForToken(bearer(req));
   if (!user) fail(401, 'Sign in to play this');
   const body = ownOpenSchema.parse(req.body);
-  const record = await lookupRecord(req, user, body);
+  // The default version's id is the item's own: no explicit choice.
+  const record = await lookupRecord(
+    req,
+    user,
+    body.sourceId === body.itemId ? { ...body, sourceId: undefined } : body,
+    undefined,
+    'own'
+  );
   const revision = digest([OWN, user.uuid, body.itemId, record.msid]);
   const stream: Source = {
     handle: randomSecret(),
@@ -715,21 +739,95 @@ const MAX_REDIRECTS = 10;
  * the host's credentials (API keys, proxy tokens, ...): another origin only
  * gets the harmless ones.
  */
+/** Calls to this server's public address go to its internal one instead. */
+function internalize(url: URL): URL {
+  const internal = config.party.internalUrl?.replace(/\/+$/, '');
+  const base = config.bootstrap.baseUrl?.replace(/\/+$/, '');
+  if (!internal || !base || internal === base) return url;
+  return url.href === base || url.href.startsWith(`${base}/`)
+    ? new URL(internal + url.href.slice(base.length))
+    : url;
+}
+/** Hosts of this server, which the private-address guard lets through. */
+function ownHosts(): Set<string> {
+  return new Set(
+    [config.bootstrap.baseUrl, config.party.internalUrl]
+      .filter((u): u is string => !!u)
+      .map((u) => new URL(u).hostname)
+  );
+}
+/** Loopback, link-local (cloud metadata) and unspecified addresses. */
+function privateAddress(address: string): boolean {
+  const v4 = address.replace(/^::ffff:/i, '');
+  return (
+    /^(127\.|169\.254\.|0\.)/.test(v4) ||
+    /^(::1?|fe[89ab][0-9a-f]:)/i.test(address)
+  );
+}
+/** Addons' URLs are fetched from inside the cluster: keep them off its private addresses. */
+const guarded = new Agent({
+  connect: {
+    lookup: (hostname, options, callback) =>
+      lookup(hostname, { ...options, all: true }, (error, addresses) => {
+        if (error) return callback(error, '', 0);
+        const list = addresses as LookupAddress[];
+        if (
+          !ownHosts().has(hostname) &&
+          list.some((a) => privateAddress(a.address))
+        )
+          return callback(
+            Object.assign(new Error('Blocked private address'), {
+              code: 'EBLOCKED',
+            }),
+            '',
+            0
+          );
+        if ((options as { all?: boolean }).all)
+          return callback(null, list as never);
+        callback(null, list[0].address, list[0].family);
+      }),
+  },
+});
+function assertPublic(url: URL) {
+  if (
+    isIP(url.hostname.replace(/^\[|\]$/g, '')) &&
+    !ownHosts().has(url.hostname)
+  )
+    if (privateAddress(url.hostname.replace(/^\[|\]$/g, '')))
+      fail(502, 'The source points at a private address');
+}
+/**
+ * Opens the source, following its redirects (or straight at `pinned`). The
+ * source's headers may carry the host's credentials (API keys, proxy tokens,
+ * ...): another origin only gets the harmless ones.
+ */
 async function openUpstream(
   source: Source,
   method: 'GET' | 'HEAD',
-  range?: string
+  range?: string,
+  options: { pinned?: Source['pinned']; headersTimeout?: number } = {}
 ) {
-  const headers: Record<string, string> = Object.fromEntries(
-    Object.entries(source.record.requestHeaders ?? {}).map(([name, value]) => [
-      name.toLowerCase(),
-      value,
-    ])
-  );
+  const headers: Record<string, string> = options.pinned
+    ? { ...options.pinned.headers }
+    : Object.fromEntries(
+        Object.entries(source.record.requestHeaders ?? {}).map(
+          ([name, value]) => [name.toLowerCase(), value]
+        )
+      );
   if (range) headers.range = range;
-  const target = new URL(source.record.url, config.bootstrap.baseUrl);
-  const open = (url: URL) =>
-    request(url, { method, headers, bodyTimeout: 0, headersTimeout: 30000 });
+  const target =
+    options.pinned?.url ??
+    internalize(new URL(source.record.url, config.bootstrap.baseUrl));
+  const open = (url: URL) => {
+    assertPublic(url);
+    return request(url, {
+      method,
+      headers,
+      bodyTimeout: 0,
+      headersTimeout: options.headersTimeout ?? 30000,
+      dispatcher: guarded,
+    });
+  };
   let upstream = await open(target);
   let next = target;
   let hops = 0;
@@ -742,7 +840,9 @@ async function openUpstream(
       await upstream.body.dump().catch(() => {});
       fail(502, 'The source redirects too many times');
     }
-    const location = new URL(String(upstream.headers.location), next);
+    const location = internalize(
+      new URL(String(upstream.headers.location), next)
+    );
     if (!['http:', 'https:'].includes(location.protocol)) {
       await upstream.body.dump().catch(() => {});
       fail(502, 'Invalid source redirect');
@@ -754,7 +854,44 @@ async function openUpstream(
     next = location;
     upstream = await open(next);
   }
+  // Landed on the file itself: later requests go straight there.
+  if (!options.pinned && upstream.statusCode < 400 && !placeholderOf(next)) {
+    const { range: _range, ...kept } = headers;
+    source.pinned = { url: next, headers: kept };
+  }
   return { upstream, url: next };
+}
+/**
+ * Opens the pinned stream; when it stops working (expired link, error,
+ * placeholder), resolves the source again once.
+ */
+async function openSource(
+  source: Source,
+  method: 'GET' | 'HEAD',
+  range?: string
+) {
+  const pinned = source.pinned;
+  if (pinned) {
+    try {
+      const opened = await openUpstream(source, method, range, { pinned });
+      if (opened.upstream.statusCode < 400 && !placeholderOf(opened.url))
+        return opened;
+      await opened.upstream.body.dump().catch(() => {});
+      logger.warn(
+        { status: opened.upstream.statusCode, host: opened.url.hostname },
+        'pinned guest source stopped working; resolving again'
+      );
+    } catch (error) {
+      if (typeof (error as { status?: number }).status === 'number')
+        throw error;
+      logger.warn(
+        { cause: errorCause(error) },
+        'pinned guest source unreachable; resolving again'
+      );
+    }
+    if (source.pinned === pinned) source.pinned = undefined;
+  }
+  return openUpstream(source, method, range);
 }
 /** AIOStreams' own "downloading" / error clips, which players are sent instead of a file. */
 const PLACEHOLDERS: Record<string, { status: number; message: string }> = {
@@ -829,11 +966,19 @@ const sourceError = (status: number, message: string) =>
 async function checkSource(source: Source): Promise<void> {
   let opened;
   try {
-    opened = await openUpstream(source, 'GET', 'bytes=0-0');
+    source.pinned = undefined;
+    opened = await openUpstream(source, 'GET', 'bytes=0-0', {
+      headersTimeout: 15000,
+    });
   } catch (error) {
     if (typeof (error as { status?: number }).status === 'number') throw error;
     logger.warn({ cause: errorCause(error) }, 'guest source unreachable');
-    throw sourceError(502, 'The source could not be reached');
+    throw sourceError(
+      502,
+      errorCause(error) === 'EBLOCKED'
+        ? 'The source points at a private address'
+        : 'The source could not be reached'
+    );
   }
   const { upstream, url } = opened;
   // Discarded cleanly: destroy() would raise an unhandled abort. A source
@@ -863,29 +1008,42 @@ async function checkSource(source: Source): Promise<void> {
     throw sourceError(502, "The source didn't return a media file");
   }
 }
-/** Checks the source, then probes it, retrying a probe that fails once. */
+/** Probe failures a second try can get past: a slow or dropped connection. */
+const TRANSIENT =
+  /timed out|refused|reset|broken pipe|i\/o error|end of file|server returned 5\d\d/i;
+/**
+ * Checks the source, then probes it, trying once more if the probe failed in
+ * a way that can change. Bad data won't, and neither will a down or full
+ * transcoder.
+ */
 async function probeMedia(source: Source): Promise<GuestMedia> {
   await checkSource(source);
-  let last: unknown;
-  for (const wait of [0, 1000, 3000]) {
-    if (wait) await new Promise((r) => setTimeout(r, wait));
-    try {
-      return await worker('/probe', { input: input(source) });
-    } catch (error) {
-      last = error;
-      // The transcoder being down or full won't change in a second.
-      const e = error as { status?: number; unreachable?: boolean };
-      if (e.status === 503 || e.unreachable) break;
-    }
+  try {
+    return await worker('/probe', { input: input(source) });
+  } catch (error) {
+    const e = error as Error & { status?: number; unreachable?: boolean };
+    if (e.status === 503 || e.unreachable || !TRANSIENT.test(e.message))
+      throw error;
+    await new Promise((r) => setTimeout(r, 1000));
+    return await worker('/probe', { input: input(source) });
   }
-  throw last;
 }
 async function forward(source: Source, req: Request, res: Response) {
-  const { upstream, url: next } = await openUpstream(
+  const { upstream, url: next } = await openSource(
     source,
     req.method === 'HEAD' ? 'HEAD' : 'GET',
     req.headers.range
   );
+  // A clip in place of the file must not reach FFmpeg as the episode.
+  const placeholder = placeholderOf(next);
+  if (placeholder) {
+    await upstream.body.dump().catch(() => {});
+    logger.warn(
+      { file: next.pathname.split('/').pop(), status: placeholder.status },
+      'guest source turned into a placeholder'
+    );
+    throw sourceError(placeholder.status, placeholder.message);
+  }
   if (upstream.statusCode >= 400)
     logger.warn(
       { status: upstream.statusCode, host: next.hostname },
@@ -913,14 +1071,16 @@ async function forward(source: Source, req: Request, res: Response) {
 // Opaque input handles are known only to this server and its private companion.
 router.all('/source/:handle', async (req, res) => {
   const source = sources.get(String(req.params.handle));
-  if (!source) fail(404, 'Source expired');
-  const alive =
-    source.party === OWN
-      ? transcoderReady()
-      : enabled() &&
-        bindings.has(source.party) &&
-        !!(await guestPartyState(source.party));
-  if (!alive) fail(404, 'Source expired');
+  const refuse = (reason: string): never => {
+    logger.warn({ reason }, 'guest source handle refused');
+    fail(404, 'Source expired');
+  };
+  if (!source) return refuse('unknown handle');
+  if (source.party === OWN) {
+    if (!transcoderReady()) refuse('transcoder not configured');
+  } else if (!enabled()) refuse('guest streaming off');
+  else if (!bindings.has(source.party)) refuse('party no longer shared');
+  else if (!(await guestPartyState(source.party))) refuse('party ended');
   if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Method not allowed');
   await forward(source, req, res);
 });

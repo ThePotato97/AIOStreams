@@ -69,4 +69,9 @@ describe('afterOpenError', () => {
       reason: undefined,
     });
   });
+  it('plays directly on a 503 without a retry time (no transcoder, or full)', () => {
+    expect(
+      afterOpenError({ status: 503, message: 'Conversion is not set up' }, 0, 0)
+    ).toEqual({ action: 'direct', reason: 'Conversion is not set up' });
+  });
 });

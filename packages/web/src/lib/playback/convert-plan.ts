@@ -27,7 +27,11 @@ export function afterOpenError(
 ): OpenPlan {
   // The server's own words; the player has its own default when there are none.
   const reason = error.message || undefined;
-  if (error.status === 425 || error.status === 503) {
+  // A 503 without a retry time (no transcoder set up, or full) won't clear.
+  if (
+    error.status === 425 ||
+    (error.status === 503 && error.retryAfter != null)
+  ) {
     const ms = Math.max(1, error.retryAfter ?? DEFAULT_RETRY_MS / 1000) * 1000;
     return waitedMs + ms <= MAX_WAIT_MS
       ? { action: 'wait', ms }

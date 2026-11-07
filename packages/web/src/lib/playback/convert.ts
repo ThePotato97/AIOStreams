@@ -12,6 +12,8 @@ import { toast } from 'sonner';
 import type { EngineFactory, EngineFile, PlayerEngine } from './engine';
 import { videoEngine } from './video';
 import { afterOpenError, type OpenError } from './convert-plan';
+import { serverSubtitles } from './server-subtitles';
+import { party } from '../party/party';
 
 /*
  * A browser plays the video of most releases but not their audio (E-AC-3,
@@ -72,8 +74,9 @@ class OwnApi extends GuestApi {
  * item and version it names, so switching version or episode converts the new
  * one; a version the browser can play whole is served as it is.
  *
- * A file still downloading is waited for; if conversion can't start at all,
- * the file plays directly, which at worst is silent, rather than not at all.
+ * A file still downloading is waited for. If conversion can't start, at open
+ * or while preparing the stream, the file plays directly (silent at worst,
+ * rather than not at all), and that item and version keep playing directly.
  */
 export function convertingEngine(
   video: React.RefObject<HTMLVideoElement | null>,
@@ -83,33 +86,62 @@ export function convertingEngine(
   const api = new OwnApi(root);
   let info: GuestCurrent | null = null;
   let opened = '';
+  // Only party sync asks again and again for a spot not converted yet.
   const inner = guestEngine(
     video,
     api,
     () => info!,
-    () => {}
+    () => {},
+    {
+      holdUnwritten: () => !!party.state(),
+    }
   );
+  /** Item and version keys that couldn't convert: they play directly. */
+  const direct = new Set<string>();
+  const keyOf = (file: EngineFile) =>
+    `${file.item.Id ?? ''}:${file.source.Id ?? ''}`;
   return (emit, opts) => {
-    const converting = inner.factory(emit, opts);
-    let direct: PlayerEngine | null = null;
-    let active: PlayerEngine = converting;
+    let directEngine: PlayerEngine | null = null;
+    let active: PlayerEngine;
     let loading = 0;
+    /** The load converting now, until it has loaded: a failure falls back. */
+    let starting: EngineFile | null = null;
+    const converting = inner.factory((event) => {
+      if (active === converting && starting) {
+        if (event.type === 'failed') {
+          const next = starting;
+          starting = null;
+          return playDirect(next, event.error);
+        }
+        if (event.type === 'loaded') starting = null;
+      }
+      emit(event);
+    }, opts);
+    active = converting;
     const use = (engine: PlayerEngine) => {
       if (active !== engine) active.close();
       active = engine;
     };
+    const loadDirect = (next: EngineFile) => {
+      directEngine ??= videoEngine(video)(emit, opts);
+      use(directEngine);
+      // This engine reads the file's own subtitles, the converting one didn't.
+      directEngine.load({
+        ...next,
+        subtitles: serverSubtitles(client, next.source, false),
+      });
+    };
     const playDirect = (next: EngineFile, reason?: string) => {
-      direct ??= videoEngine(video)(emit, opts);
-      use(direct);
+      direct.add(keyOf(next));
       toast.warning(
         t`Couldn't convert the audio for this browser, so it may play without sound.`,
         { description: reason ?? t`Conversion is unavailable on this server.` }
       );
-      direct.load(next);
+      loadDirect(next);
     };
     const open = async (next: EngineFile, at: number) => {
       const itemId = next.item.Id!;
-      const key = `${itemId}:${next.source.Id ?? ''}`;
+      const key = keyOf(next);
       if (key === opened && info) return true;
       const started = Date.now();
       for (let attempt = 0; ; attempt++) {
@@ -153,9 +185,12 @@ export function convertingEngine(
     };
     const load = (next: EngineFile) => {
       const at = ++loading;
+      starting = null;
+      if (direct.has(keyOf(next))) return loadDirect(next);
       void open(next, at).then((ready) => {
         if (!ready || at !== loading) return;
         use(converting);
+        starting = next;
         converting.load(next);
       });
     };
@@ -167,6 +202,7 @@ export function convertingEngine(
           : prop === 'close'
             ? () => {
                 loading++;
+                starting = null;
                 active.close();
               }
             : Reflect.get(active, prop),
