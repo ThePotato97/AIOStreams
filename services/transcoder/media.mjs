@@ -184,6 +184,9 @@ export function ffmpegArgs(
     args.push('-init_hw_device', 'opencl=ocl', '-filter_hw_device', 'ocl');
   // Seek before input for ordinary streams. Burn-in retains the source timeline.
   if (!policy.burn) args.push('-ss', String(offset));
+  // With the video copied, the audio starts at the same keyframe rather than
+  // at the seek, as Plex does: no stretch of picture without sound.
+  if (policy.copyVideo) args.push('-noaccurate_seek');
   args.push('-i', input);
   const filters = [];
   if (policy.burn) {
@@ -207,8 +210,11 @@ export function ffmpegArgs(
       : `0:${policy.video.index}`
   );
   if (policy.audio) args.push('-map', `0:${policy.audio.index}`);
-  if (policy.copyVideo) args.push('-c:v', 'copy');
-  else {
+  if (policy.copyVideo) {
+    args.push('-c:v', 'copy');
+    // Browsers and Safari's player expect HEVC tagged hvc1.
+    if (policy.video?.codec === 'hevc') args.push('-tag:v', 'hvc1');
+  } else {
     if (policy.video?.hdr)
       filters.push(gpuTonemap ? OPENCL_TONEMAP : CPU_TONEMAP);
     const height =
@@ -254,7 +260,9 @@ export function ffmpegArgs(
     );
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
-  if (policy.audio && !policy.copyAudio) args.push('-ac', '2', '-b:a', '192k');
+  if (policy.audio && !policy.copyAudio)
+    // Keeps converted audio continuous where the source's has gaps (Plex).
+    args.push('-af', 'aresample=async=1', '-ac', '2', '-b:a', '192k');
   args.push(
     '-sn',
     '-map_metadata',
@@ -269,24 +277,30 @@ export function ffmpegArgs(
     // Video read before the audio's first packet waits here.
     '-max_muxing_queue_size',
     '2048',
+    // DASH, video and audio in separate streams (as Plex does), each with
+    // its own segments and timestamps.
     '-f',
-    'hls',
-    '-hls_time',
+    'dash',
+    '-dash_segment_type',
+    'mp4',
+    '-seg_duration',
     '4',
-    '-hls_playlist_type',
-    'event',
-    '-hls_segment_type',
-    'fmp4',
-    // The audio's later start goes in each fragment's timestamps (tfdt), not
-    // an edit list, which hls.js and MSE don't apply; no sidx, which makes
-    // FFmpeg rewrite timestamps at open-GOP boundaries.
-    '-hls_segment_options',
+    '-use_template',
+    '1',
+    '-use_timeline',
+    '1',
+    '-adaptation_sets',
+    policy.audio ? 'id=0,streams=v id=1,streams=a' : 'id=0,streams=v',
+    // Each fragment's timestamps (tfdt) are the source's, as the manifest
+    // says, not an edit list, which browsers don't apply; no sidx, which
+    // makes FFmpeg rewrite timestamps at open-GOP boundaries.
+    '-format_options',
     'movflags=+frag_discont+skip_sidx',
-    '-hls_fmp4_init_filename',
-    'init.mp4',
-    '-hls_segment_filename',
-    `${output}/segment-%06d.m4s`,
-    `${output}/index.m3u8`
+    '-init_seg_name',
+    'init-$RepresentationID$.m4s',
+    '-media_seg_name',
+    'chunk-$RepresentationID$-$Number%05d$.m4s',
+    `${output}/manifest.mpd`
   );
   // Where HDR was tone-mapped, for the fallback and /health.
   const tonemap =
@@ -314,47 +328,118 @@ function* boxes(data, from = 0, to = data.length) {
     at += size;
   }
 }
-const child = (data, from, to, type) => {
-  for (const box of boxes(data, from, to)) if (box[0] === type) return box;
+const child = (data, box, type) => {
+  if (!box) return null;
+  for (const found of boxes(data, box[1], box[2]))
+    if (found[0] === type) return found;
   return null;
 };
+const hex = (n) => n.toString(16).toUpperCase();
 /**
- * Where a converted stream starts, in seconds of the source: its first
- * fragment's earliest decode time (tfdt), which is where hls.js puts the
- * player's 0. Null if the segment can't be read.
+ * The RFC 6381 codec string of the video in an init segment, from its
+ * configuration box. FFmpeg's DASH muxer writes only "hvc1", "av01" or
+ * "vp09", which browsers reject. Null when there's nothing to build from.
  */
-export function streamStart(init, segment) {
-  const timescales = new Map();
-  const moov = child(init, 0, init.length, 'moov');
-  if (!moov) return null;
-  for (const [type, from, to] of boxes(init, moov[1], moov[2])) {
-    if (type !== 'trak') continue;
-    const tkhd = child(init, from, to, 'tkhd');
-    const mdia = child(init, from, to, 'mdia');
-    const mdhd = mdia && child(init, mdia[1], mdia[2], 'mdhd');
-    if (!tkhd || !mdhd) continue;
-    const id = init.readUInt32BE(tkhd[1] + (init[tkhd[1]] === 1 ? 20 : 12));
-    timescales.set(
-      id,
-      init.readUInt32BE(mdhd[1] + (init[mdhd[1]] === 1 ? 20 : 12))
-    );
+export function videoCodec(init) {
+  const whole = [null, 0, init.length];
+  const stbl = child(
+    init,
+    child(
+      init,
+      child(init, child(init, child(init, whole, 'moov'), 'trak'), 'mdia'),
+      'minf'
+    ),
+    'stbl'
+  );
+  const stsd = child(init, stbl, 'stsd');
+  if (!stsd) return null;
+  // stsd: version, flags and entry count, then the sample entry.
+  const entry = boxes(init, stsd[1] + 8, stsd[2]).next().value;
+  if (!entry) return null;
+  const [type, from, to] = entry;
+  // A visual sample entry's fields come before its child boxes.
+  const config = (name) => {
+    for (const box of boxes(init, from + 78, to))
+      if (box[0] === name) return box;
+    return null;
+  };
+  if (type === 'hvc1' || type === 'hev1') {
+    const c = config('hvcC');
+    if (!c) return null;
+    const b = init.subarray(c[1], c[2]);
+    const space = ['', 'A', 'B', 'C'][b[1] >> 6];
+    const tier = b[1] & 0x20 ? 'H' : 'L';
+    const profile = b[1] & 0x1f;
+    // The compatibility flags, bit-reversed.
+    let flags = b.readUInt32BE(2),
+      reversed = 0;
+    for (let i = 0; i < 32; i++) {
+      reversed = (reversed << 1) | (flags & 1);
+      flags >>>= 1;
+    }
+    const constraints = [...b.subarray(6, 12)];
+    while (constraints.length && !constraints.at(-1)) constraints.pop();
+    return [
+      type,
+      `${space}${profile}`,
+      hex(reversed >>> 0),
+      `${tier}${b[12]}`,
+      ...constraints.map(hex),
+    ].join('.');
   }
-  const moof = child(segment, 0, segment.length, 'moof');
-  if (!moof) return null;
-  let start = Infinity;
-  for (const [type, from, to] of boxes(segment, moof[1], moof[2])) {
-    if (type !== 'traf') continue;
-    const tfhd = child(segment, from, to, 'tfhd');
-    const tfdt = child(segment, from, to, 'tfdt');
-    if (!tfhd || !tfdt) continue;
-    const scale = timescales.get(segment.readUInt32BE(tfhd[1] + 4));
-    if (!scale) continue;
-    const time =
-      segment[tfdt[1]] === 1
-        ? Number(segment.readBigInt64BE(tfdt[1] + 4))
-        : segment.readUInt32BE(tfdt[1] + 4);
-    // AAC's priming before 0 is negative, which hls.js ignores too.
-    if (time >= 0) start = Math.min(start, time / scale);
+  if (type === 'avc1' || type === 'avc3') {
+    const c = config('avcC');
+    if (!c) return null;
+    return `${type}.${[1, 2, 3]
+      .map((i) => init[c[1] + i].toString(16).padStart(2, '0'))
+      .join('')}`;
+  }
+  if (type === 'av01') {
+    const c = config('av1C');
+    if (!c) return null;
+    const p = init[c[1] + 1],
+      q = init[c[1] + 2];
+    const depth = q & 0x40 ? (q & 0x20 ? 12 : 10) : 8;
+    return `av01.${p >> 5}.${String(p & 0x1f).padStart(2, '0')}${q & 0x80 ? 'H' : 'M'}.${String(depth).padStart(2, '0')}`;
+  }
+  if (type === 'vp09') {
+    const c = config('vpcC');
+    if (!c) return null;
+    // A full box: version and flags first.
+    const [profile, level, bits] = [4, 5, 6].map((i) => init[c[1] + i]);
+    return `vp09.${[profile, level, bits >> 4]
+      .map((n) => String(n).padStart(2, '0'))
+      .join('.')}`;
+  }
+  return null;
+}
+/** Whether every stream in the manifest has a segment written. */
+export function manifestReady(mpd) {
+  const sets = mpd.split('<AdaptationSet').slice(1);
+  return sets.length > 0 && sets.every((set) => /<S [^>]*d="/.test(set));
+}
+/**
+ * Where a converted stream can play from, in seconds of the source: the
+ * point every stream in the manifest has started. Null if none is listed.
+ */
+export function manifestStart(mpd) {
+  let start = -Infinity;
+  for (const [, template] of mpd.matchAll(
+    /<SegmentTemplate([\s\S]*?)<\/SegmentTemplate>/g
+  )) {
+    const scale = Number(/timescale="(\d+)"/.exec(template)?.[1]);
+    const first = Number(/<S t="(\d+)"/.exec(template)?.[1]);
+    if (scale > 0 && Number.isFinite(first))
+      start = Math.max(start, first / scale);
   }
   return Number.isFinite(start) ? start : null;
+}
+/** The manifest with the video's full codec string in place of FFmpeg's bare one. */
+export function withVideoCodec(mpd, codec) {
+  if (!codec) return mpd;
+  return mpd.replace(
+    /(mimeType="video\/mp4" codecs=")([a-z0-9]{4})(")/,
+    (whole, a, bare, b) =>
+      codec.startsWith(bare.slice(0, 3)) ? `${a}${codec}${b}` : whole
+  );
 }

@@ -1,55 +1,74 @@
 /* eslint-disable lingui/no-unlocalized-strings -- test data, not UI text. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-type Handler = (event: string, data: unknown) => void;
-const fakes = vi.hoisted(() => ({
-  hls: [] as FakeHls[],
-  hlsSupported: true,
-  raw: undefined as
-    | {
-        emit: (event: unknown) => void;
-        loads: { url: string; startMs: number }[];
-      }
-    | undefined,
-}));
-interface FakeHls {
-  config: { startPosition?: number };
-  handlers: Map<string, Handler>;
-  startLoad: ReturnType<typeof vi.fn>;
-  recoverMediaError: ReturnType<typeof vi.fn>;
-  destroyed: boolean;
-  fire(event: string, data?: unknown): void;
-}
+const fakes = vi.hoisted(() => {
+  /** Shaka Player, as far as the engine uses it. */
+  class FakePlayer extends EventTarget {
+    config: Record<string, unknown> = {};
+    attached: unknown = null;
+    loads: [string, number | null | undefined][] = [];
+    destroyed = false;
+    retryStreaming = vi.fn(() => fakes.retryWorks);
+    /** Where the manifest's last segment ends. */
+    maxSegmentEnd: number | null = null;
+    getManifest() {
+      return {
+        presentationTimeline: {
+          getMaxSegmentEndTime: () => this.maxSegmentEnd,
+        },
+      };
+    }
+    constructor() {
+      super();
+      fakes.players.push(this);
+    }
+    configure(config: Record<string, unknown>) {
+      this.config = config;
+      return true;
+    }
+    async attach(video: unknown) {
+      this.attached = video;
+    }
+    load(url: string, start?: number | null) {
+      this.loads.push([url, start]);
+      return fakes.loadResult();
+    }
+    async destroy() {
+      this.destroyed = true;
+    }
+    fire(type: string, detail?: unknown) {
+      this.dispatchEvent(new CustomEvent(type, { detail }));
+    }
+  }
+  const fakes = {
+    players: [] as FakePlayer[],
+    supported: true,
+    retryWorks: true,
+    loadResult: (): Promise<void> => Promise.resolve(),
+    FakePlayer,
+    raw: undefined as
+      | {
+          emit: (event: unknown) => void;
+          loads: { url: string; startMs: number }[];
+          seek: (ms: number) => void;
+        }
+      | undefined,
+  };
+  return fakes;
+});
 
 vi.mock('@lingui/core/macro', () => ({
   t: (s: TemplateStringsArray, ...v: unknown[]) => String.raw({ raw: s }, ...v),
 }));
 vi.mock('./capabilities', () => ({ browserCapabilities: async () => ({}) }));
-vi.mock('hls.js', () => {
-  class Hls {
-    static Events = { ERROR: 'hlsError', FRAG_BUFFERED: 'hlsFragBuffered' };
-    static isSupported = () => fakes.hlsSupported;
-    handlers = new Map<string, Handler>();
-    startLoad = vi.fn();
-    recoverMediaError = vi.fn();
-    destroyed = false;
-    constructor(public config: { startPosition?: number }) {
-      fakes.hls.push(this as unknown as FakeHls);
-    }
-    on(event: string, handler: Handler) {
-      this.handlers.set(event, handler);
-    }
-    fire(event: string, data?: unknown) {
-      this.handlers.get(event)?.(event, data);
-    }
-    loadSource() {}
-    attachMedia() {}
-    destroy() {
-      this.destroyed = true;
-    }
-  }
-  return { default: Hls };
-});
+vi.mock('shaka-player', () => ({
+  default: {
+    Player: Object.assign(fakes.FakePlayer, {
+      isBrowserSupported: () => fakes.supported,
+    }),
+    polyfill: { installAll() {} },
+  },
+}));
 // The raw engine: loads go to the attach function, as the real one's do.
 vi.mock('../playback/video', () => ({
   videoEngine:
@@ -100,8 +119,11 @@ let el: {
   currentTime: number;
   error: { code: number; message?: string } | null;
   src: string;
-  canPlayType: () => string;
-  seekable: { length: number };
+  seekable: {
+    length: number;
+    start?: (i: number) => number;
+    end?: (i: number) => number;
+  };
 };
 let prepares: { force?: boolean; positionMs: number }[];
 let touch: () => Promise<unknown>;
@@ -113,7 +135,7 @@ function setup(options: Parameters<typeof guestEngine>[4] = {}) {
       prepares.push(body);
       return {
         mode,
-        url: `/party/guest/media/${mode === 'direct' ? 'original' : 'job/index.m3u8'}?token=t&lease=l`,
+        url: `/party/guest/media/${mode === 'direct' ? 'original' : 'job/manifest.mpd'}?token=t&lease=l`,
         offsetMs: 0,
         lease: 'l'.repeat(43),
       };
@@ -134,34 +156,31 @@ const start = async (engine: ReturnType<typeof setup>['engine'], at = 0) => {
   engine.load({ startMs: at, paused: false } as unknown as EngineFile);
   await vi.advanceTimersByTimeAsync(0);
 };
-const hls = () => fakes.hls.at(-1)!;
-const networkError = (code = 404) => ({
-  type: 'networkError',
-  details: 'fragLoadError',
-  fatal: true,
-  response: { code },
+const player = () => fakes.players.at(-1)!;
+/** A Shaka error, critical unless said otherwise. */
+const shakaError = (category: number, code: number, extra = {}) => ({
+  category,
+  code,
+  severity: 2,
+  data: [],
+  ...extra,
 });
-const mediaError = {
-  type: 'mediaError',
-  details: 'bufferAppendError',
-  fatal: true,
-};
+const notFound = (status = 404) =>
+  shakaError(1, 1001, {
+    data: ['https://aio.example/chunk-0-00069.m4s', status],
+  });
+const videoError = () => shakaError(3, 3016);
 
 beforeEach(() => {
   vi.useFakeTimers();
-  fakes.hls = [];
-  fakes.hlsSupported = true;
+  fakes.players = [];
+  fakes.supported = true;
+  fakes.retryWorks = true;
+  fakes.loadResult = () => Promise.resolve();
   prepares = [];
   touch = async () => ({ ok: true });
   mode = 'audio';
-  el = {
-    currentTime: 0,
-    error: null,
-    src: '',
-    // What Chrome answers: it claims to play HLS itself.
-    canPlayType: () => 'maybe',
-    seekable: { length: 0 },
-  };
+  el = { currentTime: 0, error: null, src: '', seekable: { length: 0 } };
   vi.stubGlobal('window', { location: { href: 'https://aio.example/watch' } });
 });
 afterEach(() => {
@@ -170,91 +189,191 @@ afterEach(() => {
 });
 
 describe('which player opens the stream', () => {
-  it('uses hls.js in Chrome, starting where playback is', async () => {
+  it('plays a converted stream with Shaka, from where playback is', async () => {
     const { engine } = setup();
-    await start(engine, 754_000);
-    expect(fakes.hls).toHaveLength(1);
+    await start(engine, 754_300);
+    expect(fakes.players).toHaveLength(1);
+    expect(player().attached).toBe(el);
+    // The manifest keeps the source's timestamps: the position is absolute.
+    expect(player().loads).toEqual([
+      [
+        'https://aio.example/party/guest/media/job/manifest.mpd?token=t&lease=l',
+        754.3,
+      ],
+    ]);
     expect(el.src).toBe('');
-    // Not hls.js's default of the newest segment, for an unfinished playlist.
-    expect(hls().config.startPosition).toBe(754);
   });
-  it("uses Safari's own player", async () => {
-    vi.stubGlobal('window', {
-      location: { href: 'https://aio.example/watch' },
-      ManagedMediaSource: class {},
-    });
+  it("ignores the manifest's live delay and minimum buffer", async () => {
     const { engine } = setup();
     await start(engine);
-    expect(fakes.hls).toHaveLength(0);
-    expect(el.src).toContain('index.m3u8');
+    expect(player().config).toMatchObject({
+      manifest: {
+        defaultPresentationDelay: 0,
+        dash: {
+          ignoreMinBufferTime: true,
+          ignoreSuggestedPresentationDelay: true,
+        },
+      },
+    });
+  });
+  it('plays the original file as it is', async () => {
+    mode = 'direct';
+    const { engine } = setup();
+    await start(engine);
+    expect(fakes.players).toHaveLength(0);
+    expect(el.src).toContain('/media/original');
+  });
+  it('says so where the browser has no Media Source', async () => {
+    fakes.supported = false;
+    const { engine, failures } = setup();
+    await start(engine);
+    expect(failures()).toEqual([
+      { type: 'failed', error: 'This browser cannot play converted streams' },
+    ]);
+  });
+  it('replaces the player for each new stream, and closes it', async () => {
+    const { engine } = setup();
+    await start(engine);
+    const first = player();
+    engine.seek(3_000_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.destroyed).toBe(true);
+    expect(fakes.players).toHaveLength(2);
+    engine.close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(player().destroyed).toBe(true);
+  });
+});
+
+describe('seeking in a converted stream', () => {
+  // The live manifest's seekable range follows the clock: 40 s to 78 s,
+  // though segments to 148 s are written.
+  const live = () => {
+    el.seekable = { length: 1, start: () => 40, end: () => 78 };
+    player().maxSegmentEnd = 148;
+  };
+  it('seeks in place to what the manifest lists, past the seekable range', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    live();
+    engine.seek(125_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fakes.raw!.seek).toHaveBeenCalledWith(125_000);
+    expect(prepares).toHaveLength(1);
+  });
+  it('converts from a spot past what the manifest lists', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    live();
+    engine.seek(900_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fakes.raw!.seek).not.toHaveBeenCalled();
+    expect(prepares.at(-1)?.positionMs).toBe(900_000);
   });
 });
 
 describe('a stream that cannot be fetched', () => {
-  it('is reloaded, not converted again, and then reported with why', async () => {
+  it('is fetched again, not converted again, and then reported with why', async () => {
     const { engine, failures } = setup();
     await start(engine);
     for (let i = 1; i <= 3; i++) {
-      hls().fire('hlsError', networkError());
+      player().fire('error', notFound());
       await vi.advanceTimersByTimeAsync(2000 * i);
-      expect(hls().startLoad).toHaveBeenCalledTimes(i);
+      expect(player().retryStreaming).toHaveBeenCalledTimes(i);
     }
     expect(failures()).toHaveLength(0);
-    hls().fire('hlsError', networkError());
+    player().fire('error', notFound());
     expect(prepares).toHaveLength(1);
     expect(failures()).toHaveLength(1);
-    expect(failures()[0].error).toContain('fragLoadError, HTTP 404');
+    expect(failures()[0].error).toContain('BAD_HTTP_STATUS, HTTP 404');
     expect(failures()[0].retry).toBeDefined();
   });
-  it('gets its reloads back once a fragment plays', async () => {
+  it('is loaded again where it was when streaming cannot resume', async () => {
+    fakes.retryWorks = false;
+    const { engine } = setup();
+    await start(engine, 30_000);
+    el.currentTime = 41.5;
+    player().fire('error', shakaError(1, 1003));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(player().loads.at(-1)?.[1]).toBe(41.5);
+  });
+  it('gets its retries back once the stream plays on', async () => {
     const { engine, failures } = setup();
     await start(engine);
     for (let i = 0; i < 6; i++) {
-      hls().fire('hlsError', networkError());
+      player().fire('error', notFound());
       await vi.advanceTimersByTimeAsync(2000);
-      hls().fire('hlsFragBuffered');
+      player().fire('segmentappended');
     }
-    expect(hls().startLoad).toHaveBeenCalledTimes(6);
+    expect(player().retryStreaming).toHaveBeenCalledTimes(6);
     expect(failures()).toHaveLength(0);
   });
   it('is reported once, however many errors follow', async () => {
     const { engine, failures } = setup();
     await start(engine);
-    hls().fire('hlsError', { ...networkError(), type: 'otherError' });
-    hls().fire('hlsError', { ...networkError(), type: 'otherError' });
-    el.error = { code: 2 };
-    fakes.raw!.emit({ type: 'failed', error: 'x' });
+    player().fire('error', shakaError(5, 5999));
+    player().fire('error', shakaError(5, 5999));
     expect(failures()).toHaveLength(1);
   });
-  it('ignores errors hls.js recovers from itself', async () => {
+  it('ignores errors Shaka recovers from itself', async () => {
     const { engine, failures } = setup();
     await start(engine);
-    hls().fire('hlsError', { ...networkError(), fatal: false });
+    player().fire('error', { ...notFound(), severity: 1 });
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(hls().startLoad).not.toHaveBeenCalled();
+    expect(player().retryStreaming).not.toHaveBeenCalled();
     expect(failures()).toHaveLength(0);
+  });
+  it('counts an error once when the load reports it too', async () => {
+    const error = shakaError(1, 1002);
+    fakes.loadResult = () => Promise.reject(error);
+    const { engine } = setup();
+    await start(engine);
+    player().fire('error', error);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(player().retryStreaming).toHaveBeenCalledTimes(1);
+  });
+  it('ignores a load cut short by the next one', async () => {
+    fakes.loadResult = () => Promise.reject(shakaError(7, 7000));
+    const { engine, failures } = setup();
+    await start(engine);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(failures()).toHaveLength(0);
+    expect(player().retryStreaming).not.toHaveBeenCalled();
   });
 });
 
 describe('a stream the browser cannot decode', () => {
-  it('is recovered in place, then converted in full, for a guest', async () => {
+  it('is reloaded in place, then converted in full, for a guest', async () => {
     const { engine, failures } = setup();
     await start(engine, 30_000);
     el.currentTime = 40;
-    hls().fire('hlsError', mediaError);
-    hls().fire('hlsError', mediaError);
-    expect(hls().recoverMediaError).toHaveBeenCalledTimes(2);
+    player().fire('error', videoError());
+    player().fire('error', videoError());
+    // Reloaded at the same spot, twice.
+    expect(
+      player()
+        .loads.slice(1)
+        .map(([, at]) => at)
+    ).toEqual([40, 40]);
     expect(prepares).toHaveLength(1);
-    hls().fire('hlsError', mediaError);
+    player().fire('error', videoError());
     await vi.advanceTimersByTimeAsync(0);
     expect(prepares).toHaveLength(2);
     expect(prepares[1]).toMatchObject({ force: true, positionMs: 40_000 });
     expect(failures()).toHaveLength(0);
     // Converted in full and still failing: reported, not converted again.
-    for (let i = 0; i < 3; i++) hls().fire('hlsError', mediaError);
+    for (let i = 0; i < 3; i++) player().fire('error', videoError());
     expect(prepares).toHaveLength(2);
     expect(failures()).toHaveLength(1);
-    expect(failures()[0].error).toContain('bufferAppendError');
+    expect(failures()[0].error).toContain('VIDEO_ERROR');
+  });
+  it('is converted in full when the browser has no decoder for its video', async () => {
+    // Shaka refuses the manifest outright: no stream it can play.
+    fakes.loadResult = () => Promise.reject(shakaError(4, 4032));
+    const { engine } = setup();
+    await start(engine);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.map((p) => p.force)).toEqual([false, true]);
   });
   it("is reported, not converted in full, where that's off", async () => {
     const { engine, failures } = setup({
@@ -262,18 +381,18 @@ describe('a stream the browser cannot decode', () => {
       failedMessage: (detail) => detail,
     });
     await start(engine);
-    for (let i = 0; i < 3; i++) hls().fire('hlsError', mediaError);
+    for (let i = 0; i < 3; i++) player().fire('error', videoError());
     expect(prepares).toHaveLength(1);
     expect(failures()).toEqual([
-      expect.objectContaining({ error: 'bufferAppendError' }),
+      expect.objectContaining({ error: 'VIDEO_ERROR' }),
     ]);
   });
-  it('recovers an error the element reports while hls.js plays', async () => {
+  it("leaves the element's own errors to Shaka while it plays", async () => {
     const { engine, failures } = setup();
     await start(engine);
     el.error = { code: 3, message: 'PIPELINE_ERROR_DECODE' };
     fakes.raw!.emit({ type: 'failed', error: 'x' });
-    expect(hls().recoverMediaError).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
     expect(prepares).toHaveLength(1);
     expect(failures()).toHaveLength(0);
   });
@@ -299,19 +418,20 @@ describe('a stream the browser cannot decode', () => {
 });
 
 describe('a playback the server dropped', () => {
-  it('is not reloaded, and is handed to whoever handles it', async () => {
+  it('is not fetched again, and is handed to whoever handles it', async () => {
     const onExpired = vi.fn();
     const { engine, failures } = setup({ onExpired });
     await start(engine);
-    hls().fire('hlsError', networkError(410));
-    expect(hls().startLoad).not.toHaveBeenCalled();
+    player().fire('error', notFound(410));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(player().retryStreaming).not.toHaveBeenCalled();
     expect(onExpired).toHaveBeenCalledTimes(1);
     expect(failures()).toHaveLength(0);
   });
   it('is reported as failed for a guest, without a retry that cannot work', async () => {
     const { engine, failures } = setup();
     await start(engine);
-    hls().fire('hlsError', networkError(401));
+    player().fire('error', notFound(401));
     expect(failures()).toHaveLength(1);
     expect(failures()[0].retry).toBeUndefined();
   });

@@ -3,68 +3,52 @@ import { describe, expect, it } from 'vitest';
 import {
   afterFailure,
   elementFailure,
-  hlsFailure,
-  hlsPlayer,
+  interrupted,
+  shakaFailure,
   recovery,
   MEDIA_RECOVERIES,
   NETWORK_RECOVERIES,
 } from './failure';
 
-describe('hlsPlayer', () => {
-  it('uses hls.js in Chrome, which claims HLS but fails on some streams', () => {
-    expect(
-      hlsPlayer({ native: true, managedMediaSource: false, hlsJs: true })
-    ).toBe('hls.js');
-  });
-  it("uses Safari's own player", () => {
-    expect(
-      hlsPlayer({ native: true, managedMediaSource: true, hlsJs: true })
-    ).toBe('native');
-  });
-  it('falls back to the native player where hls.js cannot run', () => {
-    expect(
-      hlsPlayer({ native: true, managedMediaSource: false, hlsJs: false })
-    ).toBe('native');
-    expect(
-      hlsPlayer({ native: false, managedMediaSource: false, hlsJs: false })
-    ).toBeNull();
-  });
-});
-
 describe('failures', () => {
-  it('keeps what hls.js reported', () => {
+  it('keeps what Shaka reported, with the status of a refused request', () => {
     expect(
-      hlsFailure({
-        type: 'networkError',
-        details: 'fragLoadError',
-        fatal: true,
-        response: { code: 404 },
+      shakaFailure({
+        category: 1,
+        code: 1001,
+        severity: 2,
+        data: ['https://aio.example/chunk-0-00069.m4s', 404, '', {}],
       })
     ).toEqual({
       kind: 'network',
       status: 404,
-      detail: 'fragLoadError, HTTP 404',
+      detail: 'BAD_HTTP_STATUS, HTTP 404',
     });
-    expect(
-      hlsFailure({
-        type: 'mediaError',
-        details: 'bufferAppendError',
-        fatal: true,
-      })
-    ).toEqual({
-      kind: 'media',
+    expect(shakaFailure({ category: 1, code: 1003 })).toEqual({
+      kind: 'network',
       status: undefined,
-      detail: 'bufferAppendError',
+      detail: 'TIMEOUT',
     });
-    // A network error with no answer at all has code 0.
-    expect(
-      hlsFailure({
-        type: 'networkError',
-        details: 'fragLoadTimeOut',
-        fatal: true,
-        response: { code: 0 },
-      }).status
-    ).toBeUndefined();
+    expect(shakaFailure({ category: 3, code: 3016 }).kind).toBe('media');
+    // Unknown codes are named by number.
+    expect(shakaFailure({ category: 5, code: 5999 })).toEqual({
+      kind: 'other',
+      status: undefined,
+      detail: 'Shaka error 5999',
+    });
+  });
+  it('treats a manifest the browser can decode nothing of as a decoding failure', () => {
+    // The only video is a codec this browser lacks: converting it changes that.
+    expect(shakaFailure({ category: 4, code: 4032 }).kind).toBe('media');
+    expect(shakaFailure({ category: 4, code: 4012 }).kind).toBe('media');
+    // A manifest that won't parse is not.
+    expect(shakaFailure({ category: 4, code: 4001 }).kind).toBe('other');
+  });
+  it('knows a load cut short by another, or by closing', () => {
+    expect(interrupted({ category: 7, code: 7000 })).toBe(true);
+    expect(interrupted({ category: 7, code: 7003 })).toBe(true);
+    expect(interrupted({ category: 1, code: 7000 })).toBe(false);
+    expect(interrupted({ category: 1, code: 1001 })).toBe(false);
   });
   it("keeps the element's error code and message", () => {
     expect(

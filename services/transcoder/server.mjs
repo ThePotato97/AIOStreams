@@ -6,7 +6,15 @@ import { mkdir, rm, readFile, stat, readdir } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
-import { metadata, ffmpegArgs, select, streamStart } from './media.mjs';
+import {
+  metadata,
+  ffmpegArgs,
+  select,
+  manifestReady,
+  manifestStart,
+  videoCodec,
+  withVideoCodec,
+} from './media.mjs';
 
 const exec = promisify(execFile);
 const secret = process.env.TRANSCODER_SECRET ?? '';
@@ -209,21 +217,6 @@ function start(job, encoder, tonemap = 'gpu') {
     else job.finished = true;
   });
 }
-/**
- * Sets where the stream really starts. Copied video starts at the keyframe
- * before the seek, up to a few seconds early, and the player's position,
- * subtitles and party sync are counted from this.
- */
-async function measureStart(job, playlist) {
-  const first = playlist.split('\n').find((line) => line.endsWith('.m4s'));
-  if (!first) return;
-  const [init, segment] = await Promise.all([
-    readFile(`${job.dir}/init.mp4`).catch(() => null),
-    readFile(`${job.dir}/${first}`).catch(() => null),
-  ]);
-  const start = init && segment && streamStart(init, segment);
-  if (start != null && start >= 0) job.offsetMs = Math.round(start * 1000);
-}
 async function prepare(body) {
   const input = inputUrl(body.input);
   const meta = await probe(input);
@@ -307,11 +300,15 @@ async function prepare(body) {
   }
   for (let i = 0; i < 300; i++) {
     if (job.error) throw Error(job.error);
-    const playlist = await readFile(`${job.dir}/index.m3u8`, 'utf8').catch(
+    const mpd = await readFile(`${job.dir}/manifest.mpd`, 'utf8').catch(
       () => ''
     );
-    if (playlist.includes('.m4s') && playlist.includes('#EXTINF:')) {
-      if (!job.ready) await measureStart(job, playlist);
+    if (manifestReady(mpd)) {
+      if (!job.ready) {
+        const start = manifestStart(mpd);
+        if (start != null && start >= 0)
+          job.offsetMs = Math.round(start * 1000);
+      }
       job.ready = true;
       break;
     }
@@ -322,7 +319,14 @@ async function prepare(body) {
     error.status = 503;
     throw error;
   }
-  return { id: job.id, mode: job.mode, offsetMs: job.offsetMs, meta };
+  // Shaka plays the source's own timestamps: the player needs no offset.
+  return {
+    id: job.id,
+    mode: job.mode,
+    offsetMs: 0,
+    startMs: job.offsetMs,
+    meta,
+  };
 }
 export function createServer() {
   return http.createServer(async (req, res) => {
@@ -450,7 +454,9 @@ export function createServer() {
       }
       if (
         req.method === 'GET' &&
-        /^(index\.m3u8|init\.mp4|segment-\d+\.m4s)$/.test(match[2] ?? '')
+        /^(manifest\.mpd|init-\d+\.m4s|chunk-\d+-\d+\.m4s)$/.test(
+          match[2] ?? ''
+        )
       ) {
         if (job.error) throw Error(job.error);
         const file = `${job.dir}/${match[2]}`;
@@ -460,12 +466,20 @@ export function createServer() {
           missing.status = 404;
           throw missing;
         });
-        res.setHeader(
-          'Content-Type',
-          match[2].endsWith('.m3u8')
-            ? 'application/vnd.apple.mpegurl'
-            : 'video/mp4'
-        );
+        if (match[2] === 'manifest.mpd') {
+          // The video is representation 0, its init segment written first.
+          job.videoCodec ??= videoCodec(
+            await readFile(`${job.dir}/init-0.m4s`).catch(() => Buffer.alloc(0))
+          );
+          const mpd = withVideoCodec(
+            await readFile(file, 'utf8'),
+            job.videoCodec
+          );
+          res.setHeader('Content-Type', 'application/dash+xml');
+          res.end(mpd);
+          return;
+        }
+        res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Length', size.size);
         await pipeline(createReadStream(file), res);
         return;

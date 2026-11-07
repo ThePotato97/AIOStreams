@@ -10,34 +10,67 @@ export type FailureKind = 'network' | 'media' | 'other';
 
 export interface Failure {
   kind: FailureKind;
-  /** What the browser or hls.js reported, for the error shown. */
+  /** What the browser or Shaka reported, for the error shown. */
   detail: string;
   /** The server's status, for a request it refused. */
   status?: number;
 }
 
-/** The parts of an hls.js error this reads. */
-export interface HlsError {
-  type: string;
-  details: string;
-  fatal: boolean;
-  response?: { code?: number };
-  error?: { message?: string };
+/** The parts of a Shaka Player error (shaka.util.Error) this reads. */
+export interface ShakaError {
+  category: number;
+  code: number;
+  severity?: number;
+  data?: unknown[];
 }
 
-/** A failure reported by hls.js. */
-export function hlsFailure(data: HlsError): Failure {
-  const status = data.response?.code || undefined;
+const NETWORK = 1,
+  MEDIA = 3,
+  MANIFEST = 4,
+  PLAYER = 7;
+export const CRITICAL = 2;
+/** Shaka's names for the codes reported here. */
+const NAMES: Record<number, string> = {
+  1001: 'BAD_HTTP_STATUS',
+  1002: 'HTTP_ERROR',
+  1003: 'TIMEOUT',
+  3014: 'MEDIA_SOURCE_OPERATION_FAILED',
+  3015: 'MEDIA_SOURCE_OPERATION_THREW',
+  3016: 'VIDEO_ERROR',
+  4012: 'RESTRICTIONS_CANNOT_BE_MET',
+  4032: 'CONTENT_UNSUPPORTED_BY_BROWSER',
+};
+/** No stream the browser can decode: as much a decoding failure as a media error. */
+const UNDECODABLE = new Set([4012, 4032]);
+
+/** Whether a Shaka error only says a load was cut short by another, or by closing. */
+export function interrupted(error: ShakaError): boolean {
+  return (
+    error.category === PLAYER && (error.code === 7000 || error.code === 7003)
+  );
+}
+
+/** A failure reported by Shaka Player. */
+export function shakaFailure(error: ShakaError): Failure {
+  // BAD_HTTP_STATUS carries the URI, then the status.
+  const status =
+    error.code === 1001 && typeof error.data?.[1] === 'number'
+      ? (error.data[1] as number)
+      : undefined;
   const kind: FailureKind =
-    data.type === 'networkError'
+    error.category === NETWORK
       ? 'network'
-      : data.type === 'mediaError'
+      : error.category === MEDIA ||
+          (error.category === MANIFEST && UNDECODABLE.has(error.code))
         ? 'media'
         : 'other';
   return {
     kind,
     status,
-    detail: [data.details, status && `HTTP ${status}`]
+    detail: [
+      NAMES[error.code] ?? `Shaka error ${error.code}`,
+      status && `HTTP ${status}`,
+    ]
       .filter(Boolean)
       .join(', '),
   };
@@ -80,7 +113,7 @@ export interface Tries {
 
 export type Recovery = 'reload' | 'recover-media' | 'give-up';
 
-/** What hls.js tries before the failure is reported. */
+/** What the player tries before the failure is reported. */
 export function recovery(failure: Failure, tries: Tries): Recovery {
   if (failure.kind === 'network' && !sessionGone(failure.status))
     return tries.network < NETWORK_RECOVERIES ? 'reload' : 'give-up';
@@ -101,20 +134,4 @@ export function afterFailure(
   return failure.kind === 'media' && !state.forced && state.convertOnDecodeError
     ? 'convert-all'
     : 'fail';
-}
-
-/**
- * Which player opens an HLS stream. hls.js, wherever it runs: browsers that
- * also claim to play HLS themselves (Chrome does) fail on some streams.
- * Safari's own player is the exception, being the reference one; it's picked
- * where Safari has ManagedMediaSource, as hls.js advises.
- */
-export function hlsPlayer(browser: {
-  native: boolean;
-  managedMediaSource: boolean;
-  hlsJs: boolean;
-}): 'native' | 'hls.js' | null {
-  if (browser.native && browser.managedMediaSource) return 'native';
-  if (browser.hlsJs) return 'hls.js';
-  return browser.native ? 'native' : null;
 }

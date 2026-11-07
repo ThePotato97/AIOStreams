@@ -118,7 +118,20 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
     }
   ),
 }));
-import guestRouter, { MEDIA_TIMEOUT } from './routes.js';
+import guestRouter, { MEDIA_TIMEOUT, withCredentials } from './routes.js';
+/** What the transcoder's DASH muxer writes, trimmed. */
+const MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
+<MPD type="dynamic" minimumUpdatePeriod="PT4S">
+\t<Period id="0" start="PT0.0S">
+\t\t<AdaptationSet id="0" contentType="video">
+\t\t\t<Representation id="0" mimeType="video/mp4" codecs="hvc1.2.4.L153.B0">
+\t\t\t\t<SegmentTemplate timescale="24000" initialization="init-$RepresentationID$.m4s" media="chunk-$RepresentationID$-$Number%05d$.m4s" startNumber="1">
+\t\t\t\t\t<SegmentTimeline><S t="240360" d="236208" /></SegmentTimeline>
+\t\t\t\t</SegmentTemplate>
+\t\t\t</Representation>
+\t\t</AdaptationSet>
+\t</Period>
+</MPD>`;
 import { guestSessions } from './sessions.js';
 const originalFetch = globalThis.fetch;
 let server: Server, base: string;
@@ -257,7 +270,11 @@ function spyFetch() {
         );
       return Response.json({ ...fixture.prepared, meta: media });
     }
-    if (/\/jobs\/[^/]+\/segment-\d+\.m4s$/.test(url)) {
+    if (url.endsWith('/manifest.mpd'))
+      return new Response(MANIFEST, {
+        headers: { 'Content-Type': 'application/dash+xml' },
+      });
+    if (/\/jobs\/[^/]+\/chunk-\d+-\d+\.m4s$/.test(url)) {
       const signal = init?.signal;
       // Like a real fetch, an abort ends the answer, or the body mid-way.
       if (fixture.segment === 'silent')
@@ -765,9 +782,63 @@ describe('converted media', () => {
       capabilities: { video: true, audio: false, container: true, hdr: false },
     });
     const { url } = (await prepared.json()) as { url: string };
-    expect(url).toContain('/media/job-1/index.m3u8');
-    return new URL(url.replace('index.m3u8', 'segment-0.m4s'), base);
+    expect(url).toContain('/media/job-1/manifest.mpd');
+    return new URL(url.replace('manifest.mpd', 'chunk-0-00001.m4s'), base);
   }
+  it('serves the manifest with this playback in its segment URLs', async () => {
+    const segment = await ownSegment();
+    const manifest = new URL(
+      segment.href.replace('chunk-0-00001.m4s', 'manifest.mpd')
+    );
+    const response = await originalFetch(manifest);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain(
+      'application/dash+xml'
+    );
+    const mpd = await response.text();
+    const token = encodeURIComponent(manifest.searchParams.get('token')!);
+    const lease = manifest.searchParams.get('lease')!;
+    // The player resolves segment URLs from these templates.
+    expect(mpd).toContain(
+      `initialization="init-$RepresentationID$.m4s?token=${token}&amp;lease=${lease}"`
+    );
+    expect(mpd).toContain(
+      `media="chunk-$RepresentationID$-$Number%05d$.m4s?token=${token}&amp;lease=${lease}"`
+    );
+    // The rest of the manifest is untouched.
+    expect(mpd).toContain('codecs="hvc1.2.4.L153.B0"');
+    // A URL resolved from the template reaches the segment.
+    const resolved = new URL(
+      'chunk-0-00001.m4s?token=' + token + '&lease=' + lease,
+      manifest
+    );
+    expect((await originalFetch(resolved)).status).toBe(200);
+  });
+  it('refuses file names the transcoder does not write', async () => {
+    const segment = await ownSegment();
+    for (const name of ['index.m3u8', 'init.mp4', '..%2Fsecret', 'chunk-0.m4s'])
+      expect(
+        (
+          await originalFetch(
+            new URL(segment.href.replace('chunk-0-00001.m4s', name))
+          )
+        ).status
+      ).toBe(404);
+  });
+  it('adds credentials to segment templates only', () => {
+    const mpd = withCredentials(
+      '<SegmentTemplate initialization="init-$RepresentationID$.m4s" media="chunk-$Number$.m4s"/><Title media="x">',
+      'own.a+b/c',
+      'L'
+    );
+    expect(mpd).toContain(
+      'initialization="init-$RepresentationID$.m4s?token=own.a%2Bb%2Fc&amp;lease=L"'
+    );
+    expect(mpd).toContain(
+      'media="chunk-$Number$.m4s?token=own.a%2Bb%2Fc&amp;lease=L"'
+    );
+    expect(mpd).toContain('<Title media="x">');
+  });
   it('streams a segment that takes longer than the answer timeout', async () => {
     const url = await ownSegment();
     MEDIA_TIMEOUT.headersMs = 100;

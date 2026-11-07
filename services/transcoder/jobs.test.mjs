@@ -83,7 +83,7 @@ test('a segment not written yet is a 404, not a media failure', async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const response = await fetch(
-      `http://127.0.0.1:${server.address().port}/jobs/pending/segment-000007.m4s`,
+      `http://127.0.0.1:${server.address().port}/jobs/pending/chunk-0-00007.m4s`,
       { headers: { Authorization: `Bearer ${'s'.repeat(32)}` } }
     );
     assert.equal(response.status, 404);

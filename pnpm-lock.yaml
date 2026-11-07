@@ -671,9 +671,6 @@ importers:
       eslint-plugin-react-hooks:
         specifier: ^7.1.1
         version: 7.1.1(eslint@10.13.0(jiti@2.7.0))
-      hls.js:
-        specifier: ^1.7.4
-        version: 1.7.4
       motion:
         specifier: ^12.43.0
         version: 12.43.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -698,6 +695,9 @@ importers:
       react-icons:
         specifier: ^5.7.0
         version: 5.7.0(react@19.3.1)
+      shaka-player:
+        specifier: ^5.3.4
+        version: 5.3.4
       sonner:
         specifier: 2.0.5
         version: 2.0.5(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -7265,6 +7265,10 @@ packages:
     engines: {node: '>= 0.10'}
     hasBin: true
 
+  shaka-player@5.3.4:
+    resolution: {integrity: sha512-GT7SCLGCqq34hgTKJtOObSZm4BhvNROe2S09O7EnEsaSbJeIGhLdQuHKt7vMeaOcWgBdrLUF9Zs93FSpLhjELA==}
+    engines: {node: '>=18'}
+
   sharp@0.35.5:
     resolution: {integrity: sha512-Ywn4OnzGukp7CDMrp08RQ50YKmuwG47brZgIVPTvBaaAfQlRlygrRqSrxdCiL9M+LlzLBiJ68IR1QqvzHyjC7g==}
     engines: {node: '>=20.9.0'}
@@ -8134,9 +8138,6 @@ packages:
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
-
-  hls.js@1.7.4:
-    resolution: {integrity: sha512-3GlxGdPvT2YHvQYOt+yOzT/DEior/qJVNIylHA77kgeoBTdQQqi70GwefNEUmHQeNGyjC8U62+bruqW/Tpm+tg==}
 
 snapshots:
 
@@ -15306,6 +15307,8 @@ snapshots:
       safe-buffer: 5.2.1
       to-buffer: 1.2.2
 
+  shaka-player@5.3.4: {}
+
   sharp@0.35.5(@types/node@25.9.9):
     dependencies:
       '@img/colour': 1.1.0
@@ -16282,5 +16285,3 @@ snapshots:
   zod@4.6.7: {}
 
   zwitch@2.0.4: {}
-
-  hls.js@1.7.4: {}

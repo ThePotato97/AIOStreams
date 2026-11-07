@@ -1,6 +1,5 @@
 import { t } from '@lingui/core/macro';
 import type React from 'react';
-import type Hls from 'hls.js';
 import type { GuestPlayback } from '@aiostreams/core';
 import type {
   EngineFactory,
@@ -12,14 +11,61 @@ import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
 import {
   afterFailure,
+  CRITICAL,
   elementFailure,
-  hlsFailure,
-  hlsPlayer,
+  interrupted,
   recovery,
   sessionGone,
+  shakaFailure,
   type Failure,
+  type ShakaError,
   type Tries,
 } from './failure';
+
+/** The parts of Shaka Player used here (its own types are `any`). */
+interface ShakaPlayer extends EventTarget {
+  configure(config: object): boolean;
+  attach(video: HTMLMediaElement): Promise<void>;
+  load(uri: string, startTime?: number | null): Promise<void>;
+  retryStreaming(retryDelaySeconds?: number): boolean;
+  destroy(): Promise<void>;
+  getManifest(): {
+    presentationTimeline?: { getMaxSegmentEndTime(): number | null };
+  } | null;
+}
+interface Shaka {
+  Player: { new (): ShakaPlayer; isBrowserSupported(): boolean };
+  polyfill: { installAll(): void };
+}
+const isShakaError = (error: unknown): error is ShakaError =>
+  typeof (error as ShakaError)?.category === 'number' &&
+  typeof (error as ShakaError)?.code === 'number';
+/** Retries for one manifest or segment request, before the player reports it. */
+const RETRY = {
+  maxAttempts: 4,
+  baseDelay: 1000,
+  backoffFactor: 2,
+  timeout: 30000,
+};
+/**
+ * A converted stream is a DASH manifest still being written ("dynamic"). The
+ * manifest's presentation delay and minimum buffer (FFmpeg writes 10 s and
+ * twice a segment) are ignored: playback can start as soon as a segment is
+ * written, and party sync keeps its own margin from the newest one.
+ */
+const SHAKA_CONFIG = {
+  manifest: {
+    retryParameters: RETRY,
+    defaultPresentationDelay: 0,
+    dash: { ignoreMinBufferTime: true, ignoreSuggestedPresentationDelay: true },
+  },
+  streaming: {
+    retryParameters: RETRY,
+    bufferingGoal: 60,
+    rebufferingGoal: 2,
+    bufferBehind: 30,
+  },
+};
 
 /** A target this little past what is written is waited for, not re-prepared. */
 const UNWRITTEN_WAIT_MS = 60_000;
@@ -65,7 +111,11 @@ export function guestEngine(
     let file: EngineFile | null = null;
     let generation = 0;
     let controller: AbortController | undefined;
-    let hls: Hls | undefined;
+    let player: ShakaPlayer | undefined;
+    /** The manifest the player plays, for reloading it. */
+    let manifest = '';
+    /** Errors already handled: a failed load also reports its error. */
+    const handled = new WeakSet<object>();
     let force = false;
     /** Recoveries tried since a fragment last played. */
     let tries: Tries = { network: 0, media: 0 };
@@ -126,21 +176,36 @@ export function guestEngine(
         retry: { label: t`Retry`, run: () => void prepare(at) },
       });
     };
-    /** What hls.js tries first: reload a stream it couldn't fetch, or recover decoding. */
+    /** Loads the manifest at a position; a failure goes to recovery. */
+    const play = (at: number, startTime: number | null) => {
+      const current = player;
+      if (!current) return;
+      current.load(manifest, startTime).catch((error: unknown) => {
+        if (at !== generation || current !== player) return;
+        if (isShakaError(error)) {
+          if (interrupted(error) || handled.has(error)) return;
+          handled.add(error);
+          recover(shakaFailure(error));
+        } else fail({ kind: 'other', detail: (error as Error).message });
+      });
+    };
+    /** What the player tries first: fetch the stream again, or reload it where it was. */
     const recover = (failure: Failure) => {
-      const step = hls ? recovery(failure, tries) : 'give-up';
+      const step = player ? recovery(failure, tries) : 'give-up';
+      const at = generation;
+      const here = () => video.current?.currentTime ?? null;
       if (step === 'reload') {
-        const at = generation;
         tries.network++;
         // The newest segments may not be written yet: give them a moment.
         setTimeout(() => {
-          if (at === generation) hls?.startLoad();
+          if (at !== generation || !player) return;
+          if (!player.retryStreaming()) play(at, here());
         }, 2000 * tries.network);
         return;
       }
       if (step === 'recover-media') {
         tries.media++;
-        hls!.recoverMediaError();
+        play(at, here());
         return;
       }
       fail(failure);
@@ -148,8 +213,9 @@ export function guestEngine(
     const nativeEvent = (event: EngineEvent) => {
       if (event.type === 'failed') {
         // The element's own error says why; the raw engine's text doesn't.
-        const failure = elementFailure(video.current?.error);
-        return hls ? recover(failure) : fail(failure);
+        // Shaka reports its own element's errors, as an error event.
+        if (player) return;
+        return fail(elementFailure(video.current?.error));
       }
       if (event.type === 'tracks') return;
       if (event.type === 'position')
@@ -177,50 +243,50 @@ export function guestEngine(
       if (event.type === 'loaded') listTracks();
       emit(event);
     };
+    const stop = () => {
+      const old = player;
+      player = undefined;
+      return old?.destroy().catch(() => {});
+    };
     const raw = videoEngine(video, async (el, url) => {
-      hls?.destroy();
-      hls = undefined;
-      const native = !!el.canPlayType('application/vnd.apple.mpegurl');
-      const managedMediaSource = 'ManagedMediaSource' in window;
-      if (
-        !url.includes('.m3u8') ||
-        hlsPlayer({ native, managedMediaSource, hlsJs: true }) === 'native'
-      ) {
+      const at = generation;
+      await stop();
+      if (at !== generation) return;
+      // The original file plays as it is.
+      if (!url.includes('.mpd')) {
         el.src = url;
         return;
       }
-      const at = generation;
-      // Where in the stream playback starts: an unfinished playlist reads as
-      // live, which hls.js would otherwise start at its newest segment.
-      const start = playback
-        ? Math.max(0, target - playback.offsetMs) / 1000
-        : -1;
       try {
-        const { default: Hls } = await import('hls.js');
+        const { default: shaka } =
+          (await import('shaka-player')) as unknown as {
+            default: Shaka;
+          };
         if (at !== generation) return;
-        const player = hlsPlayer({
-          native,
-          managedMediaSource,
-          hlsJs: Hls.isSupported(),
+        shaka.polyfill.installAll();
+        if (!shaka.Player.isBrowserSupported())
+          throw Error('This browser cannot play converted streams');
+        const next = new shaka.Player();
+        player = next;
+        manifest = url;
+        next.configure(SHAKA_CONFIG);
+        next.addEventListener('error', (event) => {
+          const error = (event as CustomEvent<ShakaError>).detail;
+          if (at !== generation || player !== next || handled.has(error))
+            return;
+          // Shaka handles the rest itself.
+          if (error.severity !== CRITICAL || interrupted(error)) return;
+          handled.add(error);
+          recover(shakaFailure(error));
         });
-        if (player === 'native') {
-          el.src = url;
-          return;
-        }
-        if (!player) throw Error('HLS is not supported in this browser');
-        hls = new Hls({
-          maxBufferLength: 60,
-          maxMaxBufferLength: 120,
-          startPosition: start,
-        });
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (data.fatal && at === generation) recover(hlsFailure(data));
-        });
-        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        // Recoveries are counted again once the stream plays on.
+        next.addEventListener('segmentappended', () => {
           tries = { network: 0, media: 0 };
         });
-        hls.loadSource(url);
-        hls.attachMedia(el);
+        await next.attach(el);
+        if (at !== generation || player !== next) return;
+        // Positions are the source's own: the manifest keeps its timestamps.
+        play(at, Math.max(0, target - (playback?.offsetMs ?? 0)) / 1000);
       } catch (error) {
         if (at === generation)
           emit({ type: 'failed', error: (error as Error).message });
@@ -344,6 +410,16 @@ export function guestEngine(
               end: el.seekable.end(i) * 1000,
             }))
           : [];
+        // A live manifest's seekable range follows the clock, behind a
+        // conversion that runs ahead of it: what's converted ends where the
+        // manifest's last segment does.
+        const converted = player
+          ?.getManifest()
+          ?.presentationTimeline?.getMaxSegmentEndTime();
+        if (converted != null && ranges.length) {
+          const last = ranges.at(-1)!;
+          last.end = Math.max(last.end, converted * 1000);
+        }
         const available =
           playback?.mode === 'direct' ||
           ranges.some((r) => local >= r.start && local <= r.end);
@@ -387,7 +463,7 @@ export function guestEngine(
       close() {
         ++generation;
         controller?.abort();
-        hls?.destroy();
+        void stop();
         raw.close();
         clearInterval(heartbeat);
         void api

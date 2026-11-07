@@ -603,7 +603,7 @@ function playbackResponse(
     media,
     mode: result.mode,
     offsetMs: result.offsetMs ?? 0,
-    url: `${base}${result.mode === 'direct' ? 'original' : `${result.id}/index.m3u8`}${query}`,
+    url: `${base}${result.mode === 'direct' ? 'original' : `${result.id}/manifest.mpd`}${query}`,
   };
   if (
     body.subtitle != null &&
@@ -1128,6 +1128,22 @@ router.get('/subtitle/:index', async (req, res) => {
  * it, which for a copied 4K video can take a while.
  */
 export const MEDIA_TIMEOUT = { headersMs: 30_000 };
+/**
+ * A DASH manifest whose segment URLs carry this playback's token and lease,
+ * as the manifest's own URL does: the player resolves them from the
+ * manifest's templates.
+ */
+export function withCredentials(mpd: string, token: string, lease: string) {
+  // Inside an XML attribute: & is written &amp;.
+  const query = `?token=${encodeURIComponent(token)}&amp;lease=${encodeURIComponent(lease)}`;
+  return mpd.replace(/<SegmentTemplate\b[^>]*>/g, (tag) =>
+    tag.replace(
+      /(\s(?:initialization|media)=")([^"?]+)(")/g,
+      (_whole, before: string, url: string, after: string) =>
+        `${before}${url}${query}${after}`
+    )
+  );
+}
 router.get('/media/:job/:file', async (req, res) => {
   const { session, source } = await streaming(req);
   if (
@@ -1137,7 +1153,7 @@ router.get('/media/:job/:file', async (req, res) => {
   )
     fail(410, 'Playback changed');
   const file = String(req.params.file);
-  if (!/^(index\.m3u8|init\.mp4|segment-\d+\.m4s)$/.test(file))
+  if (!/^(manifest\.mpd|init-\d+\.m4s|chunk-\d+-\d+\.m4s)$/.test(file))
     fail(404, 'Media not found');
   // A viewer that goes away stops the transcoder's answer too.
   const controller = new AbortController();
@@ -1167,21 +1183,12 @@ router.get('/media/:job/:file', async (req, res) => {
     );
     fail(502, 'Conversion is unavailable');
   }
-  if (file.endsWith('.m3u8')) {
-    const playlist = (await upstream.text())
-      .replace(
-        /(URI=")([^"\n]+)(")/g,
-        (_m, a, name, b) =>
-          `${a}${name}?token=${encodeURIComponent(session.token)}&lease=${session.lease}${b}`
-      )
-      .split('\n')
-      .map((line) =>
-        line && !line.startsWith('#')
-          ? `${line}?token=${encodeURIComponent(session.token)}&lease=${session.lease}`
-          : line
-      )
-      .join('\n');
-    res.type('application/vnd.apple.mpegurl').send(playlist);
+  if (file === 'manifest.mpd') {
+    res
+      .type('application/dash+xml')
+      .send(
+        withCredentials(await upstream.text(), session.token, session.lease!)
+      );
   } else {
     if (!upstream.body) fail(502, 'Conversion returned no media');
     res.type('video/mp4');
