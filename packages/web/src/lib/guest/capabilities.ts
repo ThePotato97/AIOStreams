@@ -4,7 +4,12 @@ import type {
   GuestMedia,
   GuestTrack,
 } from '@aiostreams/core';
-function codec(track: GuestTrack): string | null {
+/** ffprobe reports -99 (or nothing) when a stream doesn't declare its level. */
+const knownLevel = (level: number | undefined, fallback: number) =>
+  level != null && Number.isInteger(level) && level > 0 ? level : fallback;
+
+/** The RFC 6381 codec string the browser is asked about. */
+export function codec(track: GuestTrack): string | null {
   switch (track.codec) {
     case 'h264': {
       const profile = track.profile?.toLowerCase() ?? '';
@@ -13,10 +18,20 @@ function codec(track: GuestTrack): string | null {
         : profile.includes('main')
           ? '4d40'
           : '42e0';
-      return `avc1.${prefix}${(track.level ?? 40).toString(16).padStart(2, '0')}`;
+      // Level 4.0 when unknown: an invalid string such as "avc1.6400-63"
+      // reads as unsupported and forces a needless video conversion.
+      const level = knownLevel(track.level, 40);
+      return `avc1.${prefix}${level.toString(16).padStart(2, '0')}`;
     }
-    case 'hevc':
-      return 'hvc1.1.6.L153.B0';
+    case 'hevc': {
+      // Main 10 is a different decoder profile; asking about Main would
+      // report support the browser may not have. Level is 30 x the level
+      // number (153 = 5.1).
+      const level = knownLevel(track.level, 153);
+      return /10/.test(track.profile ?? '')
+        ? `hvc1.2.4.L${level}.B0`
+        : `hvc1.1.6.L${level}.B0`;
+    }
     case 'vp9':
       return 'vp09.00.41.08';
     case 'vp8':

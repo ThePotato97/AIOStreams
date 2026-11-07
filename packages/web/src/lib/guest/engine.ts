@@ -11,6 +11,11 @@ import { videoEngine } from '../playback/video';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
 
+/** A target this little past what is written is waited for, not re-prepared. */
+const UNWRITTEN_WAIT_MS = 60_000;
+/** Stays this far behind the newest written segment so playback doesn't stall at once. */
+const EDGE_MARGIN_MS = 2_000;
+
 /** Converts media-element time to the party's original-file timeline. */
 export function guestEngine(
   video: React.RefObject<HTMLVideoElement | null>,
@@ -228,16 +233,34 @@ export function guestEngine(
         }
         const local = ms - (playback?.offsetMs ?? 0);
         const el = video.current;
+        const ranges = el
+          ? Array.from({ length: el.seekable.length }, (_, i) => ({
+              start: el.seekable.start(i) * 1000,
+              end: el.seekable.end(i) * 1000,
+            }))
+          : [];
         const available =
           playback?.mode === 'direct' ||
-          (!!el &&
-            Array.from({ length: el.seekable.length }, (_, i) => i).some(
-              (i) =>
-                local / 1000 >= el.seekable.start(i) &&
-                local / 1000 <= el.seekable.end(i)
-            ));
-        if (local >= 0 && available) raw.seek(local);
-        else void prepare(ms);
+          ranges.some((r) => local >= r.start && local <= r.end);
+        if (local >= 0 && available) return raw.seek(local);
+        // A converted stream is written as it plays. Party sync asks a guest
+        // who fell behind for the host's position, which often isn't written
+        // yet; a new prepare there restarts the stream and lands further back,
+        // and sync asks again. Instead, go as far as is written and let the
+        // stream catch up, unless the target is far enough ahead that a fresh
+        // conversion there gets to it sooner.
+        const edge = ranges.length ? Math.max(...ranges.map((r) => r.end)) : 0;
+        if (
+          playback &&
+          playback.mode !== 'direct' &&
+          local > edge &&
+          local - edge <= UNWRITTEN_WAIT_MS
+        ) {
+          const now = (el?.currentTime ?? 0) * 1000;
+          if (edge - now > EDGE_MARGIN_MS) raw.seek(edge - EDGE_MARGIN_MS);
+          return;
+        }
+        void prepare(ms);
       },
       setPaused(next) {
         paused = next;

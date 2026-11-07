@@ -103,7 +103,31 @@ export function select(meta, request) {
     (!audio || copyAudio) &&
     !burn &&
     (request.audio == null || audio === audios[0]);
+  // Why each stream is converted, for /health: the first cause that applies.
+  const videoReason = !video
+    ? null
+    : copyVideo
+      ? null
+      : burn
+        ? 'subtitle burn-in'
+        : !original
+          ? `quality ${request.quality}`
+          : request.force
+            ? 'retry after failed playback'
+            : caps.video !== true
+              ? "browser can't decode the video"
+              : 'HDR on an SDR display';
+  const audioReason =
+    !audio || copyAudio
+      ? null
+      : !original
+        ? `quality ${request.quality}`
+        : request.force
+          ? 'retry after failed playback'
+          : "browser can't decode the audio";
   return {
+    videoReason,
+    audioReason,
     mode: direct
       ? 'direct'
       : copyVideo

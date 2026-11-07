@@ -79,6 +79,34 @@ const request = (extra = {}) => ({
   capabilities: { video: true, audio: true, container: true, hdr: false },
   ...extra,
 });
+test('select explains why each stream is converted', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'h264' },
+      { index: 1, type: 'audio', codec: 'eac3', default: true },
+    ],
+  };
+  const caps = { video: true, audio: false, container: false, hdr: false };
+  const original = select(meta, { quality: 'original', capabilities: caps });
+  assert.equal(original.mode, 'audio');
+  assert.equal(original.videoReason, null);
+  assert.equal(original.audioReason, "browser can't decode the audio");
+  const scaled = select(meta, { quality: '720p', capabilities: caps });
+  assert.equal(scaled.mode, 'video');
+  assert.equal(scaled.videoReason, 'quality 720p');
+  const retry = select(meta, {
+    quality: 'original',
+    force: true,
+    capabilities: caps,
+  });
+  assert.equal(retry.videoReason, 'retry after failed playback');
+  const unsupported = select(meta, {
+    quality: 'original',
+    capabilities: { ...caps, video: false },
+  });
+  assert.equal(unsupported.videoReason, "browser can't decode the video");
+});
 test('duration falls back to stream durations and Matroska tags', () => {
   assert.equal(duration({ format: { duration: '12.5' } }), 12500);
   assert.equal(

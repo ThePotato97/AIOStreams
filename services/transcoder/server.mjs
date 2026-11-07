@@ -109,6 +109,10 @@ function start(job, encoder) {
   );
   job.offsetMs = command.offsetMs;
   job.mode = command.policy.mode;
+  job.reasons = {
+    video: command.policy.videoReason,
+    audio: command.policy.audioReason,
+  };
   job.encoder = encoder;
   const args = [...command.args];
   args.splice(args.length - 1, 0, '-progress', 'pipe:3');
@@ -268,6 +272,8 @@ export function createServer() {
           jobs: [...jobs.values()].map((j) => ({
             id: j.id,
             mode: j.mode,
+            // Why video/audio are converted (null: copied).
+            reasons: j.reasons,
             encoder: j.encoder,
             viewers: j.viewers.size,
             producedMs: j.producedMs,
