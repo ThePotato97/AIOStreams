@@ -13,6 +13,8 @@ pub trait Feed {
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block));
     /// The inputs' state at `sample` (start of a renderer block).
     fn sources(&mut self, sample: u64) -> Vec<Source>;
+    /// The input has ended: emit what's still buffered.
+    fn end(&mut self, _out: &mut dyn FnMut(Block)) {}
 }
 
 /// Buffers decoded audio into 64-sample slots and renders them; gains change once per

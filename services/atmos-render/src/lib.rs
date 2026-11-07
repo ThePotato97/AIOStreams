@@ -2,10 +2,14 @@
 //! (DAP-VR 8.1.0), from its traced tuning: per-band PCA HRTF with a low-band ITD phase ramp,
 //! the distance law, the LFE table, and the FOA room (FDN plus early reflections).
 
+pub mod bits;
 pub mod complex;
 pub mod direct;
+pub mod eac3_in;
 pub mod filterbank;
 pub mod input;
+pub mod joc;
+mod joc_tables;
 pub mod objects;
 pub mod qmf;
 pub mod render;

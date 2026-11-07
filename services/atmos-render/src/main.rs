@@ -1,4 +1,4 @@
-//! atmos-render: reads a raw Dolby TrueHD (or, later, E-AC-3) elementary stream on stdin and
+//! atmos-render: reads a raw Dolby TrueHD or E-AC-3 elementary stream on stdin and
 //! writes binaural stereo, 48 kHz 32-bit float little-endian interleaved, on stdout; the output
 //! has the input's length and timing.
 //!
@@ -7,6 +7,7 @@
 use std::io::{BufWriter, Read, Write};
 
 use anyhow::{Result, bail};
+use atmos_render::eac3_in::Eac3;
 use atmos_render::input::{Feed, Pipeline};
 use atmos_render::truehd_in::TrueHd;
 
@@ -15,6 +16,10 @@ fn main() -> Result<()> {
     let format = args.iter().position(|a| a == "--format").and_then(|i| args.get(i + 1)).map(String::as_str);
     let mut feed: Box<dyn Feed> = match format {
         Some("truehd") | None => Box::new(TrueHd::new()),
+        Some("eac3") => {
+            let ffmpeg = args.iter().position(|a| a == "--ffmpeg").and_then(|i| args.get(i + 1)).map(String::as_str);
+            Box::new(Eac3::new(ffmpeg.unwrap_or("ffmpeg"))?)
+        }
         Some(other) => bail!("unsupported --format {other}"),
     };
     let mut pipeline = Pipeline::new()?;
@@ -44,6 +49,11 @@ fn main() -> Result<()> {
         for b in blocks {
             pipeline.take(feed.as_mut(), b, &mut emit);
         }
+    }
+    let mut blocks = Vec::new();
+    feed.end(&mut |b| blocks.push(b));
+    for b in blocks {
+        pipeline.take(feed.as_mut(), b, &mut emit);
     }
     pipeline.finish(feed.as_mut(), &mut emit);
     drop(emit);
