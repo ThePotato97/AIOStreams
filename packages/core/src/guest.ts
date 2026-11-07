@@ -21,6 +21,8 @@ export interface GuestMedia {
   container: string;
   bitrate: number;
   tracks: GuestTrack[];
+  /** Fonts attached to the file, which its ASS subtitles are styled with. */
+  fonts?: { index: number; filename: string; mimetype: string }[];
   chapters: { title: string; startMs: number }[];
 }
 export interface GuestCapabilities {

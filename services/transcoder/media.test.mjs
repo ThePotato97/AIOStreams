@@ -11,6 +11,7 @@ import {
   duration,
   manifestReady,
   manifestStart,
+  subtitleKind,
   videoCodec,
   withFullDuration,
   withVideoCodec,
@@ -289,6 +290,81 @@ test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU othe
   assert.equal(sdr.tonemap, null);
   assert.deepEqual(tonemaps(sdr.args), []);
 });
+test('subtitles: burned in only where the browser cannot draw them', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'h264' },
+      { index: 1, type: 'audio', codec: 'aac', default: true },
+      { index: 2, type: 'subtitle', codec: 'ass' },
+      { index: 3, type: 'subtitle', codec: 'hdmv_pgs_subtitle' },
+      { index: 4, type: 'subtitle', codec: 'dvd_subtitle' },
+      { index: 5, type: 'subtitle', codec: 'subrip' },
+    ],
+  };
+  const caps = (subtitles) => ({
+    capabilities: {
+      video: true,
+      audio: true,
+      container: true,
+      hdr: false,
+      subtitles,
+    },
+  });
+  const burn = (index, subtitles) =>
+    select(meta, request({ subtitle: index, ...caps(subtitles) })).burn;
+  assert.equal(burn(2, ['ass', 'pgs']), false);
+  assert.equal(burn(3, ['ass', 'pgs']), false);
+  // Without a renderer, or one for something else: burned in.
+  assert.equal(burn(2, []), true);
+  assert.equal(burn(3, ['ass']), true);
+  // VobSub has no renderer at all; text never needs one.
+  assert.equal(burn(4, ['ass', 'pgs']), true);
+  assert.equal(burn(5, []), false);
+  // Not burned, the video is copied.
+  assert.equal(
+    select(meta, request({ subtitle: 2, ...caps(['ass']) })).mode,
+    'direct'
+  );
+  assert.deepEqual(
+    ['subrip', 'ass', 'ssa', 'hdmv_pgs_subtitle', 'dvd_subtitle'].map(
+      subtitleKind
+    ),
+    ['text', 'ass', 'ass', 'pgs', null]
+  );
+});
+
+test('metadata: fonts attached to the file', () => {
+  const meta = metadata({
+    format: { duration: '10' },
+    streams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264' },
+      {
+        index: 3,
+        codec_type: 'attachment',
+        tags: {
+          filename: 'Gandhi.TTF',
+          mimetype: 'application/x-truetype-font',
+        },
+      },
+      {
+        index: 4,
+        codec_type: 'attachment',
+        tags: { filename: 'cover.jpg', mimetype: 'image/jpeg' },
+      },
+      { index: 5, codec_type: 'attachment', tags: { filename: 'Other.otf' } },
+    ],
+  });
+  assert.deepEqual(meta.fonts, [
+    {
+      index: 3,
+      filename: 'Gandhi.TTF',
+      mimetype: 'application/x-truetype-font',
+    },
+    { index: 5, filename: 'Other.otf', mimetype: 'font/ttf' },
+  ]);
+});
+
 test('select explains why each stream is converted', () => {
   const meta = {
     durationMs: 60000,
@@ -750,7 +826,9 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
         ? `${dir}/longgop.mkv`
         : req.url.includes('hevcsrc')
           ? `${dir}/hevcsrc.mkv`
-          : `${dir}/source.mkv`;
+          : req.url.includes('fonted')
+            ? `${dir}/fonted.mkv`
+            : `${dir}/source.mkv`;
     const size = (await stat(file)).size;
     const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? '');
     const start = range ? Number(range[1]) : 0,
@@ -898,7 +976,14 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
       viewer: 'hevc'.repeat(5),
       release: true,
     });
-    const subtitle = await call('/subtitle', { input, index: 2 });
+    // Extracted in the background: come back until it's written.
+    let subtitle = await call('/subtitle', { input, index: 2 });
+    assert.equal(subtitle.status, 425);
+    assert.equal(subtitle.headers.get('retry-after'), '5');
+    for (let i = 0; i < 100 && subtitle.status === 425; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      subtitle = await call('/subtitle', { input, index: 2 });
+    }
     assert.equal(subtitle.status, 200);
     assert.match(await subtitle.text(), /WEBVTT/);
     const gpu = await call('/prepare', {
@@ -912,27 +997,116 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     assert.ok(
       health.jobs.every((j) => j.encoder === 'cpu' || j.mode === 'audio')
     );
-    const full = await call('/prepare', {
+    // Two conversions encode video at once: a third waits.
+    const encoding = await call('/prepare', {
       input,
       viewer: 'four'.repeat(5),
       request: request({ force: true, quality: '720p' }),
     });
-    assert.equal(full.status, 503);
+    assert.equal(encoding.status, 200);
+    const secondJob = await encoding.json();
+    const over = await call('/prepare', {
+      input,
+      viewer: 'five'.repeat(5),
+      request: request({ force: true, quality: '1080p' }),
+    });
+    assert.equal(over.status, 503);
+    assert.equal(over.headers.get('retry-after'), '10');
+    assert.equal((await over.json()).retryAfter, 10);
+    // Copying the video costs little: it isn't held to that limit.
+    const copy = await call('/prepare', {
+      input,
+      viewer: 'six'.repeat(8),
+      request: request({
+        capabilities: { video: true, audio: true, container: false },
+      }),
+    });
+    assert.equal(copy.status, 200);
+    const copyJob = await copy.json();
+    assert.equal(copyJob.mode, 'remux');
+    await call(`/jobs/${copyJob.id}/touch`, {
+      viewer: 'six'.repeat(8),
+      release: true,
+    });
     await call(`/jobs/${job.id}/touch`, { viewer: body.viewer, release: true });
     await call(`/jobs/${job.id}/touch`, {
       viewer: 'two'.repeat(8),
       release: true,
     });
+    // A place is freed: the waiting conversion starts.
+    await call(`/jobs/${secondJob.id}/touch`, {
+      viewer: 'four'.repeat(5),
+      release: true,
+    });
     const replacement = await call('/prepare', {
       input,
-      viewer: 'four'.repeat(5),
-      request: request({ force: true, quality: '720p' }),
+      viewer: 'five'.repeat(5),
+      request: request({ force: true, quality: '1080p' }),
     });
     assert.equal(replacement.status, 200);
     await call(`/jobs/${gpuJob.id}/touch`, {
       viewer: 'three'.repeat(5),
       release: true,
     });
+    // ASS as it is, and the font attached to the file, for the browser.
+    await exec('ffmpeg', [
+      '-v',
+      'error',
+      '-i',
+      `${dir}/source.mkv`,
+      '-attach',
+      '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+      '-metadata:s:t',
+      'mimetype=font/ttf',
+      '-map',
+      '0',
+      '-c',
+      'copy',
+      '-c:s',
+      'ass',
+      `${dir}/fonted.mkv`,
+    ]);
+    const fonted = `${origin}/party/guest/source/fonted${'d'.repeat(36)}`;
+    const fontedMeta = await (await call('/probe', { input: fonted })).json();
+    assert.equal(fontedMeta.fonts.length, 1);
+    const ready = async (path, body) => {
+      let res = await call(path, body);
+      for (let i = 0; i < 100 && res.status === 425; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        res = await call(path, body);
+      }
+      return res;
+    };
+    const ass = await ready('/subtitle', {
+      input: fonted,
+      index: 2,
+      format: 'ass',
+    });
+    assert.equal(ass.status, 200);
+    const assText = await ass.text();
+    assert.match(assText, /\[Script Info\]/);
+    assert.match(assText, /Dialogue:.*Guest playback/);
+    // Only in the format the track is.
+    assert.equal(
+      (await call('/subtitle', { input: fonted, index: 2, format: 'sup' }))
+        .status,
+      400
+    );
+    const font = await ready('/font', {
+      input: fonted,
+      index: fontedMeta.fonts[0].index,
+    });
+    assert.equal(font.status, 200);
+    assert.equal(font.headers.get('content-type'), 'font/ttf');
+    const bytes = Buffer.from(await font.arrayBuffer());
+    assert.deepEqual(
+      bytes,
+      await readFile('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
+    );
+    assert.equal(
+      (await call('/font', { input: fonted, index: 0 })).status,
+      400
+    );
     const styled = await call('/prepare', {
       input: `${origin}/party/guest/source/styled`,
       viewer: 'styled'.repeat(5),

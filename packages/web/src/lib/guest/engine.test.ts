@@ -51,6 +51,8 @@ const fakes = vi.hoisted(() => {
           emit: (event: unknown) => void;
           loads: { url: string; startMs: number }[];
           seek: (ms: number) => void;
+          addServerSubtitle: ReturnType<typeof vi.fn>;
+          setSubtitle: ReturnType<typeof vi.fn>;
         }
       | undefined,
   };
@@ -86,7 +88,8 @@ vi.mock('../playback/video', () => ({
         },
         close() {},
         setPaused() {},
-        setSubtitle() {},
+        setSubtitle: vi.fn(),
+        addServerSubtitle: vi.fn(),
         seek: vi.fn(),
       };
       fakes.raw = raw;
@@ -500,6 +503,89 @@ describe('heartbeats', () => {
     expect(failures()).toEqual([
       { type: 'failed', error: 'This guest session has expired' },
     ]);
+  });
+});
+
+describe('a full transcoder', () => {
+  const full = (retryAfter?: number) =>
+    Object.assign(new Error('Conversion capacity reached'), {
+      status: 503,
+      retryAfter,
+    });
+  it('is waited for, as it says, then the stream starts', async () => {
+    const { engine, api, failures } = setup();
+    vi.mocked(api.prepare)
+      .mockRejectedValueOnce(full(10))
+      .mockRejectedValueOnce(full(10));
+    await start(engine);
+    expect(failures()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(api.prepare).toHaveBeenCalledTimes(3);
+    expect(fakes.players).toHaveLength(1);
+    expect(failures()).toHaveLength(0);
+  });
+  it('is reported after five minutes', async () => {
+    const { engine, api, failures } = setup();
+    vi.mocked(api.prepare).mockRejectedValue(full(10));
+    await start(engine);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 20_000);
+    expect(api.prepare).toHaveBeenCalledTimes(31);
+    expect(failures()).toHaveLength(1);
+  });
+  it('is reported at once when it gives no time to come back', async () => {
+    const { engine, api, failures } = setup();
+    vi.mocked(api.prepare).mockRejectedValueOnce(full(undefined));
+    await start(engine);
+    expect(failures()).toHaveLength(1);
+  });
+});
+
+describe('a subtitle still being extracted', () => {
+  it('is added once ready, while the stream plays', async () => {
+    const answers = [
+      new Response('{}', { status: 425, headers: { 'Retry-After': '5' } }),
+      new Response('WEBVTT\n\n00:01.000 --> 00:02.000\nHi', { status: 200 }),
+    ];
+    const fetches = vi.fn(async () => answers.shift()!);
+    vi.stubGlobal('fetch', fetches);
+    vi.stubGlobal(
+      'URL',
+      Object.assign(URL, { createObjectURL: () => 'blob:vtt' })
+    );
+    const { engine, api } = setup();
+    await start(engine);
+    vi.mocked(api.prepare).mockResolvedValueOnce({
+      mode: 'audio',
+      url: '/party/guest/media/job/manifest.mpd?token=t&lease=l',
+      subtitleUrl: '/party/guest/subtitle/3?token=t&lease=l',
+      offsetMs: 0,
+      lease: 'l'.repeat(43),
+    } as never);
+    engine.setSubtitle('3');
+    await vi.advanceTimersByTimeAsync(0);
+    // The stream started without waiting for it.
+    expect(fakes.raw!.loads.at(-1)).toMatchObject({ subtitles: [] });
+    expect(fakes.raw!.addServerSubtitle).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fetches).toHaveBeenCalledTimes(2);
+    expect(fakes.raw!.addServerSubtitle).toHaveBeenCalledWith(
+      expect.objectContaining({ id: '3', url: 'blob:vtt' })
+    );
+    expect(fakes.raw!.setSubtitle).toHaveBeenLastCalledWith('3');
+  });
+});
+
+describe('closing', () => {
+  it('releases the playback, and sends nothing when there was none', async () => {
+    const { engine, api } = setup();
+    engine.close();
+    expect(api.request).not.toHaveBeenCalled();
+    await start(engine);
+    engine.close();
+    expect(api.request).toHaveBeenCalledWith(
+      '/touch',
+      expect.objectContaining({ release: true, lease: 'l'.repeat(43) })
+    );
   });
 });
 

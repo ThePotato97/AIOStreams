@@ -1,4 +1,20 @@
 /** Pure media policy, shared by the worker and its tests. */
+
+/**
+ * How a subtitle reaches the browser: text as WebVTT, ASS/SSA for JASSUB,
+ * PGS for libpgs. Anything else (VobSub, DVB) can only be burned in.
+ */
+export function subtitleKind(codec) {
+  if (['subrip', 'webvtt', 'mov_text', 'text'].includes(codec)) return 'text';
+  if (codec === 'ass' || codec === 'ssa') return 'ass';
+  if (codec === 'hdmv_pgs_subtitle') return 'pgs';
+  return null;
+}
+const FONT_FILE = /\.(ttf|otf|ttc|woff2?)$/i;
+const isFont = (s) =>
+  s.codec_type === 'attachment' &&
+  (/font|truetype|opentype/i.test(s.tags?.mimetype ?? '') ||
+    FONT_FILE.test(s.tags?.filename ?? ''));
 export function metadata(raw) {
   const streams = raw.streams ?? [];
   return {
@@ -25,6 +41,12 @@ export function metadata(raw) {
         language: s.tags?.language,
         default: !!s.disposition?.default,
       })),
+    // Fonts attached to the file, which its ASS subtitles are styled with.
+    fonts: streams.filter(isFont).map((s) => ({
+      index: s.index,
+      filename: s.tags?.filename ?? `font-${s.index}`,
+      mimetype: s.tags?.mimetype ?? 'font/ttf',
+    })),
     chapters: (raw.chapters ?? [])
       .map((c) => ({
         title: c.tags?.title ?? '',
@@ -82,9 +104,12 @@ export function select(meta, request) {
     throw new Error('Unknown track');
   const caps = request.capabilities ?? {};
   const original = request.quality === 'original';
+  // Burned in only where the browser can't draw it itself.
+  const kind = subtitle && subtitleKind(subtitle.codec);
   const burn =
     !!subtitle &&
-    !['subrip', 'webvtt', 'mov_text', 'text'].includes(subtitle.codec);
+    kind !== 'text' &&
+    !(kind && (caps.subtitles ?? []).includes(kind));
   // A successful probe of the actual file is required, not a guessed codec name.
   const copyVideo =
     !!video &&

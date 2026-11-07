@@ -9,6 +9,7 @@ import type {
 import { videoEngine } from '../playback/video';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
+import { sleep, whenReady } from './ready';
 import {
   afterFailure,
   CRITICAL,
@@ -69,6 +70,8 @@ const SHAKA_CONFIG = {
 
 /** A target this little past what is written is waited for, not re-prepared. */
 const UNWRITTEN_WAIT_MS = 60_000;
+/** The longest a full transcoder is waited for before reporting it. */
+const CAPACITY_WAIT_MS = 5 * 60_000;
 /** Stays this far behind the newest written segment so playback doesn't stall at once. */
 const EDGE_MARGIN_MS = 2_000;
 
@@ -300,7 +303,30 @@ export function guestEngine(
           emit({ type: 'failed', error: (error as Error).message });
       }
     })(nativeEvent, {});
-    async function prepare(positionMs: number) {
+    /** Attaches a subtitle once the server has it: extraction may take minutes. */
+    const attachSubtitle = async (
+      url: string,
+      at: number,
+      signal: AbortSignal
+    ) => {
+      try {
+        const res = await whenReady(url, signal);
+        if (at !== generation || !res.ok) return;
+        const text = await res.text();
+        if (at !== generation) return;
+        const id = String(subtitle);
+        raw.addServerSubtitle?.({
+          id,
+          label: t`Subtitles`,
+          url: URL.createObjectURL(new Blob([text], { type: 'text/vtt' })),
+          stream: { Index: subtitle },
+        });
+        raw.setSubtitle(id);
+      } catch {
+        /* Replaced, closed, or offline: playback goes on without it. */
+      }
+    };
+    async function prepare(positionMs: number, waitedMs = 0) {
       if (!file) return;
       const at = ++generation;
       controller?.abort();
@@ -328,28 +354,42 @@ export function guestEngine(
         if (at !== generation) return;
         playback = result;
         onMode(result.mode);
-        const track = result.subtitleUrl
-          ? [
-              {
-                id: String(subtitle),
-                label: t`Subtitles`,
-                url: new URL(result.subtitleUrl, window.location.href).href,
-                stream: { Index: subtitle },
-              },
-            ]
-          : [];
         raw.load({
           ...file,
           url: new URL(result.url, window.location.href).href,
           startMs: Math.max(0, target - result.offsetMs),
           paused,
-          subtitles: track,
+          subtitles: [],
         });
-        if (result.subtitleUrl) raw.setSubtitle(String(subtitle));
+        if (result.subtitleUrl)
+          void attachSubtitle(
+            new URL(result.subtitleUrl, window.location.href).href,
+            at,
+            controller.signal
+          );
         listTracks();
       } catch (error) {
         if (at !== generation || controller.signal.aborted) return;
-        const { status, message } = error as Error & { status?: number };
+        const { status, message, retryAfter } = error as Error & {
+          status?: number;
+          retryAfter?: number;
+        };
+        // A full transcoder frees a place as viewers leave: wait for one.
+        const ms = Math.max(1, retryAfter ?? 0) * 1000;
+        if (
+          status === 503 &&
+          retryAfter != null &&
+          waitedMs + ms <= CAPACITY_WAIT_MS
+        ) {
+          const signal = controller.signal;
+          preparing = false;
+          void sleep(ms, signal)
+            .then(() => {
+              if (at === generation) void prepare(positionMs, waitedMs + ms);
+            })
+            .catch(() => {});
+          return;
+        }
         if (sessionGone(status)) expired(message);
         else
           emit({
@@ -474,13 +514,15 @@ export function guestEngine(
         void stop();
         raw.close();
         clearInterval(heartbeat);
-        void api
-          .request('/touch', {
-            positionMs: 0,
-            release: true,
-            lease: playback?.lease,
-          })
-          .catch(() => {});
+        // Nothing to release before a playback was ever prepared.
+        if (playback?.lease)
+          void api
+            .request('/touch', {
+              positionMs: 0,
+              release: true,
+              lease: playback.lease,
+            })
+            .catch(() => {});
       },
     };
   };

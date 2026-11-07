@@ -8,6 +8,7 @@ import type {
   EngineFile,
   EngineState,
   EngineTrack,
+  ServerSubtitle,
 } from './engine';
 import { isFullscreen, toggleDocumentFullscreen } from './fullscreen';
 
@@ -131,6 +132,15 @@ export function videoEngine(
       set({ subtitle: id });
     };
     const set = (state: EngineState) => emit({ type: 'state', state });
+    const trackFor = (el: HTMLVideoElement, s: ServerSubtitle) => {
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.src = s.url;
+      track.label = s.label;
+      if (s.lang) track.srclang = s.lang;
+      el.append(track);
+      return track;
+    };
     const removeElements = () => {
       for (const e of elements) e.remove();
       elements = [];
@@ -144,15 +154,7 @@ export function videoEngine(
         removeElements();
         file = next;
         delayMs = next.subtitleDelayMs;
-        elements = next.subtitles.map((s) => {
-          const track = document.createElement('track');
-          track.kind = 'subtitles';
-          track.src = s.url;
-          track.label = s.label;
-          if (s.lang) track.srclang = s.lang;
-          el.append(track);
-          return track;
-        });
+        elements = next.subtitles.map((s) => trackFor(el, s));
         if (next.volume) {
           el.volume = Math.min(1, next.volume.volume);
           el.muted = next.volume.muted;
@@ -267,6 +269,15 @@ export function videoEngine(
       },
       toggleFullscreen: toggleDocumentFullscreen,
       ownText: (id) => files.find((f) => f.id === id)?.text ?? null,
+      // A server subtitle that became ready after the file opened.
+      addServerSubtitle(added) {
+        const el = video.current;
+        if (!el || !file) return;
+        const track = trackFor(el, added);
+        track.addEventListener('load', onTrackLoad);
+        elements = [...elements, track];
+        file = { ...file, subtitles: [...file.subtitles, added] };
+      },
       subtitleFiles: {
         types: SUBTITLE_TYPES,
         add: async (added) => {

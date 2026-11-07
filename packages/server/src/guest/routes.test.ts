@@ -37,6 +37,11 @@ const fixture = vi.hoisted(() => ({
   prepared: { mode: 'direct' } as { mode: string; id?: string },
   segment: 'slow' as 'slow' | 'silent',
   segmentAborts: 0,
+  // What the transcoder answers: a full one, released jobs, extraction.
+  full: false,
+  releases: [] as string[],
+  extraction: [] as { status: number; body: string }[],
+  subtitleCodec: 'subrip',
 }));
 vi.mock('@aiostreams/core', () => ({
   createLogger: () =>
@@ -139,7 +144,18 @@ const media = {
   durationMs: 12000,
   container: 'matroska',
   bitrate: 1000000,
-  tracks: [{ index: 0, type: 'video', codec: 'h264', title: 'Video' }],
+  tracks: [
+    { index: 0, type: 'video', codec: 'h264', title: 'Video' },
+    {
+      index: 2,
+      type: 'subtitle',
+      get codec() {
+        return fixture.subtitleCodec;
+      },
+      title: 'English',
+    },
+  ],
+  fonts: [{ index: 5, filename: 'Font.ttf', mimetype: 'font/ttf' }],
   chapters: [{ title: 'Opening', startMs: 0 }],
 };
 const proof = () => ({
@@ -263,7 +279,32 @@ function spyFetch() {
       }
       return Response.json(media);
     }
+    if (/\/jobs\/[^/]+\/touch$/.test(url)) {
+      const sent = JSON.parse(String(init?.body ?? '{}')) as {
+        release?: boolean;
+      };
+      if (sent.release) fixture.releases.push(url.split('/').at(-2)!);
+      return Response.json({ ok: true });
+    }
+    if (url.endsWith('/subtitle') || url.endsWith('/font')) {
+      const next = fixture.extraction.shift() ?? {
+        status: 200,
+        body: 'WEBVTT',
+      };
+      return new Response(next.body, {
+        status: next.status,
+        headers: next.status === 425 ? { 'Retry-After': '5' } : {},
+      });
+    }
     if (url.endsWith('/prepare')) {
+      if (fixture.full)
+        return Response.json(
+          {
+            error: 'Conversion capacity reached; try Original or retry later',
+            retryAfter: 10,
+          },
+          { status: 503 }
+        );
       if (fixture.slow)
         await new Promise<void>((resolve) =>
           fixture.prepares.push({ resolve })
@@ -333,6 +374,10 @@ beforeEach(() => {
   fixture.prepared = { mode: 'direct' };
   fixture.segment = 'slow';
   fixture.segmentAborts = 0;
+  fixture.full = false;
+  fixture.releases = [];
+  fixture.extraction = [];
+  fixture.subtitleCodec = 'subrip';
   MEDIA_TIMEOUT.headersMs = 30_000;
   vi.restoreAllMocks();
   spyFetch();
@@ -504,7 +549,7 @@ describe('guest playback authorization', () => {
       media: { tracks: unknown[] };
     };
     expect(token).toMatch(/^own\./);
-    expect(probed.tracks).toHaveLength(1);
+    expect(probed.tracks).toHaveLength(2);
     const prepared = await api('/own/prepare', token, {
       revision,
       quality: 'original',
@@ -873,5 +918,100 @@ describe('converted media', () => {
     await vi.waitFor(() => expect(fixture.segmentAborts).toBeGreaterThan(0), {
       timeout: 2000,
     });
+  });
+});
+describe('own playback and a full transcoder', () => {
+  async function open() {
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    expect(opened.status).toBe(200);
+    return (await opened.json()) as { token: string; revision: string };
+  }
+  const prepare = (token: string, revision: string, subtitle?: number) =>
+    api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      subtitle,
+      capabilities: { video: true, audio: false, container: true, hdr: false },
+    });
+  it('passes on when to come back', async () => {
+    const { token, revision } = await open();
+    fixture.full = true;
+    const response = await prepare(token, revision);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('10');
+    expect(
+      ((await response.json()) as { retryAfter?: number }).retryAfter
+    ).toBe(10);
+  });
+  it('releases the earlier playback of the same item when it opens again', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-first' };
+    const first = await open();
+    expect((await prepare(first.token, first.revision)).status).toBe(200);
+    expect(fixture.releases).not.toContain('job-first');
+    await open();
+    expect(fixture.releases).toContain('job-first');
+    // The earlier playback is gone.
+    expect((await prepare(first.token, first.revision)).status).toBe(401);
+  });
+});
+
+describe('subtitles for the browser', () => {
+  async function playing(codec: string) {
+    fixture.subtitleCodec = codec;
+    fixture.prepared = { mode: 'audio', id: 'job-subs' };
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const prepared = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: false, container: true, hdr: false },
+    });
+    const { url } = (await prepared.json()) as { url: string };
+    const query = new URL(url, base).search;
+    return (path: string, format?: string) =>
+      originalFetch(
+        new URL(`${base}${path}${query}${format ? `&format=${format}` : ''}`)
+      );
+  }
+  it('says to come back while the subtitle is extracted', async () => {
+    const get = await playing('subrip');
+    fixture.extraction = [{ status: 425, body: '{}' }];
+    const waiting = await get('/subtitle/2');
+    expect(waiting.status).toBe(425);
+    expect(waiting.headers.get('retry-after')).toBe('5');
+    const ready = await get('/subtitle/2');
+    expect(ready.status).toBe(200);
+    expect(await ready.text()).toContain('WEBVTT');
+  });
+  it('serves ASS as it is, and its fonts', async () => {
+    const get = await playing('ass');
+    fixture.extraction = [
+      { status: 200, body: '[Script Info]\nTitle: x' },
+      { status: 200, body: 'font bytes' },
+    ];
+    const ass = await get('/subtitle/2', 'ass');
+    expect(ass.status).toBe(200);
+    expect(await ass.text()).toContain('[Script Info]');
+    const font = await get('/font/5');
+    expect(font.status).toBe(200);
+    expect(await font.text()).toBe('font bytes');
+    expect((await get('/font/6')).status).toBe(404);
+  });
+  it('serves only the format a track is in', async () => {
+    const get = await playing('hdmv_pgs_subtitle');
+    expect((await get('/subtitle/2')).status).toBe(404);
+    fixture.extraction = [{ status: 200, body: 'PG' }];
+    expect((await get('/subtitle/2', 'sup')).status).toBe(200);
   });
 });

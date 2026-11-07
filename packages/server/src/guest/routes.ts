@@ -158,17 +158,24 @@ async function worker(path: string, body?: unknown): Promise<any> {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!res.ok) {
-      const error = (await res.json().catch(() => ({}))) as { error?: string };
+      const error = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        retryAfter?: number;
+      };
       logger.warn(
         { path, status: res.status, error: error.error },
         res.status === 401
           ? 'transcoder rejected the shared secret'
           : 'transcoder request failed'
       );
-      fail(
-        res.status === 503 ? 503 : 502,
-        error.error ?? 'Transcoder unavailable'
-      );
+      throw Object.assign(new Error(error.error ?? 'Transcoder unavailable'), {
+        status: res.status === 503 ? 503 : 502,
+        // A full transcoder says when to come back.
+        retryAfter:
+          res.status === 503 && typeof error.retryAfter === 'number'
+            ? error.retryAfter
+            : undefined,
+      });
     }
     return await res.json();
   } catch (error) {
@@ -655,6 +662,11 @@ router.post('/own/open', async (req, res) => {
     sources.delete(stream.handle);
     throw error;
   }
+  // Opening the same item and version again (resume, retry, a reload)
+  // replaces the earlier playback: its conversion is released at once,
+  // rather than holding a place until its heartbeats lapse.
+  for (const [key, old] of [...owns])
+    if (old.uuid === user.uuid && old.revision === revision) dropOwn(key, old);
   // A user keeps a few at once (tabs, versions); the oldest go first.
   const mine = [...owns].filter(([, o]) => o.uuid === user.uuid);
   for (const [key, old] of mine.slice(
@@ -1084,6 +1096,51 @@ router.all('/source/:handle', async (req, res) => {
   if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Method not allowed');
   await forward(source, req, res);
 });
+/**
+ * How a subtitle reaches the browser, as the transcoder serves it: text as
+ * WebVTT, ASS/SSA as itself (JASSUB), PGS as .sup (libpgs).
+ */
+export function subtitleFormat(codec: string): 'vtt' | 'ass' | 'sup' | null {
+  if (['subrip', 'webvtt', 'mov_text', 'text'].includes(codec)) return 'vtt';
+  if (codec === 'ass' || codec === 'ssa') return 'ass';
+  if (codec === 'hdmv_pgs_subtitle') return 'sup';
+  return null;
+}
+/** Asks the transcoder for an extracted file; it may still be extracting. */
+async function extracted(
+  path: string,
+  body: object
+): Promise<globalThis.Response> {
+  const upstream = await fetch(transcoder(path), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.party.transcoderSecret}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(65000),
+  });
+  if (upstream.status === 425 || upstream.status === 503)
+    throw Object.assign(
+      new Error(
+        upstream.status === 425
+          ? 'Subtitles are still being extracted'
+          : 'Subtitle extraction is busy'
+      ),
+      {
+        status: upstream.status,
+        retryAfter: Number(upstream.headers.get('retry-after')) || 5,
+      }
+    );
+  if (!upstream.ok) {
+    logger.warn(
+      { path, status: upstream.status },
+      'transcoder subtitle extraction failed'
+    );
+    fail(502, 'Subtitle extraction failed');
+  }
+  return upstream;
+}
 router.get('/subtitle/:index', async (req, res) => {
   const { source, session, media } = await streaming(req);
   if (
@@ -1093,34 +1150,41 @@ router.get('/subtitle/:index', async (req, res) => {
   )
     fail(410, 'Source changed');
   const index = Number(req.params.index);
-  if (
-    !media.tracks.some(
-      (t) =>
-        t.type === 'subtitle' &&
-        t.index === index &&
-        ['subrip', 'webvtt', 'mov_text', 'text'].includes(t.codec)
-    )
-  )
+  const format =
+    typeof req.query.format === 'string' ? req.query.format : 'vtt';
+  const track = media.tracks.find(
+    (t) => t.type === 'subtitle' && t.index === index
+  );
+  if (!track || subtitleFormat(track.codec) !== format)
     fail(404, 'Subtitle not found');
-  const upstream = await fetch(transcoder('/subtitle'), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.party.transcoderSecret}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ input: input(source), index }),
-    signal: AbortSignal.timeout(65000),
+  const upstream = await extracted('/subtitle', {
+    input: input(source),
+    index,
+    format,
   });
-  if (!upstream.ok) {
-    logger.warn(
-      { status: upstream.status, index },
-      'transcoder subtitle extraction failed'
-    );
-    fail(502, 'Subtitle extraction failed');
-  }
-  res
-    .type('text/vtt')
-    .send(offsetWebVtt(await upstream.text(), session.offsetMs ?? 0));
+  if (format === 'vtt')
+    return void res
+      .type('text/vtt')
+      .send(offsetWebVtt(await upstream.text(), session.offsetMs ?? 0));
+  // ASS keeps the source's own times, which are the player's.
+  res.type(format === 'ass' ? 'text/x-ssa' : 'application/octet-stream');
+  res.send(Buffer.from(await upstream.arrayBuffer()));
+});
+router.get('/font/:index', async (req, res) => {
+  const { source, session, media } = await streaming(req);
+  if (
+    session.revision !== source.revision ||
+    session.source !== source.handle ||
+    req.query.lease !== session.lease
+  )
+    fail(410, 'Source changed');
+  const index = Number(req.params.index);
+  if (!media.fonts?.some((f) => f.index === index)) fail(404, 'Font not found');
+  const upstream = await extracted('/font', { input: input(source), index });
+  res.type(upstream.headers.get('content-type') ?? 'font/ttf');
+  // Fonts don't change for a file: the player may keep them.
+  res.set('Cache-Control', 'private, max-age=86400');
+  res.send(Buffer.from(await upstream.arrayBuffer()));
 });
 /**
  * How long the transcoder may take to start answering for converted media.

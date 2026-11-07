@@ -12,6 +12,7 @@ import {
   select,
   manifestReady,
   manifestStart,
+  subtitleKind,
   videoCodec,
   withFullDuration,
   withVideoCodec,
@@ -20,7 +21,13 @@ import {
 const exec = promisify(execFile);
 const secret = process.env.TRANSCODER_SECRET ?? '';
 const root = process.env.CACHE_DIR ?? '/tmp/aiostreams-transcoder';
+/** Conversions that encode video, which load the CPU or GPU. */
 const limit = Math.max(1, Number(process.env.TRANSCODER_MAX_JOBS ?? 2));
+/** All conversions: copying video and converting audio costs little. */
+const copyLimit = Math.max(
+  limit,
+  Number(process.env.TRANSCODER_MAX_COPY_JOBS ?? 8)
+);
 const maxBytes = Math.max(
   1024 * 1024,
   Number(process.env.TRANSCODER_CACHE_BYTES ?? 10 * 1024 ** 3)
@@ -29,8 +36,28 @@ const maxBytes = Math.max(
 export const jobs = new Map();
 const probes = new Map();
 const pending = new Map();
-const subtitles = new Map();
-let subtitleJobs = 0;
+/** Extracted subtitles and fonts: key → { path, ready, error }. */
+const extracted = new Map();
+let extractions = 0;
+/** At most this many files are kept; the oldest goes first. */
+const EXTRACTED_FILES = 32;
+/** Reading a whole remote file for its subtitles can take a while. */
+const EXTRACTION_TIMEOUT_MS = 30 * 60_000;
+const SUBTITLE_FORMATS = {
+  vtt: { kind: 'text', muxer: 'webvtt', codec: [], type: 'text/vtt' },
+  ass: {
+    kind: 'ass',
+    muxer: 'ass',
+    codec: ['-c:s', 'copy'],
+    type: 'text/x-ssa',
+  },
+  sup: {
+    kind: 'pgs',
+    muxer: 'sup',
+    codec: ['-c:s', 'copy'],
+    type: 'application/octet-stream',
+  },
+};
 let cacheBytes = 0;
 const maximumPosition = (job) =>
   Math.max(0, ...[...job.viewers.values()].map((v) => v.positionMs));
@@ -220,6 +247,67 @@ function start(job, encoder, tonemap = 'gpu') {
     else job.finished = true;
   });
 }
+/**
+ * Starts writing a file with FFmpeg, once per key. Until it's written the
+ * caller is told to come back: reading a whole remote file can take
+ * minutes, more than a request should wait.
+ */
+function extract(key, args) {
+  const id = hash(key);
+  const known = extracted.get(id);
+  if (known && !known.error) return known;
+  if (extractions >= 2) {
+    const error = Error('Subtitle extraction capacity reached');
+    error.status = 503;
+    error.retryAfter = 10;
+    throw error;
+  }
+  const entry = { path: `${root}/extracted/${id}`, ready: false, error: null };
+  extracted.set(id, entry);
+  extractions++;
+  void mkdir(`${root}/extracted`, { recursive: true })
+    .then(() =>
+      exec('ffmpeg', args(entry.path), {
+        timeout: EXTRACTION_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      }).catch(async (error) => {
+        // dump_attachment writes its file, then exits for want of an output.
+        if (!(await stat(entry.path).catch(() => null))?.size) throw error;
+      })
+    )
+    .then(() => {
+      entry.ready = true;
+    })
+    .catch(() => {
+      entry.error = 'Subtitle extraction failed';
+      void rm(entry.path, { force: true });
+    })
+    .finally(() => extractions--);
+  while (extracted.size > EXTRACTED_FILES) {
+    const [oldest, old] = extracted.entries().next().value;
+    extracted.delete(oldest);
+    void rm(old.path, { force: true });
+  }
+  return entry;
+}
+async function sendExtracted(res, entry, type) {
+  if (entry.error) {
+    const error = Error(entry.error);
+    error.status = 502;
+    throw error;
+  }
+  if (!entry.ready) {
+    res.writeHead(425, {
+      'Content-Type': 'application/json',
+      'Retry-After': '5',
+    });
+    res.end(JSON.stringify({ error: 'Still extracting', retryAfter: 5 }));
+    return;
+  }
+  const size = await stat(entry.path);
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': size.size });
+  await pipeline(createReadStream(entry.path), res);
+}
 /** How far before the source's end a finished conversion may stop. */
 const END_MARGIN_MS = 30_000;
 export function stoppedEarly(job) {
@@ -267,11 +355,18 @@ async function prepare(body) {
   if (!job) {
     for (const old of [...jobs.values()])
       if (!old.viewers.size || old.error) await drop(old);
-    if (jobs.size >= limit) {
+    const encodes = (j) => j.mode === 'video';
+    const encoding = select(meta, request).mode === 'video';
+    if (
+      jobs.size >= copyLimit ||
+      (encoding && [...jobs.values()].filter(encodes).length >= limit)
+    ) {
       const err = Error(
         'Conversion capacity reached; try Original or retry later'
       );
       err.status = 503;
+      // Viewers who left free their place within a minute.
+      err.retryAfter = 10;
       throw err;
     }
     const jobId = id();
@@ -372,55 +467,61 @@ export function createServer() {
       if (req.method === 'POST' && url.pathname === '/probe')
         return send(await probe(inputUrl((await json(req)).input)));
       if (req.method === 'POST' && url.pathname === '/subtitle') {
+        // A subtitle track as a file: WebVTT for text, the track itself for
+        // ASS and PGS, which the browser draws.
         const body = await json(req);
         const input = inputUrl(body.input);
+        const format = SUBTITLE_FORMATS[body.format ?? 'vtt'];
+        if (!format) throw Error('Unknown subtitle format');
         const meta = await probe(input);
-        if (
-          !meta.tracks.some(
-            (t) =>
-              t.type === 'subtitle' &&
-              t.index === body.index &&
-              ['subrip', 'webvtt', 'mov_text', 'text'].includes(t.codec)
-          )
-        )
-          throw Error('Unknown text subtitle');
-        const key = hash([input, body.index]);
-        if (!subtitles.has(key)) {
-          if (subtitleJobs >= 2) {
-            const error = Error('Subtitle extraction capacity reached');
-            error.status = 503;
-            throw error;
-          }
-          subtitleJobs++;
-          const task = exec(
-            'ffmpeg',
-            [
+        const track = meta.tracks.find(
+          (t) => t.type === 'subtitle' && t.index === body.index
+        );
+        if (!track || subtitleKind(track.codec) !== format.kind)
+          throw Error('Unknown subtitle track');
+        return sendExtracted(
+          res,
+          extract(
+            [input, 'subtitle', body.index, body.format ?? 'vtt'],
+            (path) => [
               '-v',
               'error',
               '-i',
               input,
               '-map',
               `0:${body.index}`,
+              ...format.codec,
               '-f',
-              'webvtt',
-              'pipe:1',
-            ],
-            { timeout: 60000, maxBuffer: 8 * 1024 * 1024 }
-          )
-            .then((result) => result.stdout)
-            .catch(() => {
-              subtitles.delete(key);
-              throw Error('Subtitle extraction failed');
-            })
-            .finally(() => subtitleJobs--);
-          subtitles.set(key, task);
-          if (subtitles.size > 16)
-            subtitles.delete(subtitles.keys().next().value);
-        }
-        const stdout = await subtitles.get(key);
-        res.setHeader('Content-Type', 'text/vtt');
-        res.end(stdout);
-        return;
+              format.muxer,
+              '-y',
+              path,
+            ]
+          ),
+          format.type
+        );
+      }
+      if (req.method === 'POST' && url.pathname === '/font') {
+        // A font attached to the file, which its ASS subtitles use. MKV
+        // keeps attachments at its start, so this reads little of it.
+        const body = await json(req);
+        const input = inputUrl(body.input);
+        const font = (await probe(input)).fonts.find(
+          (f) => f.index === body.index
+        );
+        if (!font) throw Error('Unknown font');
+        return sendExtracted(
+          res,
+          extract([input, 'font', body.index], (path) => [
+            '-v',
+            'error',
+            `-dump_attachment:${body.index}`,
+            path,
+            '-y',
+            '-i',
+            input,
+          ]),
+          font.mimetype
+        );
       }
       if (req.method === 'POST' && url.pathname === '/prepare') {
         const body = await json(req);
@@ -501,6 +602,9 @@ export function createServer() {
       }
       res.writeHead(error.status ?? 400, {
         'Content-Type': 'application/json',
+        ...(error.retryAfter
+          ? { 'Retry-After': String(error.retryAfter) }
+          : {}),
       });
       // Native errors may contain source URLs: pass on only their code.
       const native = !!(error.code || error.cmd);
@@ -516,7 +620,7 @@ export function createServer() {
             syscall: error.syscall,
           })
         );
-      res.end(JSON.stringify({ error: message }));
+      res.end(JSON.stringify({ error: message, retryAfter: error.retryAfter }));
     }
   });
 }
