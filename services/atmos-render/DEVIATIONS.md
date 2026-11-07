@@ -13,6 +13,8 @@ An entry is added in the same commit as the code it describes.
 | 2 | The AIDE path (objects rendered to 7.1.4 by OAR, then as a bed). Objects are always rendered at their own positions. | When AIDE is active is unknown. | Tracing what enables AIDE in `DolbyHrtfEnc.dll`. |
 | 3 | OAMD zone constraints, snap, screen and depth factors. Ignored. Object size is ignored as the notes say. | Not covered by the trace. | Whether the headphone renderer reads them. |
 | 4 | No limiter; output can exceed full scale (the LFE's +10 dB on a full-scale test signal does). | The regulator is off in the traced headphone profiles except Dynamic. | Only needed if a profile with the regulator is matched. |
+| 18 | Sample rates other than 48 kHz. The renderer assumes 48 kHz throughout; a 96 or 192 kHz TrueHD (non-Atmos 7.1 can be) would render at the wrong speed. | A gap of ours, not a trace question. | Resampling to 48 kHz, or keeping such sources off the server path. To be fixed. |
+| 19 | DRC and dialnorm are inconsistent between inputs. E-AC-3: FFmpeg's decoder applies the stream's DRC at its default `drc_scale` 1. TrueHD: the truehd crate applies none. Dialnorm is applied by neither. | Undecided. | What Windows' Dolby decoding applies (trace), or a decision; the proposal is DRC off for both, dialnorm unapplied. |
 
 ## Assumed
 
@@ -25,6 +27,14 @@ An entry is added in the same commit as the code it describes.
 | 9 | Channels outside Dolby's bed table (TrueHD Cb, Tc, Tfc, Lsc/Rsc, Lsd/Rsd; WAV back centre and top channels) take the nearest table position. | Not in the bed table; the notes infer the extra statics render as positioned objects. | The positions the encoder gives its 5 extra statics. |
 | 10 | Positions and gains update per 256-sample block, from OAMD's own ramps, with no further smoothing. | The notes saw no filter crossfade. | — |
 | 11 | JOC metadata of frame k applies to FFmpeg's decoded PCM of frame k (no decoder delay between them). | Not verified. | A JOC stream with a known object onset. |
+| 20 | Stream bed labels map to Dolby channel IDs as L 1, R 2, C 3, Lss/Rss 5/6, Lrs/Rrs 7/8, Lfh/Rfh 9/10, Lts/Rts 11/12, Lrh/Rrh 13/14, Lw/Rw 15/16; LFE/LFE2 go to the LFE path (`objects.rs`). | Our own mapping. | `hpv_bedconfig_channel_position` (the second, undecoded bed table). |
+| 21 | The 5.1 surround retype (5/6 rendered at 7/8 when the bed has no 7/8) is applied in Atmos for Headphones too. | Traced only in the Reference Player (`sub_18001D370`). | The same check in Atmos for Headphones. |
+| 22 | Object positions: x and y are clamped to 0..1 and z to -1..1 (the oamd crate), with no other scaling before the warp. `b_enable_elevation` is ignored (z is used as sent). Negative z goes into the warp as is, i.e. below ear level. | Not covered by the trace. | Whether the encoder side scales or clamps; what the engine does with elevation off and with z < 0. |
+| 23 | Ramps: gain and position both move linearly (position linearly inside the cube) over `ramp_duration` samples, starting at the update's own sample (sample offset + block offset x 32 + evo offset). The renderer reads the state at the first sample of each 256-sample block. An object flagged not active goes silent at once, without a ramp. | The notes saw no crossfade but do not give the ramp shape or which block an update lands in. | Gain/position ramp handling in the engine. |
+| 24 | The LFE gets the same -3 dB input headroom as every other input. | The notes say "presumably included". | The LFE path's gain chain. |
+| 25 | When the 263-slot room hold runs out, the room's state (allpass, FDN, early reflections) is cleared, not just muted. | Not covered by the trace. | Whether the engine clears or only stops the output. |
+| 26 | The ITD phase on the conjugated hybrid image bands (1 and 3) is the same phase as their neighbours, not its conjugate. | Not covered by the trace. | `hpv_itd_phase_ramp` on those bands. |
+| 27 | The JOC decode (dequantisation, interpolation, the 640-tap QMF prototype) is a port of Cavern's, not checked against Dolby's own JOC decoder. | No trace of Dolby's decoder. | Optional: tracing Dolby's JOC decoder. |
 
 ## Changed from the trace
 
