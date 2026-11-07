@@ -19,8 +19,18 @@ const fixture = vi.hoisted(() => ({
   slow: false,
   noSources: false,
   memoCalls: 0,
+  workerDown: false,
+  logs: [] as { level: string; data: unknown; message: string }[],
 }));
 vi.mock('@aiostreams/core', () => ({
+  createLogger: () =>
+    Object.fromEntries(
+      ['warn', 'error', 'info', 'debug'].map((level) => [
+        level,
+        (data: unknown, message: string) =>
+          fixture.logs.push({ level, data, message }),
+      ])
+    ),
   config: {
     party: {
       get guestStreaming() {
@@ -138,6 +148,10 @@ beforeAll(async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
     if (!url.startsWith('http://worker')) return originalFetch(input, init);
+    if (fixture.workerDown)
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: { code: 'ECONNREFUSED' },
+      });
     if (url.endsWith('/probe')) return Response.json(media);
     if (url.endsWith('/prepare')) {
       if (fixture.slow)
@@ -171,6 +185,8 @@ beforeEach(() => {
   fixture.prepares = [];
   fixture.noSources = false;
   fixture.memoCalls = 0;
+  fixture.workerDown = false;
+  fixture.logs = [];
 });
 describe('guest playback authorization', () => {
   it('requires host credentials and rejects malformed invitations', async () => {
@@ -304,5 +320,20 @@ describe('guest playback authorization', () => {
     await invitation();
     expect((await api('/current', token)).status).toBe(200);
     expect(fixture.memoCalls).toBe(2);
+  });
+  it('logs why the transcoder is unavailable, without the guest token', async () => {
+    const secret = await invitation(),
+      token = await guest(secret);
+    join(token);
+    fixture.workerDown = true;
+    const response = await api('/current', token);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: 'Transcoder unavailable' });
+    expect(fixture.logs).toContainEqual({
+      level: 'warn',
+      data: { path: '/probe', cause: 'ECONNREFUSED', url: 'http://worker' },
+      message: 'transcoder unreachable',
+    });
+    expect(JSON.stringify(fixture.logs)).not.toContain(token);
   });
 });

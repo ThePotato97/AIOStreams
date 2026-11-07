@@ -7,6 +7,7 @@ import { request } from 'undici';
 import { z } from 'zod';
 import {
   config,
+  createLogger,
   type GuestMedia,
   type GuestPlayback,
   type MediaSourceRecord,
@@ -65,6 +66,20 @@ interface Source {
   record: MediaSourceRecord;
   media?: Promise<GuestMedia>;
 }
+const logger = createLogger('guest');
+/**
+ * What went wrong, without the details that can carry secrets: source URLs
+ * (debrid tokens) and some error messages that echo their input.
+ */
+function errorCause(error: unknown): string {
+  const e = error as {
+    name?: string;
+    code?: string;
+    cause?: { code?: string; name?: string };
+  };
+  if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return 'timeout';
+  return e?.cause?.code ?? e?.code ?? e?.cause?.name ?? e?.name ?? 'unknown';
+}
 const FAILURE_BACKOFF_MS = 30000;
 const OWNER_CHECK_MS = 30000;
 const bindings = new Map<string, Binding>();
@@ -108,6 +123,12 @@ async function worker(path: string, body?: unknown): Promise<any> {
     });
     if (!res.ok) {
       const error = (await res.json().catch(() => ({}))) as { error?: string };
+      logger.warn(
+        { path, status: res.status, error: error.error },
+        res.status === 401
+          ? 'transcoder rejected the shared secret'
+          : 'transcoder request failed'
+      );
       fail(
         res.status === 503 ? 503 : 502,
         error.error ?? 'Transcoder unavailable'
@@ -116,6 +137,10 @@ async function worker(path: string, body?: unknown): Promise<any> {
     return await res.json();
   } catch (error) {
     if (typeof (error as any).status === 'number') throw error;
+    logger.warn(
+      { path, cause: errorCause(error), url: config.party.transcoderUrl },
+      'transcoder unreachable'
+    );
     fail(502, 'Transcoder unavailable');
   } finally {
     clearTimeout(timer);
@@ -189,6 +214,17 @@ async function current(req: Request) {
   // Remember a failure for a while: every guest polls /current every couple
   // of seconds, and each retry runs the host's whole addon pipeline.
   const remember = (error: unknown) => {
+    const status = (error as { status?: number }).status;
+    logger.warn(
+      {
+        party: state.session.party,
+        status,
+        error:
+          typeof status === 'number' ? (error as Error).message : undefined,
+        cause: typeof status === 'number' ? undefined : errorCause(error),
+      },
+      `guest source unavailable; retrying in ${FAILURE_BACKOFF_MS / 1000}s`
+    );
     state.binding.failures.set(revision, {
       error,
       until: Date.now() + FAILURE_BACKOFF_MS,
@@ -523,6 +559,11 @@ async function forward(source: Source, req: Request, res: Response) {
       headersTimeout: 30000,
     });
   }
+  if (upstream.statusCode >= 400)
+    logger.warn(
+      { status: upstream.statusCode, host: next.hostname },
+      'guest source returned an error'
+    );
   for (const name of [
     'content-type',
     'content-length',
@@ -582,7 +623,13 @@ router.get('/subtitle/:index', async (req, res) => {
     body: JSON.stringify({ input: input(source), index }),
     signal: AbortSignal.timeout(65000),
   });
-  if (!upstream.ok) fail(502, 'Subtitle extraction failed');
+  if (!upstream.ok) {
+    logger.warn(
+      { status: upstream.status, index },
+      'transcoder subtitle extraction failed'
+    );
+    fail(502, 'Subtitle extraction failed');
+  }
   res
     .type('text/vtt')
     .send(offsetWebVtt(await upstream.text(), session.offsetMs ?? 0));
@@ -602,7 +649,13 @@ router.get('/media/:job/:file', async (req, res) => {
     headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
     signal: AbortSignal.timeout(30000),
   });
-  if (!upstream.ok) fail(502, 'Conversion is unavailable');
+  if (!upstream.ok) {
+    logger.warn(
+      { status: upstream.status, file },
+      'transcoder media request failed'
+    );
+    fail(502, 'Conversion is unavailable');
+  }
   if (file.endsWith('.m3u8')) {
     const playlist = (await upstream.text())
       .replace(
@@ -676,6 +729,12 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
     return;
   }
   const status = error instanceof z.ZodError ? 400 : (error.status ?? 500);
+  // Path only: guest media URLs carry the session token in the query.
+  if (status === 500)
+    logger.error(
+      { path: `${_req.baseUrl}${_req.path}`, cause: errorCause(error) },
+      'guest request failed unexpectedly'
+    );
   res.status(status).json({
     error:
       status === 500
