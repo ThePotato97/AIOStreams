@@ -10,6 +10,7 @@ import { videoEngine } from '../playback/video';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
 import { sleep, whenReady } from './ready';
+import { renderAss, renderPgs, type Renderer } from './subtitle-renderer';
 import {
   afterFailure,
   CRITICAL,
@@ -303,27 +304,61 @@ export function guestEngine(
           emit({ type: 'failed', error: (error as Error).message });
       }
     })(nativeEvent, {});
+    /** The ASS or PGS subtitle being drawn over the video. */
+    let renderer: Renderer | undefined;
+    /** Formats whose renderer failed here: those are burned in instead. */
+    const unrendered = new Set<'ass' | 'pgs'>();
+    const stopRenderer = () => {
+      renderer?.destroy();
+      renderer = undefined;
+    };
     /** Attaches a subtitle once the server has it: extraction may take minutes. */
     const attachSubtitle = async (
-      url: string,
+      result: GuestPlayback,
       at: number,
       signal: AbortSignal
     ) => {
+      const url = new URL(result.subtitleUrl!, window.location.href).href;
+      const format = result.subtitleFormat ?? 'vtt';
       try {
         const res = await whenReady(url, signal);
         if (at !== generation || !res.ok) return;
-        const text = await res.text();
-        if (at !== generation) return;
-        const id = String(subtitle);
-        raw.addServerSubtitle?.({
-          id,
-          label: t`Subtitles`,
-          url: URL.createObjectURL(new Blob([text], { type: 'text/vtt' })),
-          stream: { Index: subtitle },
-        });
-        raw.setSubtitle(id);
+        if (format === 'vtt') {
+          const text = await res.text();
+          if (at !== generation) return;
+          const id = String(subtitle);
+          raw.addServerSubtitle?.({
+            id,
+            label: t`Subtitles`,
+            url: URL.createObjectURL(new Blob([text], { type: 'text/vtt' })),
+            stream: { Index: subtitle },
+          });
+          raw.setSubtitle(id);
+          return;
+        }
+        const el = video.current;
+        if (!el) return;
+        const drawn =
+          format === 'ass'
+            ? await renderAss(
+                el,
+                await res.text(),
+                (result.fontUrls ?? []).map(
+                  (font) => new URL(font, window.location.href).href
+                )
+              )
+            : await renderPgs(el, await res.arrayBuffer());
+        if (at !== generation) return drawn.destroy();
+        renderer = drawn;
       } catch {
-        /* Replaced, closed, or offline: playback goes on without it. */
+        if (at !== generation || signal.aborted) return;
+        // The renderer didn't load or run: have this track burned in.
+        const kind = format === 'ass' ? 'ass' : 'pgs';
+        // Once per format: a server that still sends it isn't asked again.
+        if (format !== 'vtt' && !unrendered.has(kind)) {
+          unrendered.add(kind);
+          void prepare(position());
+        }
       }
     };
     async function prepare(positionMs: number, waitedMs = 0) {
@@ -336,9 +371,14 @@ export function guestEngine(
       target = positionMs;
       emit({ type: 'state', state: { waiting: true, loaded: false } });
       raw.setPaused(true);
+      stopRenderer();
       const info = current();
       try {
-        const capabilities = await browserCapabilities(info.media, audio);
+        const probed = await browserCapabilities(info.media, audio);
+        const capabilities = {
+          ...probed,
+          subtitles: (probed.subtitles ?? []).filter((f) => !unrendered.has(f)),
+        };
         const result = await api.prepare(
           {
             revision: info.revision,
@@ -362,11 +402,7 @@ export function guestEngine(
           subtitles: [],
         });
         if (result.subtitleUrl)
-          void attachSubtitle(
-            new URL(result.subtitleUrl, window.location.href).href,
-            at,
-            controller.signal
-          );
+          void attachSubtitle(result, at, controller.signal);
         listTracks();
       } catch (error) {
         if (at !== generation || controller.signal.aborted) return;
@@ -512,6 +548,7 @@ export function guestEngine(
         ++generation;
         controller?.abort();
         void stop();
+        stopRenderer();
         raw.close();
         clearInterval(heartbeat);
         // Nothing to release before a playback was ever prepared.

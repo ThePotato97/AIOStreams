@@ -32,6 +32,8 @@ export interface GuestCapabilities {
   hdr: boolean;
   /** Plays 5.1 AAC: converted surround stays surround. */
   surround?: boolean;
+  /** Subtitle formats the browser draws itself, rather than burned in. */
+  subtitles?: ('ass' | 'pgs')[];
 }
 export interface GuestPlaybackRequest {
   revision: string;
@@ -53,4 +55,8 @@ export interface GuestPlayback {
   url: string;
   offsetMs: number;
   subtitleUrl?: string;
+  /** How the subtitle is served: WebVTT, ASS for JASSUB, PGS for libpgs. */
+  subtitleFormat?: 'vtt' | 'ass' | 'sup';
+  /** Fonts attached to the file, for an ASS subtitle. */
+  fontUrls?: string[];
 }

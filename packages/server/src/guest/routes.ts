@@ -429,6 +429,10 @@ const capabilitySchema = z.object({
   container: z.boolean(),
   hdr: z.boolean(),
   surround: z.boolean().optional(),
+  subtitles: z
+    .array(z.enum(['ass', 'pgs']))
+    .max(2)
+    .optional(),
 });
 const playbackSchema = z.object({
   revision: z.string().length(64),
@@ -613,16 +617,28 @@ function playbackResponse(
     offsetMs: result.offsetMs ?? 0,
     url: `${base}${result.mode === 'direct' ? 'original' : `${result.id}/manifest.mpd`}${query}`,
   };
+  const track =
+    body.subtitle == null
+      ? undefined
+      : media.tracks.find(
+          (t) => t.type === 'subtitle' && t.index === body.subtitle
+        );
+  const format = track && subtitleFormat(track.codec);
+  // Text is always served; ASS and PGS where the browser draws them, and
+  // otherwise they're burned into the video.
+  const drawn = body.capabilities.subtitles ?? [];
   if (
-    body.subtitle != null &&
-    media.tracks.some(
-      (t) =>
-        t.type === 'subtitle' &&
-        t.index === body.subtitle &&
-        ['subrip', 'webvtt', 'mov_text', 'text'].includes(t.codec)
-    )
-  )
-    response.subtitleUrl = `${req.baseUrl}/subtitle/${body.subtitle}${query}`;
+    format === 'vtt' ||
+    (format === 'ass' && drawn.includes('ass')) ||
+    (format === 'sup' && drawn.includes('pgs'))
+  ) {
+    response.subtitleUrl = `${req.baseUrl}/subtitle/${body.subtitle}${query}${format === 'vtt' ? '' : `&format=${format}`}`;
+    response.subtitleFormat = format;
+    if (format === 'ass')
+      response.fontUrls = (media.fonts ?? []).map(
+        (f) => `${req.baseUrl}/font/${f.index}${query}`
+      );
+  }
   return response;
 }
 const ownOpenSchema = z.object({

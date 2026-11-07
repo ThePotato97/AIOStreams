@@ -984,6 +984,55 @@ describe('subtitles for the browser', () => {
         new URL(`${base}${path}${query}${format ? `&format=${format}` : ''}`)
       );
   }
+  it('sends ASS and PGS to be drawn where the browser draws them', async () => {
+    const prepared = async (codec: string, subtitles?: string[]) => {
+      fixture.subtitleCodec = codec;
+      fixture.prepared = { mode: 'direct' };
+      const opened = await api('/own/open', 'host-token', {
+        itemId: 'c'.repeat(32),
+        sourceId: 'source',
+      });
+      const { token, revision } = (await opened.json()) as {
+        token: string;
+        revision: string;
+      };
+      return (await (
+        await api('/own/prepare', token, {
+          revision,
+          quality: 'original',
+          positionMs: 0,
+          subtitle: 2,
+          capabilities: {
+            video: true,
+            audio: true,
+            container: true,
+            hdr: false,
+            subtitles,
+          },
+        })
+      ).json()) as {
+        subtitleUrl?: string;
+        subtitleFormat?: string;
+        fontUrls?: string[];
+      };
+    };
+    const ass = await prepared('ass', ['ass', 'pgs']);
+    expect(ass.subtitleFormat).toBe('ass');
+    expect(ass.subtitleUrl).toMatch(/\/subtitle\/2\?token=.*&format=ass$/);
+    expect(ass.fontUrls).toHaveLength(1);
+    expect(ass.fontUrls![0]).toMatch(/\/font\/5\?token=/);
+    const pgs = await prepared('hdmv_pgs_subtitle', ['ass', 'pgs']);
+    expect(pgs.subtitleFormat).toBe('sup');
+    expect(pgs.fontUrls).toBeUndefined();
+    // A browser that doesn't draw them gets them burned in: no subtitle here.
+    expect((await prepared('ass', [])).subtitleUrl).toBeUndefined();
+    expect(
+      (await prepared('hdmv_pgs_subtitle', ['ass'])).subtitleUrl
+    ).toBeUndefined();
+    // Text is always served as WebVTT.
+    const text = await prepared('subrip');
+    expect(text.subtitleFormat).toBe('vtt');
+  });
   it('says to come back while the subtitle is extracted', async () => {
     const get = await playing('subrip');
     fixture.extraction = [{ status: 425, body: '{}' }];

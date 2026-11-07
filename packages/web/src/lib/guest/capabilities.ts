@@ -4,6 +4,7 @@ import type {
   GuestMedia,
   GuestTrack,
 } from '@aiostreams/core';
+import { canRender } from './subtitle-renderer';
 /** ffprobe reports -99 (or nothing) when a stream doesn't declare its level. */
 const knownLevel = (level: number | undefined, fallback: number) =>
   level != null && Number.isInteger(level) && level > 0 ? level : fallback;
@@ -176,6 +177,8 @@ export async function browserCapabilities(
     }
   }
   const codecs = [vc, ac].filter(Boolean).join(',');
+  // ASS and PGS are drawn here, not burned in, where the renderers run.
+  const subtitles: ('ass' | 'pgs')[] = canRender() ? ['ass', 'pgs'] : [];
   return {
     video: videoSupport,
     audio: audioSupport,
@@ -183,5 +186,6 @@ export async function browserCapabilities(
       !!mime && !!vc && !!el.canPlayType(`${mime}; codecs="${codecs}"`),
     hdr,
     surround,
+    subtitles,
   };
 }

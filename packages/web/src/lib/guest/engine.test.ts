@@ -62,7 +62,27 @@ const fakes = vi.hoisted(() => {
 vi.mock('@lingui/core/macro', () => ({
   t: (s: TemplateStringsArray, ...v: unknown[]) => String.raw({ raw: s }, ...v),
 }));
-vi.mock('./capabilities', () => ({ browserCapabilities: async () => ({}) }));
+vi.mock('./capabilities', () => ({
+  browserCapabilities: async () => ({ subtitles: ['ass', 'pgs'] }),
+}));
+const renderers = vi.hoisted(() => ({
+  ass: [] as { content: string; fonts: string[]; destroyed: boolean }[],
+  pgs: [] as { bytes: number; destroyed: boolean }[],
+  fail: false,
+}));
+vi.mock('./subtitle-renderer', () => ({
+  renderAss: async (_video: unknown, content: string, fonts: string[]) => {
+    if (renderers.fail) throw new Error('WebAssembly failed');
+    const drawn = { content, fonts, destroyed: false };
+    renderers.ass.push(drawn);
+    return { destroy: () => (drawn.destroyed = true) };
+  },
+  renderPgs: async (_video: unknown, data: ArrayBuffer) => {
+    const drawn = { bytes: data.byteLength, destroyed: false };
+    renderers.pgs.push(drawn);
+    return { destroy: () => (drawn.destroyed = true) };
+  },
+}));
 vi.mock('shaka-player', () => ({
   default: {
     Player: Object.assign(fakes.FakePlayer, {
@@ -572,6 +592,84 @@ describe('a subtitle still being extracted', () => {
       expect.objectContaining({ id: '3', url: 'blob:vtt' })
     );
     expect(fakes.raw!.setSubtitle).toHaveBeenLastCalledWith('3');
+  });
+});
+
+describe('ASS and PGS drawn in the browser', () => {
+  const answered = (body: string | ArrayBuffer) =>
+    vi.fn(async () => new Response(body, { status: 200 }));
+  const playWith = async (extra: object) => {
+    const { engine, api } = setup();
+    await start(engine);
+    vi.mocked(api.prepare).mockResolvedValue({
+      mode: 'direct',
+      url: '/party/guest/media/original?token=t&lease=l',
+      offsetMs: 0,
+      lease: 'l'.repeat(43),
+      subtitleUrl: '/party/guest/subtitle/3?token=t&lease=l&format=ass',
+      ...extra,
+    } as never);
+    engine.setSubtitle('3');
+    await vi.advanceTimersByTimeAsync(0);
+    return { engine, api };
+  };
+  beforeEach(() => {
+    renderers.ass = [];
+    renderers.pgs = [];
+    renderers.fail = false;
+  });
+  it('asks for them drawn, not burned in', async () => {
+    const { engine } = setup();
+    await start(engine);
+    expect(prepares.at(-1)).toMatchObject({
+      capabilities: { subtitles: ['ass', 'pgs'] },
+    });
+  });
+  it('draws ASS with the fonts the file carries', async () => {
+    vi.stubGlobal('fetch', answered('[Script Info]\nTitle: x'));
+    await playWith({
+      subtitleFormat: 'ass',
+      fontUrls: ['/party/guest/font/5?token=t&lease=l'],
+    });
+    expect(renderers.ass).toEqual([
+      {
+        content: '[Script Info]\nTitle: x',
+        fonts: ['https://aio.example/party/guest/font/5?token=t&lease=l'],
+        destroyed: false,
+      },
+    ]);
+  });
+  it('draws PGS from its bytes', async () => {
+    vi.stubGlobal('fetch', answered(new Uint8Array([0x50, 0x47, 1, 2]).buffer));
+    await playWith({
+      subtitleFormat: 'sup',
+      subtitleUrl: '/party/guest/subtitle/3?token=t&lease=l&format=sup',
+    });
+    expect(renderers.pgs).toEqual([{ bytes: 4, destroyed: false }]);
+  });
+  it('stops drawing when the stream is replaced or closed', async () => {
+    vi.stubGlobal('fetch', answered('[Script Info]'));
+    const { engine } = await playWith({ subtitleFormat: 'ass' });
+    expect(renderers.ass[0].destroyed).toBe(false);
+    // Another subtitle prepares the stream again.
+    engine.setSubtitle(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(renderers.ass[0].destroyed).toBe(true);
+    engine.close();
+    expect(renderers.ass.every((r) => r.destroyed)).toBe(true);
+  });
+  it('has the track burned in when its renderer fails', async () => {
+    renderers.fail = true;
+    vi.stubGlobal('fetch', answered('[Script Info]'));
+    const { api } = await playWith({ subtitleFormat: 'ass' });
+    await vi.advanceTimersByTimeAsync(0);
+    // Asked again, now without ASS among what's drawn here, and only once.
+    const calls = vi.mocked(api.prepare).mock.calls;
+    expect(calls).toHaveLength(3);
+    expect(calls.at(-1)![0]).toMatchObject({
+      subtitle: 3,
+      capabilities: { subtitles: ['pgs'] },
+    });
   });
 });
 
