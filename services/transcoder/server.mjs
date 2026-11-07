@@ -428,14 +428,22 @@ async function sweep() {
   }
   cacheBytes = bytes;
 }
+/**
+ * Empties the cache left by a previous run. The directory itself is kept:
+ * it is usually a volume mount point, and removing one fails with EBUSY.
+ */
+export async function clearCache(dir) {
+  await mkdir(dir, { recursive: true });
+  for (const entry of await readdir(dir))
+    await rm(`${dir}/${entry}`, { recursive: true, force: true });
+}
 if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   if (secret.length < 32)
     throw Error('TRANSCODER_SECRET must contain at least 32 characters');
-  await rm(root, { recursive: true, force: true });
-  await mkdir(root, { recursive: true });
+  await clearCache(root);
   const server = createServer();
   server.listen(Number(process.env.PORT ?? 3100), '0.0.0.0');
   const timer = setInterval(() => void sweep().catch(() => {}), 5000);
