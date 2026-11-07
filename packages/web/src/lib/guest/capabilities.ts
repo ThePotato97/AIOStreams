@@ -147,6 +147,14 @@ export async function browserCapabilities(
       /* Keep the basic result. */
     }
   }
+  /** Whether the browser outputs to six channels or more. */
+  const surroundOutput = () => {
+    if (typeof AudioContext === 'undefined') return false;
+    const context = new AudioContext();
+    const channels = context.destination.maxChannelCount;
+    void context.close().catch(() => {});
+    return channels >= 6;
+  };
   // Whether converted surround can stay surround: 5.1 AAC, asked directly.
   let surround = false;
   if ((audio?.channels ?? 2) > 2 && navigator.mediaCapabilities) {
@@ -160,7 +168,9 @@ export async function browserCapabilities(
           samplerate: 48000,
         },
       });
-      surround = result.supported;
+      // On a stereo output the transcoder's own downmix (normalised, no
+      // clipping) is better than the browser's: keep surround for speakers.
+      surround = result.supported && surroundOutput();
     } catch {
       /* Stereo, as before. */
     }
