@@ -1803,6 +1803,10 @@ msgstr "Hardware decoding"
 msgid "Has a PIN"
 msgstr "Has a PIN"
 
+#: src/components/player/options.tsx
+msgid "Headphones"
+msgstr "Headphones"
+
 #: src/components/player/subtitle-sync.tsx
 msgid "Heard"
 msgstr "Heard"
@@ -1846,10 +1850,6 @@ msgstr "Hide episodes"
 #: src/components/party/party-sheet.tsx
 msgid "Hide QR code"
 msgstr "Hide QR code"
-
-#: src/lib/guest/engine.ts
-msgid "HLS playback failed"
-msgstr "HLS playback failed"
 
 #. Holding the next key down, as in Hold + Enter
 #: src/lib/input/keys.ts
@@ -1913,6 +1913,14 @@ msgstr "How these work"
 #: src/pages/settings/about.tsx
 msgid "How to use the app and what each setting does."
 msgstr "How to use the app and what each setting does."
+
+#: src/components/player/options.tsx
+msgid "HRIR: {custom}"
+msgstr "HRIR: {custom}"
+
+#: src/components/player/options.tsx
+msgid "HRIR: Dolby Atmos for Headphones (HeSuVi)"
+msgstr "HRIR: Dolby Atmos for Headphones (HeSuVi)"
 
 #: src/lib/subtitles/style.ts
 msgid "Huge"
@@ -2184,6 +2192,10 @@ msgstr "List only my languages"
 #: src/pages/search.tsx
 msgid "Listening…"
 msgstr "Listening…"
+
+#: src/components/player/options.tsx
+msgid "Load your own HRIR…"
+msgstr "Load your own HRIR…"
 
 #: src/components/party/party-sheet.tsx
 msgid "Loading"
@@ -2713,6 +2725,10 @@ msgstr "Off, the video jumps instead."
 msgid "Older ones wait for the server instead. Without a connection, everything saved is shown."
 msgstr "Older ones wait for the server instead. Without a connection, everything saved is shown."
 
+#: src/components/player/options.tsx
+msgid "On"
+msgstr "On"
+
 #: src/components/party/party-sheet.tsx
 msgid "on {relay}"
 msgstr "on {relay}"
@@ -3208,8 +3224,8 @@ msgid "Playback failed: {failure}"
 msgstr "Playback failed: {failure}"
 
 #: src/lib/guest/engine.ts
-msgid "Playback failed. Try another quality or ask the host to select another source."
-msgstr "Playback failed. Try another quality or ask the host to select another source."
+msgid "Playback failed ({detail}). Try another quality or ask the host to select another source."
+msgstr "Playback failed ({detail}). Try another quality or ask the host to select another source."
 
 #: src/pages/history.tsx
 msgid "Played here"
@@ -4473,6 +4489,10 @@ msgstr "That is not a valid address."
 msgid "That is not a valid regular expression."
 msgstr "That is not a valid regular expression."
 
+#: src/components/player/options.tsx
+msgid "That isn't a HeSuVi HRIR file: it needs 14 channels, in HeSuVi's order."
+msgstr "That isn't a HeSuVi HRIR file: it needs 14 channels, in HeSuVi's order."
+
 #: src/lib/party/party.ts
 msgid "That party has ended."
 msgstr "That party has ended."
@@ -4784,6 +4804,10 @@ msgstr "This server styles the app for everyone. Your own CSS applies on top of 
 msgid "This show has no episodes to pick from yet."
 msgstr "This show has no episodes to pick from yet."
 
+#: src/lib/playback/video.ts
+msgid "This stream can't play through virtual surround, so it's silent until the page is reloaded."
+msgstr "This stream can't play through virtual surround, so it's silent until the page is reloaded."
+
 #: src/pages/trailer.tsx
 msgid "This trailer can't play in the app."
 msgstr "This trailer can't play in the app."
@@ -5024,6 +5048,10 @@ msgstr "Updates, picture-in-picture, mpv and troubleshooting"
 msgid "Use Quick Connect, or the configuration’s password."
 msgstr "Use Quick Connect, or the configuration’s password."
 
+#: src/components/player/options.tsx
+msgid "Use the bundled HRIR"
+msgstr "Use the bundled HRIR"
+
 #: src/pages/sign-in.tsx
 msgid "Use the configuration’s password."
 msgstr "Use the configuration’s password."
@@ -5125,6 +5153,10 @@ msgstr "Video output"
 #: src/components/licenses.tsx
 msgid "View"
 msgstr "View"
+
+#: src/components/player/options.tsx
+msgid "Virtual surround"
+msgstr "Virtual surround"
 
 #: src/components/licenses.tsx
 #: src/pages/settings/about.tsx
@@ -5472,3 +5504,15 @@ msgstr "Your rating"
 #: src/pages/settings/cache.tsx
 msgid "Your watch history and totals."
 msgstr "Your watch history and totals."
+
+#: src/lib/playback/convert.ts
+msgid "Conversion is unavailable on this server."
+msgstr "Conversion is unavailable on this server."
+
+#: src/lib/playback/convert.ts
+msgid "Couldn't convert the audio for this browser, so it may play without sound."
+msgstr "Couldn't convert the audio for this browser, so it may play without sound."
+
+#: src/lib/playback/convert.ts
+msgid "Still downloading; it starts when it's ready."
+msgstr "Still downloading; it starts when it's ready."

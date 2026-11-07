@@ -20,7 +20,9 @@ Guest streaming is opt-in at server level (`PARTY_GUEST_STREAMING`, false by def
 
 The browser reports its capabilities against the probed source. Original selects direct playback, container remuxing, audio conversion, or H.264 video conversion as needed. 1080p/8 Mbps and 720p/4 Mbps cap video resolution and bitrate without upscaling. Audio conversion produces stereo AAC at 192 kbps. A failed direct-play attempt retries once through H.264/AAC conversion.
 
-Converted streams use HLS/fMP4. Native HLS is preferred; other browsers load hls.js. Chapters are supplied separately from the stream. Audio and embedded subtitle choices use the shared player UI. Plain text subtitles are extracted as WebVTT; ASS/SSA and bitmap subtitles require video burn-in. HDR video that requires conversion is tone-mapped to SDR. External addon subtitles and thumbnail generation are not included in the guest endpoint.
+Converted streams are DASH (fMP4), with video and audio in separate streams as Plex does, played with Shaka Player. Copied HEVC is tagged `hvc1`, and the manifest carries the video's full codec string, built from its configuration box (FFmpeg's DASH muxer writes only `hvc1`/`av01`/`vp09`). Chapters are supplied separately from the stream. Audio and embedded subtitle choices use the shared player UI. Plain text subtitles are extracted as WebVTT; ASS/SSA and bitmap subtitles require video burn-in. HDR video plays as it is wherever the browser says it plays PQ HDR (Media Capabilities, `transferFunction: 'pq'`), on an SDR screen too; otherwise it is converted and tone-mapped to SDR. Where the browser can't be asked, an HDR screen (`dynamic-range: high`) decides. External addon subtitles and thumbnail generation are not included in the guest endpoint.
+
+Converted streams keep the source's timestamps (`-copyts -avoid_negative_ts disabled -start_at_zero`, as Jellyfin and Plex do), with each fragment's start in its timestamps (`movflags=+frag_discont+skip_sidx`) rather than an edit list, which browsers skip. With the video copied, `-noaccurate_seek` starts the audio at the same keyframe as the video, and `aresample=async=1` keeps converted audio continuous. The player's position is the source's own, so converted streams report no offset; where a stream can play from is read from its manifest.
 
 FFmpeg jobs are shared when source, selected tracks, encoding profile and available seek interval match. Seeks outside generated media create a new interval while the player preserves original episode time. The service produces approximately two minutes ahead, then pauses encoding until a viewer catches up. Jobs without live heartbeats expire after 60 seconds. Defaults are two simultaneous retained conversion jobs and a 10 GiB segment cache. Capacity errors are shown in the player; guests can retry or use Original. Browser buffering can retain video already downloaded before removal.
 
@@ -39,7 +41,7 @@ environment:
   VAAPI_DEVICE: /dev/dri/renderD128
 ```
 
-The container runs as the `node` user. Set the render group ID from the host and make sure the appropriate VAAPI driver is installed in your image. Subtitle burn-in and HDR tone mapping use CPU filters; VAAPI encoding currently falls back to CPU for those paths.
+The container runs as the `node` user. Set the render group ID from the host and make sure the appropriate VAAPI driver is installed in your image. Subtitle burn-in and HDR tone mapping use CPU filters with VAAPI; VAAPI encoding currently falls back to CPU for those paths.
 
 For NVIDIA, install NVIDIA Container Toolkit on the host, set `TRANSCODER_ENCODER=nvidia`, and add:
 
@@ -48,6 +50,8 @@ gpus: all
 environment:
   NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
 ```
+
+With NVIDIA, HDR is tone-mapped on the GPU through OpenCL (`tonemap_opencl`), which needs the `compute` capability. If that fails, the conversion runs again with the tone map on the CPU and NVENC encoding, then all on the CPU. `/health` reports where each job tone-maps (`tonemap`: `gpu`, `cpu` or null).
 
 Driver/backend availability depends on the host. Hardware configuration examples require device testing on your server.
 

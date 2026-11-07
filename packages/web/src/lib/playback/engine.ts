@@ -154,6 +154,8 @@ export interface PlayerEngine {
     stop(): void;
   };
   subtitleFiles?: { types: readonly string[]; add(file: File): Promise<void> };
+  /** Adds a server subtitle once it's ready, after the file opened. */
+  addServerSubtitle?(subtitle: ServerSubtitle): void;
   stats?: { pages: Track[]; show(page: string | null): void };
   /** Picks tracks from the user's settings as the file opens. */
   picksTracks?: boolean;
@@ -165,6 +167,8 @@ export interface PlayerEngine {
   fits?: boolean;
   /** The app's sound settings apply. */
   sound?: boolean;
+  /** Surround can be rendered for headphones, in the page. */
+  virtualSurround?: boolean;
   /** The player in its own window it drives. */
   external?: string;
   closeWindow?(): void;

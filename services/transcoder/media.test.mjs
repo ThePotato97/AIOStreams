@@ -4,7 +4,18 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
-import { metadata, select, ffmpegArgs, duration } from './media.mjs';
+import {
+  metadata,
+  select,
+  ffmpegArgs,
+  duration,
+  manifestReady,
+  manifestStart,
+  subtitleKind,
+  videoCodec,
+  withFullDuration,
+  withVideoCodec,
+} from './media.mjs';
 const exec = promisify(execFile);
 let dir, media;
 before(async () => {
@@ -69,7 +80,143 @@ before(async () => {
     `${dir}/source.mkv`,
   ]);
   media = metadata(JSON.parse(stdout));
+  // Keyframes only every 10 s, as in many real releases, with one white
+  // frame and one beep together at 13 s and 17 s.
+  await exec('ffmpeg', [
+    '-v',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    "color=black:size=320x180:rate=24,drawbox=c=white:t=fill:enable='between(t,13,13.04)+between(t,17,17.04)'",
+    '-f',
+    'lavfi',
+    '-i',
+    "sine=frequency=1000:sample_rate=48000,volume='if(between(t,13,13.05)+between(t,17,17.05),1,0)':eval=frame",
+    '-t',
+    '24',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-bf',
+    '3',
+    '-g',
+    '240',
+    '-keyint_min',
+    '240',
+    '-sc_threshold',
+    '0',
+    '-c:a',
+    'eac3',
+    `${dir}/longgop.mkv`,
+  ]);
 });
+/** When the white frames play, by the file's own timestamps. */
+async function flashesOf(file) {
+  const { stderr } = await exec('ffmpeg', [
+    '-copyts',
+    '-i',
+    file,
+    '-vf',
+    'signalstats,metadata=print:key=lavfi.signalstats.YAVG',
+    '-an',
+    '-f',
+    'null',
+    '-',
+  ]);
+  const flashes = [];
+  let time = 0;
+  for (const line of stderr.split('\n')) {
+    const at = /pts_time:([\d.]+)/.exec(line);
+    if (at) time = Number(at[1]);
+    const luma = /YAVG=([\d.]+)/.exec(line);
+    if (luma && Number(luma[1]) > 100) flashes.push(time);
+  }
+  return flashes;
+}
+/** When the beeps start, by the file's own timestamps. */
+async function beepsOf(file) {
+  const { stderr } = await exec('ffmpeg', [
+    '-copyts',
+    '-i',
+    file,
+    '-af',
+    'silencedetect=n=-30dB:d=0.3',
+    '-vn',
+    '-f',
+    'null',
+    '-',
+  ]);
+  return (
+    [...stderr.matchAll(/silence_end: ([\d.]+)/g)]
+      .map((m) => Number(m[1]))
+      // The end of the file reads as the end of a silence too.
+      .filter((t) => t < 23)
+  );
+}
+/**
+ * A finished DASH output: its manifest, and each stream's init segment and
+ * segments joined into one file per stream (0 is the video, 1 the audio).
+ */
+async function dashOutput(output) {
+  const mpd = await readFile(`${output}/manifest.mpd`, 'utf8');
+  const files = await (await import('node:fs/promises')).readdir(output);
+  const streams = [];
+  for (const id of [0, 1]) {
+    if (!files.includes(`init-${id}.m4s`)) continue;
+    const chunks = files.filter((f) => f.startsWith(`chunk-${id}-`)).sort();
+    const path = `${output}/stream-${id}.mp4`;
+    await writeFile(
+      path,
+      Buffer.concat(
+        await Promise.all(
+          [`init-${id}.m4s`, ...chunks].map((f) => readFile(`${output}/${f}`))
+        )
+      )
+    );
+    streams[id] = path;
+  }
+  return { mpd, streams };
+}
+const codecOf = async (file) =>
+  JSON.parse(
+    (
+      await exec('ffprobe', [
+        '-v',
+        'error',
+        '-show_streams',
+        '-of',
+        'json',
+        file,
+      ])
+    ).stdout
+  ).streams[0].codec_name;
+async function convertLongGop(positionMs) {
+  const input = `${dir}/longgop.mkv`,
+    output = `${dir}/longgop-${positionMs}`;
+  const { stdout } = await exec('ffprobe', [
+    '-v',
+    'error',
+    '-show_format',
+    '-show_streams',
+    '-of',
+    'json',
+    input,
+  ]);
+  const command = ffmpegArgs(
+    input,
+    metadata(JSON.parse(stdout)),
+    request({
+      positionMs,
+      capabilities: { video: true, audio: false, container: false, hdr: false },
+    }),
+    output
+  );
+  await mkdir(output);
+  await exec('ffmpeg', command.args, { timeout: 60000 });
+  return { command, output, ...(await dashOutput(output)) };
+}
 after(async () => {
   await rm(dir, { recursive: true, force: true });
 });
@@ -78,6 +225,173 @@ const request = (extra = {}) => ({
   positionMs: 0,
   capabilities: { video: true, audio: true, container: true, hdr: false },
   ...extra,
+});
+test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU otherwise', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'hevc', hdr: true },
+      { index: 1, type: 'audio', codec: 'eac3', default: true },
+    ],
+  };
+  const caps = (hdr) => ({
+    capabilities: { video: true, audio: false, container: true, hdr },
+  });
+  const tonemaps = (args) =>
+    [
+      args.some((a) => a.includes('tonemap_opencl')) && 'opencl',
+      args.some((a) => a.includes('tonemap=hable') && a.includes('zscale')) &&
+        'cpu',
+    ].filter(Boolean);
+  // The browser shows it (an HDR display, or it tone-maps): only audio converts.
+  const shown = ffmpegArgs('in', meta, request(caps(true)), 'out', 'nvidia');
+  assert.equal(shown.policy.mode, 'audio');
+  assert.equal(shown.tonemap, null);
+  assert.deepEqual(tonemaps(shown.args), []);
+  // It doesn't (Firefox on an SDR display): the video converts and tone-maps.
+  const gpu = ffmpegArgs('in', meta, request(caps(false)), 'out', 'nvidia');
+  assert.equal(gpu.policy.videoReason, "HDR the browser can't show");
+  assert.equal(gpu.tonemap, 'gpu');
+  assert.deepEqual(tonemaps(gpu.args), ['opencl']);
+  // The OpenCL device is set up before the input.
+  const device = gpu.args.indexOf('-init_hw_device');
+  assert.ok(device >= 0 && device < gpu.args.indexOf('-i'));
+  assert.equal(gpu.args[device + 1], 'opencl=ocl');
+  assert.ok(gpu.args.includes('h264_nvenc'));
+  // The fallback keeps NVENC and tone-maps on the CPU.
+  const fallback = ffmpegArgs(
+    'in',
+    meta,
+    request(caps(false)),
+    'out',
+    'nvidia',
+    {
+      tonemap: 'cpu',
+    }
+  );
+  assert.equal(fallback.tonemap, 'cpu');
+  assert.deepEqual(tonemaps(fallback.args), ['cpu']);
+  assert.ok(!fallback.args.includes('-init_hw_device'));
+  assert.ok(fallback.args.includes('h264_nvenc'));
+  // Other encoders tone-map on the CPU.
+  for (const encoder of ['cpu', 'vaapi']) {
+    const other = ffmpegArgs('in', meta, request(caps(false)), 'out', encoder);
+    assert.deepEqual(tonemaps(other.args), ['cpu'], encoder);
+    assert.ok(!other.args.includes('-init_hw_device'), encoder);
+  }
+  // SDR video never tone-maps.
+  const sdr = ffmpegArgs(
+    'in',
+    { ...meta, tracks: [{ ...meta.tracks[0], hdr: false }, meta.tracks[1]] },
+    request({ ...caps(false), force: true }),
+    'out',
+    'nvidia'
+  );
+  assert.equal(sdr.tonemap, null);
+  assert.deepEqual(tonemaps(sdr.args), []);
+});
+test('subtitles: burned in only where the browser cannot draw them', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'h264' },
+      { index: 1, type: 'audio', codec: 'aac', default: true },
+      { index: 2, type: 'subtitle', codec: 'ass' },
+      { index: 3, type: 'subtitle', codec: 'hdmv_pgs_subtitle' },
+      { index: 4, type: 'subtitle', codec: 'dvd_subtitle' },
+      { index: 5, type: 'subtitle', codec: 'subrip' },
+    ],
+  };
+  const caps = (subtitles) => ({
+    capabilities: {
+      video: true,
+      audio: true,
+      container: true,
+      hdr: false,
+      subtitles,
+    },
+  });
+  const burn = (index, subtitles) =>
+    select(meta, request({ subtitle: index, ...caps(subtitles) })).burn;
+  assert.equal(burn(2, ['ass', 'pgs']), false);
+  assert.equal(burn(3, ['ass', 'pgs']), false);
+  // Without a renderer, or one for something else: burned in.
+  assert.equal(burn(2, []), true);
+  assert.equal(burn(3, ['ass']), true);
+  // VobSub has no renderer at all; text never needs one.
+  assert.equal(burn(4, ['ass', 'pgs']), true);
+  assert.equal(burn(5, []), false);
+  // Not burned, the video is copied.
+  assert.equal(
+    select(meta, request({ subtitle: 2, ...caps(['ass']) })).mode,
+    'direct'
+  );
+  assert.deepEqual(
+    ['subrip', 'ass', 'ssa', 'hdmv_pgs_subtitle', 'dvd_subtitle'].map(
+      subtitleKind
+    ),
+    ['text', 'ass', 'ass', 'pgs', null]
+  );
+});
+
+test('metadata: fonts attached to the file', () => {
+  const meta = metadata({
+    format: { duration: '10' },
+    streams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264' },
+      {
+        index: 3,
+        codec_type: 'attachment',
+        tags: {
+          filename: 'Gandhi.TTF',
+          mimetype: 'application/x-truetype-font',
+        },
+      },
+      {
+        index: 4,
+        codec_type: 'attachment',
+        tags: { filename: 'cover.jpg', mimetype: 'image/jpeg' },
+      },
+      { index: 5, codec_type: 'attachment', tags: { filename: 'Other.otf' } },
+    ],
+  });
+  assert.deepEqual(meta.fonts, [
+    {
+      index: 3,
+      filename: 'Gandhi.TTF',
+      mimetype: 'application/x-truetype-font',
+    },
+    { index: 5, filename: 'Other.otf', mimetype: 'font/ttf' },
+  ]);
+});
+
+test('select explains why each stream is converted', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'h264' },
+      { index: 1, type: 'audio', codec: 'eac3', default: true },
+    ],
+  };
+  const caps = { video: true, audio: false, container: false, hdr: false };
+  const original = select(meta, { quality: 'original', capabilities: caps });
+  assert.equal(original.mode, 'audio');
+  assert.equal(original.videoReason, null);
+  assert.equal(original.audioReason, "browser can't decode the audio");
+  const scaled = select(meta, { quality: '720p', capabilities: caps });
+  assert.equal(scaled.mode, 'video');
+  assert.equal(scaled.videoReason, 'quality 720p');
+  const retry = select(meta, {
+    quality: 'original',
+    force: true,
+    capabilities: caps,
+  });
+  assert.equal(retry.videoReason, 'retry after failed playback');
+  const unsupported = select(meta, {
+    quality: 'original',
+    capabilities: { ...caps, video: false },
+  });
+  assert.equal(unsupported.videoReason, "browser can't decode the video");
 });
 test('duration falls back to stream durations and Matroska tags', () => {
   assert.equal(duration({ format: { duration: '12.5' } }), 12500);
@@ -152,28 +466,20 @@ for (const [name, options] of [
     await mkdir(output);
     const command = ffmpegArgs(`${dir}/source.mkv`, media, options, output);
     await exec('ffmpeg', command.args, { timeout: 30000 });
-    const playlist = await readFile(`${output}/index.m3u8`, 'utf8');
-    assert.match(playlist, /#EXT-X-MAP/);
-    assert.match(playlist, /#EXT-X-ENDLIST/);
-    const { stdout } = await exec('ffprobe', [
-      '-v',
-      'error',
-      '-show_streams',
-      '-of',
-      'json',
-      `${output}/index.m3u8`,
-    ]);
-    const streams = JSON.parse(stdout).streams;
-    assert.equal(
-      streams.find((s) => s.codec_type === 'video').codec_name,
-      'h264'
-    );
+    const { mpd, streams } = await dashOutput(output);
+    // Finished: the manifest is no longer live.
+    assert.match(mpd, /type="static"/);
+    assert.ok(manifestReady(mpd));
+    // Video and audio, each in its own stream.
+    assert.equal(await codecOf(streams[0]), 'h264');
     if (name === 'audio conversion')
-      assert.equal(
-        streams.find((s) => s.codec_type === 'audio').codec_name,
-        'aac'
-      );
-    if (name === 'seek generation') assert.equal(command.offsetMs, 4000);
+      assert.equal(await codecOf(streams[1]), 'aac');
+    if (name === 'seek generation') {
+      assert.equal(command.offsetMs, 4000);
+      // Converted video starts exactly at the seek.
+      const start = manifestStart(mpd);
+      assert.ok(Math.abs(start - 4) < 0.1, `start ${start}`);
+    }
   });
 
 test('real FFmpeg: styled subtitle burn-in', async () => {
@@ -205,10 +511,7 @@ test('real FFmpeg: styled subtitle burn-in', async () => {
   await mkdir(output);
   const command = ffmpegArgs(input, meta, request({ subtitle: 2 }), output);
   await exec('ffmpeg', command.args, { timeout: 30000 });
-  assert.match(
-    await readFile(`${output}/index.m3u8`, 'utf8'),
-    /#EXT-X-ENDLIST/
-  );
+  assert.match((await dashOutput(output)).mpd, /type="static"/);
   assert.equal(command.policy.mode, 'video');
 });
 
@@ -273,15 +576,243 @@ test('real FFmpeg: HDR to SDR', async () => {
     ).args,
     { timeout: 30000 }
   );
-  const result = await exec('ffprobe', [
+  assert.equal(await codecOf((await dashOutput(output)).streams[0]), 'h264');
+});
+
+test('real FFmpeg: copied video and converted audio stay in step after a seek', async () => {
+  // 15 s is 5 s past the keyframe at 10 s: the video starts there, the
+  // converted audio at the seek (12 s, floored to 4 s).
+  const { command, output, mpd, streams } = await convertLongGop(15000);
+  assert.equal(command.policy.mode, 'audio');
+  // Browsers (MSE) apply a single edit at most. A stream's start must be in
+  // its fragments' timestamps, as the manifest says, not an empty edit,
+  // which they skip: that played the audio up to a keyframe interval early.
+  for (const id of [0, 1]) {
+    const trace = await exec('ffprobe', [
+      '-v',
+      'trace',
+      '-i',
+      `${output}/init-${id}.m4s`,
+    ]);
+    assert.doesNotMatch(trace.stderr, /time=-1 rate/, `stream ${id}`);
+  }
+  // The stream starts at the keyframe, not where the seek was asked for.
+  const start = manifestStart(mpd);
+  assert.ok(Math.abs(start - 10) < 0.1, `stream starts at ${start}`);
+  // White frames and beeps, at their source times and together.
+  const flashes = await flashesOf(streams[0]);
+  const beeps = await beepsOf(streams[1]);
+  assert.equal(beeps.length, 2, `beeps ${beeps}`);
+  for (const [i, at] of [13, 17].entries()) {
+    const flash = flashes.find((t) => t >= at - 0.1 && t <= at + 0.2);
+    assert.ok(flash != null, `no white frame near ${at}: ${flashes}`);
+    assert.ok(Math.abs(beeps[i] - at) < 0.05, `beep at ${beeps[i]}`);
+    assert.ok(
+      Math.abs(beeps[i] - flash) < 0.06,
+      `flash ${flash}, beep ${beeps[i]}`
+    );
+  }
+});
+
+test('real FFmpeg: a stream from the start starts at 0', async () => {
+  const { mpd } = await convertLongGop(0);
+  const start = manifestStart(mpd);
+  assert.ok(start >= 0 && start < 0.1, `stream starts at ${start}`);
+});
+
+test('manifest: ready once every stream has a segment', () => {
+  const set = (segments) =>
+    `<AdaptationSet><SegmentTemplate timescale="1000"><SegmentTimeline>${segments}</SegmentTimeline></SegmentTemplate></AdaptationSet>`;
+  assert.equal(manifestReady(''), false);
+  assert.equal(
+    manifestReady(`<MPD>${set('<S t="5" d="4000" />')}${set('')}</MPD>`),
+    false
+  );
+  const both = `<MPD>${set('<S t="12000" d="4000" />')}${set('<S t="10500" d="4000" />')}</MPD>`;
+  assert.equal(manifestReady(both), true);
+  // Where both streams have started.
+  assert.equal(manifestStart(both), 12);
+  assert.equal(manifestStart('<MPD></MPD>'), null);
+});
+
+test('manifest: the video gets its full codec string', () => {
+  const mpd =
+    '<Representation id="0" mimeType="video/mp4" codecs="hvc1" width="1"/><Representation id="1" mimeType="audio/mp4" codecs="mp4a.40.2"/>';
+  const fixed = withVideoCodec(mpd, 'hvc1.2.4.L153.B0');
+  assert.match(fixed, /codecs="hvc1\.2\.4\.L153\.B0"/);
+  assert.match(fixed, /codecs="mp4a\.40\.2"/);
+  // A full string FFmpeg wrote, or a codec that doesn't match, stays.
+  const avc = mpd.replace('codecs="hvc1"', 'codecs="avc1.640028"');
+  assert.equal(withVideoCodec(avc, 'avc1.4d401f'), avc);
+  assert.equal(withVideoCodec(mpd, 'av01.0.08M.10'), mpd);
+  assert.equal(withVideoCodec(mpd, null), mpd);
+  // Nothing to build from.
+  assert.equal(videoCodec(Buffer.alloc(0)), null);
+  assert.equal(videoCodec(Buffer.from('not an init segment')), null);
+});
+
+test('real FFmpeg: copied HEVC is tagged hvc1, with its full codec string', async () => {
+  const input = `${dir}/hevc.mkv`,
+    output = `${dir}/hevc-out`;
+  await exec('ffmpeg', [
     '-v',
     'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc2=size=320x180:rate=24',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=440',
+    '-t',
+    '2',
+    '-c:v',
+    'libx265',
+    '-pix_fmt',
+    'yuv420p10le',
+    '-x265-params',
+    'log-level=error',
+    '-c:a',
+    'eac3',
+    input,
+  ]);
+  const { stdout } = await exec('ffprobe', [
+    '-v',
+    'error',
+    '-show_format',
     '-show_streams',
     '-of',
     'json',
-    `${output}/index.m3u8`,
+    input,
   ]);
-  assert.equal(JSON.parse(result.stdout).streams[0].codec_name, 'h264');
+  await mkdir(output);
+  await exec(
+    'ffmpeg',
+    ffmpegArgs(
+      input,
+      metadata(JSON.parse(stdout)),
+      request({
+        capabilities: {
+          video: true,
+          audio: false,
+          container: false,
+          hdr: false,
+        },
+      }),
+      output
+    ).args,
+    { timeout: 60000 }
+  );
+  // HEVC Main 10: profile 2, compatible with 2, then tier, level and flags.
+  const codec = videoCodec(await readFile(`${output}/init-0.m4s`));
+  assert.match(codec, /^hvc1\.2\.4\.L\d+(\.[0-9A-F]{1,2})*$/);
+});
+
+test('manifest: a finished one lasts as long as the source', () => {
+  // What FFmpeg writes for a job from 40 s of a 60 s file.
+  const mpd =
+    '<MPD type="static" mediaPresentationDuration="PT20.0S" maxSegmentDuration="PT4S"><Period start="PT0.0S"><S t="480000" d="96000" /></Period></MPD>';
+  const full = withFullDuration(mpd, 60_000);
+  assert.match(full, /mediaPresentationDuration="PT60\.000S"/);
+  assert.match(full, /maxSegmentDuration="PT4S"/);
+  // A live manifest has none, and an unknown length leaves it be.
+  assert.equal(
+    withFullDuration('<MPD type="dynamic">', 60_000),
+    '<MPD type="dynamic">'
+  );
+  assert.equal(withFullDuration(mpd, 0), mpd);
+});
+
+test('arguments: NVENC forces IDR keyframes; remote sources reconnect', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'h264' },
+      { index: 1, type: 'audio', codec: 'eac3', default: true },
+    ],
+  };
+  const nvenc = ffmpegArgs(
+    'http://aio/x',
+    meta,
+    request({ force: true }),
+    'out',
+    'nvidia'
+  ).args;
+  const idr = nvenc.indexOf('-forced-idr');
+  assert.ok(idr > 0 && nvenc[idr + 1] === '1');
+  assert.ok(nvenc.includes('-reconnect_on_network_error'));
+  // The options are for the source: before -i.
+  assert.ok(nvenc.indexOf('-reconnect') < nvenc.indexOf('-i'));
+  // A local file has nothing to reconnect.
+  const local = ffmpegArgs(
+    '/tmp/x.mkv',
+    meta,
+    request({ force: true }),
+    'out'
+  ).args;
+  assert.ok(!local.includes('-reconnect'));
+  assert.ok(!local.includes('-forced-idr'));
+});
+
+test('real FFmpeg: 5.1 downmixes to stereo without clipping', async () => {
+  const input = `${dir}/loud51.mkv`,
+    output = `${dir}/loud51-out`;
+  // Every channel at full scale, in phase: the worst case for a downmix.
+  await exec('ffmpeg', [
+    '-v',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc2=size=160x90:rate=24',
+    '-f',
+    'lavfi',
+    '-i',
+    'aevalsrc=sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t):c=5.1:s=48000',
+    '-t',
+    '4',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-c:a',
+    'flac',
+    input,
+  ]);
+  const { stdout } = await exec('ffprobe', [
+    '-v',
+    'error',
+    '-show_format',
+    '-show_streams',
+    '-of',
+    'json',
+    input,
+  ]);
+  await mkdir(output);
+  const command = ffmpegArgs(
+    input,
+    metadata(JSON.parse(stdout)),
+    request({
+      capabilities: { video: true, audio: false, container: false, hdr: false },
+    }),
+    output
+  );
+  await exec('ffmpeg', command.args, { timeout: 60000 });
+  const { streams } = await dashOutput(output);
+  // The float peak: a 16-bit measure (volumedetect) never reads over 0 dB.
+  const { stderr } = await exec('ffmpeg', [
+    '-i',
+    streams[1],
+    '-af',
+    'astats=measure_perchannel=none',
+    '-f',
+    'null',
+    '-',
+  ]);
+  const peak = Number(/Peak level dB: (-?[\d.]+)/.exec(stderr)?.[1]);
+  // A plain downmix peaks near +8 dBFS; AAC itself overshoots a little.
+  assert.ok(peak < 0.5, `peaks at ${peak} dBFS`);
 });
 
 test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and GPU fallback', async () => {
@@ -291,7 +822,13 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
   const source = createHttpServer(async (req, res) => {
     const file = req.url.includes('styled')
       ? `${dir}/styled.mkv`
-      : `${dir}/source.mkv`;
+      : req.url.includes('longgop')
+        ? `${dir}/longgop.mkv`
+        : req.url.includes('hevcsrc')
+          ? `${dir}/hevcsrc.mkv`
+          : req.url.includes('fonted')
+            ? `${dir}/fonted.mkv`
+            : `${dir}/source.mkv`;
     const size = (await stat(file)).size;
     const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? '');
     const start = range ? Number(range[1]) : 0,
@@ -356,10 +893,97 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     ).json();
     assert.equal(second.id, job.id);
     assert.match(
-      await (await call(`/jobs/${job.id}/index.m3u8`)).text(),
-      /#EXT-X-MAP/
+      await (await call(`/jobs/${job.id}/manifest.mpd`)).text(),
+      /<MPD[\s\S]*codecs="avc1\./
     );
-    const subtitle = await call('/subtitle', { input, index: 2 });
+    // Once finished, the manifest lasts as long as the source (12 s).
+    for (let i = 0; i < 100; i++) {
+      const mpd = await (await call(`/jobs/${job.id}/manifest.mpd`)).text();
+      if (mpd.includes('type="static"')) {
+        assert.match(mpd, /mediaPresentationDuration="PT12\.\d+S"/);
+        break;
+      }
+      assert.ok(i < 99, 'the job never finished');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // A seek between keyframes reports where the stream really starts: the
+    // keyframe, not the floored seek, which put positions seconds off.
+    const longInput = `${origin}/party/guest/source/longgop${'b'.repeat(36)}`;
+    const long = await call('/prepare', {
+      input: longInput,
+      viewer: 'long'.repeat(5),
+      request: request({
+        positionMs: 15000,
+        capabilities: { video: true, audio: false, container: false },
+      }),
+    });
+    assert.equal(long.status, 200);
+    const longJob = await long.json();
+    assert.equal(longJob.mode, 'audio');
+    // The player plays the source's own timestamps: no offset.
+    assert.equal(longJob.offsetMs, 0);
+    assert.ok(
+      Math.abs(longJob.startMs - 10000) < 100,
+      `start ${longJob.startMs}`
+    );
+    await call(`/jobs/${longJob.id}/touch`, {
+      viewer: 'long'.repeat(5),
+      release: true,
+    });
+    // Copied HEVC: the manifest says which HEVC, as browsers require.
+    await exec('ffmpeg', [
+      '-v',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=320x180:rate=24',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440',
+      '-t',
+      '4',
+      '-c:v',
+      'libx265',
+      '-pix_fmt',
+      'yuv420p10le',
+      '-x265-params',
+      'log-level=error',
+      '-c:a',
+      'eac3',
+      `${dir}/hevcsrc.mkv`,
+    ]);
+    const hevc = await (
+      await call('/prepare', {
+        input: `${origin}/party/guest/source/hevcsrc${'c'.repeat(36)}`,
+        viewer: 'hevc'.repeat(5),
+        request: request({
+          capabilities: { video: true, audio: false, container: false },
+        }),
+      })
+    ).json();
+    const hevcManifest = await call(`/jobs/${hevc.id}/manifest.mpd`);
+    assert.equal(
+      hevcManifest.headers.get('content-type'),
+      'application/dash+xml'
+    );
+    assert.match(
+      await hevcManifest.text(),
+      /mimeType="video\/mp4" codecs="hvc1\.2\.4\.L\d+[.0-9A-F]*"/
+    );
+    await call(`/jobs/${hevc.id}/touch`, {
+      viewer: 'hevc'.repeat(5),
+      release: true,
+    });
+    // Extracted in the background: come back until it's written.
+    let subtitle = await call('/subtitle', { input, index: 2 });
+    assert.equal(subtitle.status, 425);
+    assert.equal(subtitle.headers.get('retry-after'), '5');
+    for (let i = 0; i < 100 && subtitle.status === 425; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      subtitle = await call('/subtitle', { input, index: 2 });
+    }
     assert.equal(subtitle.status, 200);
     assert.match(await subtitle.text(), /WEBVTT/);
     const gpu = await call('/prepare', {
@@ -373,27 +997,116 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     assert.ok(
       health.jobs.every((j) => j.encoder === 'cpu' || j.mode === 'audio')
     );
-    const full = await call('/prepare', {
+    // Two conversions encode video at once: a third waits.
+    const encoding = await call('/prepare', {
       input,
       viewer: 'four'.repeat(5),
       request: request({ force: true, quality: '720p' }),
     });
-    assert.equal(full.status, 503);
+    assert.equal(encoding.status, 200);
+    const secondJob = await encoding.json();
+    const over = await call('/prepare', {
+      input,
+      viewer: 'five'.repeat(5),
+      request: request({ force: true, quality: '1080p' }),
+    });
+    assert.equal(over.status, 503);
+    assert.equal(over.headers.get('retry-after'), '10');
+    assert.equal((await over.json()).retryAfter, 10);
+    // Copying the video costs little: it isn't held to that limit.
+    const copy = await call('/prepare', {
+      input,
+      viewer: 'six'.repeat(8),
+      request: request({
+        capabilities: { video: true, audio: true, container: false },
+      }),
+    });
+    assert.equal(copy.status, 200);
+    const copyJob = await copy.json();
+    assert.equal(copyJob.mode, 'remux');
+    await call(`/jobs/${copyJob.id}/touch`, {
+      viewer: 'six'.repeat(8),
+      release: true,
+    });
     await call(`/jobs/${job.id}/touch`, { viewer: body.viewer, release: true });
     await call(`/jobs/${job.id}/touch`, {
       viewer: 'two'.repeat(8),
       release: true,
     });
+    // A place is freed: the waiting conversion starts.
+    await call(`/jobs/${secondJob.id}/touch`, {
+      viewer: 'four'.repeat(5),
+      release: true,
+    });
     const replacement = await call('/prepare', {
       input,
-      viewer: 'four'.repeat(5),
-      request: request({ force: true, quality: '720p' }),
+      viewer: 'five'.repeat(5),
+      request: request({ force: true, quality: '1080p' }),
     });
     assert.equal(replacement.status, 200);
     await call(`/jobs/${gpuJob.id}/touch`, {
       viewer: 'three'.repeat(5),
       release: true,
     });
+    // ASS as it is, and the font attached to the file, for the browser.
+    await exec('ffmpeg', [
+      '-v',
+      'error',
+      '-i',
+      `${dir}/source.mkv`,
+      '-attach',
+      '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+      '-metadata:s:t',
+      'mimetype=font/ttf',
+      '-map',
+      '0',
+      '-c',
+      'copy',
+      '-c:s',
+      'ass',
+      `${dir}/fonted.mkv`,
+    ]);
+    const fonted = `${origin}/party/guest/source/fonted${'d'.repeat(36)}`;
+    const fontedMeta = await (await call('/probe', { input: fonted })).json();
+    assert.equal(fontedMeta.fonts.length, 1);
+    const ready = async (path, body) => {
+      let res = await call(path, body);
+      for (let i = 0; i < 100 && res.status === 425; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        res = await call(path, body);
+      }
+      return res;
+    };
+    const ass = await ready('/subtitle', {
+      input: fonted,
+      index: 2,
+      format: 'ass',
+    });
+    assert.equal(ass.status, 200);
+    const assText = await ass.text();
+    assert.match(assText, /\[Script Info\]/);
+    assert.match(assText, /Dialogue:.*Guest playback/);
+    // Only in the format the track is.
+    assert.equal(
+      (await call('/subtitle', { input: fonted, index: 2, format: 'sup' }))
+        .status,
+      400
+    );
+    const font = await ready('/font', {
+      input: fonted,
+      index: fontedMeta.fonts[0].index,
+    });
+    assert.equal(font.status, 200);
+    assert.equal(font.headers.get('content-type'), 'font/ttf');
+    const bytes = Buffer.from(await font.arrayBuffer());
+    assert.deepEqual(
+      bytes,
+      await readFile('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
+    );
+    assert.equal(
+      (await call('/font', { input: fonted, index: 0 })).status,
+      400
+    );
     const styled = await call('/prepare', {
       input: `${origin}/party/guest/source/styled`,
       viewer: 'styled'.repeat(5),
@@ -404,4 +1117,115 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     await new Promise((resolve) => worker.close(resolve));
     await new Promise((resolve) => source.close(resolve));
   }
+});
+
+test('real FFmpeg: surround stays at its layout as FLAC, up to 7.1, in order', async () => {
+  // Each channel its own level, so a channel moved or mixed shows.
+  const levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+  const tone = (n) =>
+    levels
+      .slice(0, n)
+      .map((l) => `${l}*sin(2*PI*440*t)`)
+      .join('|');
+  const convert = async (name, layout, n, capabilities) => {
+    const input = `${dir}/${name}.mkv`,
+      output = `${dir}/${name}-out`;
+    await exec('ffmpeg', [
+      '-v',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=160x90:rate=24',
+      '-f',
+      'lavfi',
+      '-i',
+      `aevalsrc=${tone(n)}:c=${layout}:s=48000`,
+      '-t',
+      '3',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-c:a',
+      'pcm_s24le',
+      input,
+    ]);
+    const { stdout } = await exec('ffprobe', [
+      '-v',
+      'error',
+      '-show_format',
+      '-show_streams',
+      '-of',
+      'json',
+      input,
+    ]);
+    await mkdir(output);
+    const command = ffmpegArgs(
+      input,
+      metadata(JSON.parse(stdout)),
+      request({
+        capabilities: {
+          video: true,
+          audio: false,
+          container: false,
+          hdr: false,
+          ...capabilities,
+        },
+      }),
+      output
+    );
+    await exec('ffmpeg', command.args, { timeout: 60000 });
+    const { streams, mpd } = await dashOutput(output);
+    const probe = JSON.parse(
+      (
+        await exec('ffprobe', [
+          '-v',
+          'error',
+          '-show_streams',
+          '-of',
+          'json',
+          streams[1],
+        ])
+      ).stdout
+    ).streams[0];
+    const { stderr } = await exec('ffmpeg', [
+      '-i',
+      streams[1],
+      '-af',
+      'astats=measure_overall=none:measure_perchannel=Peak_level',
+      '-f',
+      'null',
+      '-',
+    ]);
+    const peaks = [...stderr.matchAll(/Peak level dB: (-?[\d.]+)/g)].map((m) =>
+      Number(m[1])
+    );
+    return { probe, mpd, peaks };
+  };
+  const db = (l) => 20 * Math.log10(l);
+  const lossless = { surround: true, lossless: true };
+
+  const wide = await convert('flac71', '7.1', 8, lossless);
+  assert.equal(wide.probe.codec_name, 'flac');
+  assert.equal(wide.probe.channels, 8);
+  assert.equal(wide.probe.channel_layout, '7.1');
+  assert.match(wide.mpd, /codecs="flac"/);
+  assert.equal(wide.peaks.length, 8);
+  wide.peaks.forEach((peak, i) =>
+    assert.ok(Math.abs(peak - db(levels[i])) < 0.1, `channel ${i}: ${peak}`)
+  );
+
+  // 5.1 isn't widened to 7.1.
+  const five = await convert('flac51', '5.1', 6, lossless);
+  assert.equal(five.probe.codec_name, 'flac');
+  assert.equal(five.probe.channels, 6);
+  five.peaks.forEach((peak, i) =>
+    assert.ok(Math.abs(peak - db(levels[i])) < 0.1, `channel ${i}: ${peak}`)
+  );
+
+  // Without FLAC: 5.1 AAC, a 7.1 source folded into it.
+  const aac = await convert('aac71', '7.1', 8, { surround: true });
+  assert.equal(aac.probe.codec_name, 'aac');
+  assert.equal(aac.probe.channels, 6);
 });

@@ -1,4 +1,20 @@
 /** Pure media policy, shared by the worker and its tests. */
+
+/**
+ * How a subtitle reaches the browser: text as WebVTT, ASS/SSA for JASSUB,
+ * PGS for libpgs. Anything else (VobSub, DVB) can only be burned in.
+ */
+export function subtitleKind(codec) {
+  if (['subrip', 'webvtt', 'mov_text', 'text'].includes(codec)) return 'text';
+  if (codec === 'ass' || codec === 'ssa') return 'ass';
+  if (codec === 'hdmv_pgs_subtitle') return 'pgs';
+  return null;
+}
+const FONT_FILE = /\.(ttf|otf|ttc|woff2?)$/i;
+const isFont = (s) =>
+  s.codec_type === 'attachment' &&
+  (/font|truetype|opentype/i.test(s.tags?.mimetype ?? '') ||
+    FONT_FILE.test(s.tags?.filename ?? ''));
 export function metadata(raw) {
   const streams = raw.streams ?? [];
   return {
@@ -25,6 +41,12 @@ export function metadata(raw) {
         language: s.tags?.language,
         default: !!s.disposition?.default,
       })),
+    // Fonts attached to the file, which its ASS subtitles are styled with.
+    fonts: streams.filter(isFont).map((s) => ({
+      index: s.index,
+      filename: s.tags?.filename ?? `font-${s.index}`,
+      mimetype: s.tags?.mimetype ?? 'font/ttf',
+    })),
     chapters: (raw.chapters ?? [])
       .map((c) => ({
         title: c.tags?.title ?? '',
@@ -82,9 +104,12 @@ export function select(meta, request) {
     throw new Error('Unknown track');
   const caps = request.capabilities ?? {};
   const original = request.quality === 'original';
+  // Burned in only where the browser can't draw it itself.
+  const kind = subtitle && subtitleKind(subtitle.codec);
   const burn =
     !!subtitle &&
-    !['subrip', 'webvtt', 'mov_text', 'text'].includes(subtitle.codec);
+    kind !== 'text' &&
+    !(kind && (caps.subtitles ?? []).includes(kind));
   // A successful probe of the actual file is required, not a guessed codec name.
   const copyVideo =
     !!video &&
@@ -103,7 +128,31 @@ export function select(meta, request) {
     (!audio || copyAudio) &&
     !burn &&
     (request.audio == null || audio === audios[0]);
+  // Why each stream is converted, for /health: the first cause that applies.
+  const videoReason = !video
+    ? null
+    : copyVideo
+      ? null
+      : burn
+        ? 'subtitle burn-in'
+        : !original
+          ? `quality ${request.quality}`
+          : request.force
+            ? 'retry after failed playback'
+            : caps.video !== true
+              ? "browser can't decode the video"
+              : "HDR the browser can't show";
+  const audioReason =
+    !audio || copyAudio
+      ? null
+      : !original
+        ? `quality ${request.quality}`
+        : request.force
+          ? 'retry after failed playback'
+          : "browser can't decode the audio";
   return {
+    videoReason,
+    audioReason,
     mode: direct
       ? 'direct'
       : copyVideo
@@ -119,7 +168,24 @@ export function select(meta, request) {
     copyAudio,
   };
 }
-export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
+/** Tone-maps HDR to SDR in floating point on the CPU. */
+const CPU_TONEMAP =
+  'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
+/** The same tone map on the GPU, through OpenCL, from 10-bit frames. */
+const OPENCL_TONEMAP =
+  'format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,hwdownload,format=nv12';
+/**
+ * `options.tonemap`: 'gpu' tone-maps HDR on the NVIDIA GPU (OpenCL) when
+ * encoding with it; 'cpu' always uses the CPU.
+ */
+export function ffmpegArgs(
+  input,
+  meta,
+  request,
+  output,
+  encoder = 'cpu',
+  options = {}
+) {
   const policy = select(meta, request);
   const offset =
     Math.floor(Math.max(0, request.positionMs ?? 0) / 1000 / 4) * 4;
@@ -134,8 +200,31 @@ export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
       '-vaapi_device',
       process.env.VAAPI_DEVICE ?? '/dev/dri/renderD128'
     );
+  const gpuTonemap =
+    encoder === 'nvidia' &&
+    (options.tonemap ?? 'gpu') === 'gpu' &&
+    !policy.copyVideo &&
+    !!policy.video?.hdr;
+  if (gpuTonemap)
+    args.push('-init_hw_device', 'opencl=ocl', '-filter_hw_device', 'ocl');
   // Seek before input for ordinary streams. Burn-in retains the source timeline.
   if (!policy.burn) args.push('-ss', String(offset));
+  // With the video copied, the audio starts at the same keyframe rather than
+  // at the seek, as Plex does: no stretch of picture without sound.
+  if (policy.copyVideo) args.push('-noaccurate_seek');
+  // A job paused ahead of its viewers leaves the source connection idle,
+  // which the source may close: read on from where it was.
+  if (/^https?:/.test(input))
+    args.push(
+      '-reconnect',
+      '1',
+      '-reconnect_streamed',
+      '1',
+      '-reconnect_on_network_error',
+      '1',
+      '-reconnect_delay_max',
+      '30'
+    );
   args.push('-i', input);
   const filters = [];
   if (policy.burn) {
@@ -159,12 +248,13 @@ export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
       : `0:${policy.video.index}`
   );
   if (policy.audio) args.push('-map', `0:${policy.audio.index}`);
-  if (policy.copyVideo) args.push('-c:v', 'copy');
-  else {
+  if (policy.copyVideo) {
+    args.push('-c:v', 'copy');
+    // Browsers and Safari's player expect HEVC tagged hvc1.
+    if (policy.video?.codec === 'hevc') args.push('-tag:v', 'hvc1');
+  } else {
     if (policy.video?.hdr)
-      filters.push(
-        'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p'
-      );
+      filters.push(gpuTonemap ? OPENCL_TONEMAP : CPU_TONEMAP);
     const height =
       request.quality === '720p'
         ? 720
@@ -187,7 +277,10 @@ export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
         : 'libx264';
     args.push('-c:v', codec);
     if (codec === 'libx264') args.push('-preset', 'veryfast', '-crf', '20');
-    if (codec === 'h264_nvenc') args.push('-preset', 'p4', '-cq', '20');
+    // Forced keyframes are IDR frames only when asked: otherwise segments
+    // can't be cut on them and follow NVENC's own keyframe interval (Plex).
+    if (codec === 'h264_nvenc')
+      args.push('-preset', 'p4', '-cq', '20', '-forced-idr', '1');
     if (codec === 'h264_vaapi' && !height) args.push('-qp', '20');
     if (height) {
       const bitrate = height === 720 ? '4M' : '8M';
@@ -208,24 +301,224 @@ export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
     );
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
-  if (policy.audio && !policy.copyAudio) args.push('-ac', '2', '-b:a', '192k');
+  if (policy.audio && !policy.copyAudio) {
+    // Surround stays surround where wanted (a surround output, or the
+    // player's virtual surround for headphones): lossless FLAC at the
+    // source's layout, up to 7.1, where the browser plays it, else 5.1 AAC
+    // (AAC's own 7.1 places its extra pair as front wides). The browser
+    // downmixes to the speakers there are.
+    const channels = policy.audio.channels ?? 2;
+    const surround = request.capabilities?.surround === true && channels > 2;
+    const lossless = surround && request.capabilities?.lossless === true;
+    const layout = !surround
+      ? 'stereo'
+      : lossless && channels > 6
+        ? '7.1'
+        : '5.1';
+    args.push(
+      '-af',
+      // Continuous where the source's audio has gaps, and downmixed without
+      // clipping, as Plex does: a plain -ac 2 peaks over 0 dBFS.
+      `aresample=async=1:ochl=${layout}:rematrix_maxval=1`,
+      '-ac',
+      String({ stereo: 2, 5.1: 6, 7.1: 8 }[layout]),
+      ...(lossless
+        ? // 24-bit, as TrueHD and DTS-HD MA decode to.
+          ['-c:a', 'flac', '-sample_fmt', 's32']
+        : ['-b:a', surround ? '384k' : '192k'])
+    );
+  }
   args.push(
     '-sn',
     '-map_metadata',
     '-1',
+    // Timestamps as in the source (from its start), as Jellyfin does: copied
+    // video starts at the keyframe before the seek, the converted audio at the
+    // seek itself, and only real timestamps keep the two in step in browsers.
+    '-copyts',
+    '-avoid_negative_ts',
+    'disabled',
+    '-start_at_zero',
+    // Video read before the audio's first packet waits here.
+    '-max_muxing_queue_size',
+    '2048',
+    // DASH, video and audio in separate streams (as Plex does), each with
+    // its own segments and timestamps.
     '-f',
-    'hls',
-    '-hls_time',
+    'dash',
+    '-dash_segment_type',
+    'mp4',
+    '-seg_duration',
     '4',
-    '-hls_playlist_type',
-    'event',
-    '-hls_segment_type',
-    'fmp4',
-    '-hls_fmp4_init_filename',
-    'init.mp4',
-    '-hls_segment_filename',
-    `${output}/segment-%06d.m4s`,
-    `${output}/index.m3u8`
+    '-use_template',
+    '1',
+    '-use_timeline',
+    '1',
+    '-adaptation_sets',
+    policy.audio ? 'id=0,streams=v id=1,streams=a' : 'id=0,streams=v',
+    // Each fragment's timestamps (tfdt) are the source's, as the manifest
+    // says, not an edit list, which browsers don't apply; no sidx, which
+    // makes FFmpeg rewrite timestamps at open-GOP boundaries.
+    '-format_options',
+    'movflags=+frag_discont+skip_sidx',
+    '-init_seg_name',
+    'init-$RepresentationID$.m4s',
+    '-media_seg_name',
+    'chunk-$RepresentationID$-$Number%05d$.m4s',
+    `${output}/manifest.mpd`
   );
-  return { args, offsetMs: offset * 1000, policy };
+  // Where HDR was tone-mapped, for the fallback and /health.
+  const tonemap =
+    policy.video?.hdr && !policy.copyVideo
+      ? gpuTonemap
+        ? 'gpu'
+        : 'cpu'
+      : null;
+  return { args, offsetMs: offset * 1000, policy, tonemap };
+}
+
+/** The boxes in an ISO BMFF byte range: [type, start of content, end]. */
+function* boxes(data, from = 0, to = data.length) {
+  let at = from;
+  while (at + 8 <= to) {
+    let size = data.readUInt32BE(at);
+    const type = data.toString('latin1', at + 4, at + 8);
+    let header = 8;
+    if (size === 1) {
+      size = Number(data.readBigUInt64BE(at + 8));
+      header = 16;
+    } else if (size === 0) size = to - at;
+    if (size < header || at + size > to) return;
+    yield [type, at + header, at + size];
+    at += size;
+  }
+}
+const child = (data, box, type) => {
+  if (!box) return null;
+  for (const found of boxes(data, box[1], box[2]))
+    if (found[0] === type) return found;
+  return null;
+};
+const hex = (n) => n.toString(16).toUpperCase();
+/**
+ * The RFC 6381 codec string of the video in an init segment, from its
+ * configuration box. FFmpeg's DASH muxer writes only "hvc1", "av01" or
+ * "vp09", which browsers reject. Null when there's nothing to build from.
+ */
+export function videoCodec(init) {
+  const whole = [null, 0, init.length];
+  const stbl = child(
+    init,
+    child(
+      init,
+      child(init, child(init, child(init, whole, 'moov'), 'trak'), 'mdia'),
+      'minf'
+    ),
+    'stbl'
+  );
+  const stsd = child(init, stbl, 'stsd');
+  if (!stsd) return null;
+  // stsd: version, flags and entry count, then the sample entry.
+  const entry = boxes(init, stsd[1] + 8, stsd[2]).next().value;
+  if (!entry) return null;
+  const [type, from, to] = entry;
+  // A visual sample entry's fields come before its child boxes.
+  const config = (name) => {
+    for (const box of boxes(init, from + 78, to))
+      if (box[0] === name) return box;
+    return null;
+  };
+  if (type === 'hvc1' || type === 'hev1') {
+    const c = config('hvcC');
+    if (!c) return null;
+    const b = init.subarray(c[1], c[2]);
+    const space = ['', 'A', 'B', 'C'][b[1] >> 6];
+    const tier = b[1] & 0x20 ? 'H' : 'L';
+    const profile = b[1] & 0x1f;
+    // The compatibility flags, bit-reversed.
+    let flags = b.readUInt32BE(2),
+      reversed = 0;
+    for (let i = 0; i < 32; i++) {
+      reversed = (reversed << 1) | (flags & 1);
+      flags >>>= 1;
+    }
+    const constraints = [...b.subarray(6, 12)];
+    while (constraints.length && !constraints.at(-1)) constraints.pop();
+    return [
+      type,
+      `${space}${profile}`,
+      hex(reversed >>> 0),
+      `${tier}${b[12]}`,
+      ...constraints.map(hex),
+    ].join('.');
+  }
+  if (type === 'avc1' || type === 'avc3') {
+    const c = config('avcC');
+    if (!c) return null;
+    return `${type}.${[1, 2, 3]
+      .map((i) => init[c[1] + i].toString(16).padStart(2, '0'))
+      .join('')}`;
+  }
+  if (type === 'av01') {
+    const c = config('av1C');
+    if (!c) return null;
+    const p = init[c[1] + 1],
+      q = init[c[1] + 2];
+    const depth = q & 0x40 ? (q & 0x20 ? 12 : 10) : 8;
+    return `av01.${p >> 5}.${String(p & 0x1f).padStart(2, '0')}${q & 0x80 ? 'H' : 'M'}.${String(depth).padStart(2, '0')}`;
+  }
+  if (type === 'vp09') {
+    const c = config('vpcC');
+    if (!c) return null;
+    // A full box: version and flags first.
+    const [profile, level, bits] = [4, 5, 6].map((i) => init[c[1] + i]);
+    return `vp09.${[profile, level, bits >> 4]
+      .map((n) => String(n).padStart(2, '0'))
+      .join('.')}`;
+  }
+  return null;
+}
+/** Whether every stream in the manifest has a segment written. */
+export function manifestReady(mpd) {
+  const sets = mpd.split('<AdaptationSet').slice(1);
+  return sets.length > 0 && sets.every((set) => /<S [^>]*d="/.test(set));
+}
+/**
+ * Where a converted stream can play from, in seconds of the source: the
+ * point every stream in the manifest has started. Null if none is listed.
+ */
+export function manifestStart(mpd) {
+  let start = -Infinity;
+  for (const [, template] of mpd.matchAll(
+    /<SegmentTemplate([\s\S]*?)<\/SegmentTemplate>/g
+  )) {
+    const scale = Number(/timescale="(\d+)"/.exec(template)?.[1]);
+    const first = Number(/<S t="(\d+)"/.exec(template)?.[1]);
+    if (scale > 0 && Number.isFinite(first))
+      start = Math.max(start, first / scale);
+  }
+  return Number.isFinite(start) ? start : null;
+}
+/** The manifest with the video's full codec string in place of FFmpeg's bare one. */
+export function withVideoCodec(mpd, codec) {
+  if (!codec) return mpd;
+  return mpd.replace(
+    /(mimeType="video\/mp4" codecs=")([a-z0-9]{4})(")/,
+    (whole, a, bare, b) =>
+      codec.startsWith(bare.slice(0, 3)) ? `${a}${codec}${b}` : whole
+  );
+}
+
+/**
+ * A finished manifest says the presentation lasts as long as the source.
+ * FFmpeg writes the length it converted, while the segments keep the
+ * source's timestamps: a job from 40 s of a 60 s file says 20 s, with every
+ * segment past that end.
+ */
+export function withFullDuration(mpd, durationMs) {
+  if (!(durationMs > 0)) return mpd;
+  return mpd.replace(
+    /mediaPresentationDuration="[^"]*"/,
+    `mediaPresentationDuration="PT${(durationMs / 1000).toFixed(3)}S"`
+  );
 }

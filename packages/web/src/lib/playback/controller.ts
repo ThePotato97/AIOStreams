@@ -129,6 +129,8 @@ export interface PlayerController {
   queueNext?: (next: QueuedItem | null) => void;
   /** Whether the app's sound settings apply, which they do to its own player. */
   sound?: boolean;
+  /** Whether surround can be rendered for headphones, in the page. */
+  virtualSurround?: boolean;
   /** Whether the picture follows the page's fit setting. */
   fit?: boolean;
   /** Plays the file again after it failed, from where it stopped or on another engine. */

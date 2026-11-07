@@ -13,7 +13,8 @@ export interface GuestCurrent {
 export class GuestApi {
   constructor(
     readonly base: string,
-    readonly token: string
+    // Set later for a user's own playback, once the server opens it.
+    public token: string
   ) {}
   async request<T>(
     path: string,
@@ -29,13 +30,25 @@ export class GuestApi {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data: { error?: string; retryAfter?: number };
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // A proxy's own error page, such as Cloudflare's 524.
+      throw Object.assign(new Error(`The server answered ${res.status}`), {
+        status: res.status,
+      });
+    }
     if (!res.ok)
       throw Object.assign(
         new Error(data.error ?? 'Guest playback unavailable'),
-        { status: res.status }
+        {
+          status: res.status,
+          retryAfter: data.retryAfter as number | undefined,
+        }
       );
-    return data as T;
+    return data as unknown as T;
   }
   current(signal?: AbortSignal) {
     return this.request<GuestCurrent>('/current', undefined, signal);

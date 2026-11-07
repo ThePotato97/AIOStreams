@@ -4,19 +4,42 @@ import type {
   GuestMedia,
   GuestTrack,
 } from '@aiostreams/core';
-function codec(track: GuestTrack): string | null {
+import { canRender } from './subtitle-renderer';
+/** ffprobe reports -99 (or nothing) when a stream doesn't declare its level. */
+const knownLevel = (level: number | undefined, fallback: number) =>
+  level != null && Number.isInteger(level) && level > 0 ? level : fallback;
+
+/** The RFC 6381 codec string the browser is asked about. */
+export function codec(track: GuestTrack): string | null {
   switch (track.codec) {
     case 'h264': {
       const profile = track.profile?.toLowerCase() ?? '';
-      const prefix = profile.includes('high')
-        ? '6400'
-        : profile.includes('main')
-          ? '4d40'
-          : '42e0';
-      return `avc1.${prefix}${(track.level ?? 40).toString(16).padStart(2, '0')}`;
+      // profile_idc in hex: High 4:4:4 244, High 4:2:2 122, High 10 110.
+      const prefix = profile.includes('4:4:4')
+        ? 'f400'
+        : profile.includes('4:2:2')
+          ? '7a00'
+          : profile.includes('high 10')
+            ? '6e00'
+            : profile.includes('high')
+              ? '6400'
+              : profile.includes('main')
+                ? '4d40'
+                : '42e0';
+      // Level 4.0 when unknown: an invalid string such as "avc1.6400-63"
+      // reads as unsupported and forces a needless video conversion.
+      const level = knownLevel(track.level, 40);
+      return `avc1.${prefix}${level.toString(16).padStart(2, '0')}`;
     }
-    case 'hevc':
-      return 'hvc1.1.6.L153.B0';
+    case 'hevc': {
+      // Main 10 is a different decoder profile; asking about Main would
+      // report support the browser may not have. Level is 30 x the level
+      // number (153 = 5.1).
+      const level = knownLevel(track.level, 153);
+      return /10/.test(track.profile ?? '')
+        ? `hvc1.2.4.L${level}.B0`
+        : `hvc1.1.6.L${level}.B0`;
+    }
     case 'vp9':
       return 'vp09.00.41.08';
     case 'vp8':
@@ -43,7 +66,9 @@ function codec(track: GuestTrack): string | null {
 }
 export async function browserCapabilities(
   media: GuestMedia,
-  audioIndex?: number
+  audioIndex?: number,
+  /** Surround is rendered for headphones in the page. */
+  headphones = false
 ): Promise<GuestCapabilities> {
   const el = document.createElement('video');
   const video = media.tracks.find((t) => t.type === 'video');
@@ -75,28 +100,38 @@ export async function browserCapabilities(
         MediaSource.isTypeSupported(type)));
   let videoSupport = supports(videoType),
     audioSupport = !audio || supports(audioType);
-  const hdr = !!video?.hdr && matchMedia('(dynamic-range: high)').matches;
+  // Whether HDR video plays as it is: the browser says so itself. The screen
+  // being in HDR mode is only the answer where the browser can't be asked.
+  const hdrScreen = () => matchMedia('(dynamic-range: high)').matches;
+  let hdr: boolean =
+    !!video?.hdr && !navigator.mediaCapabilities && hdrScreen();
   if (video && vc && navigator.mediaCapabilities) {
+    const config = {
+      contentType: videoType,
+      width: video.width ?? 1920,
+      height: video.height ?? 1080,
+      bitrate: video.bitrate || media.bitrate || 8000000,
+      framerate: video.frameRate || 24,
+    };
     try {
       const result = await navigator.mediaCapabilities.decodingInfo({
         type: 'media-source',
-        video: {
-          contentType: videoType,
-          width: video.width ?? 1920,
-          height: video.height ?? 1080,
-          bitrate: video.bitrate || media.bitrate || 8000000,
-          framerate: video.frameRate || 24,
-          ...(hdr
-            ? {
-                colorGamut: 'rec2020' as const,
-                transferFunction: 'pq' as const,
-              }
-            : {}),
-        },
+        video: config,
       });
       videoSupport = videoSupport && result.supported;
     } catch {
       /* Some browsers reject detailed capability requests. */
+    }
+    if (video.hdr && videoSupport) {
+      try {
+        const result = await navigator.mediaCapabilities.decodingInfo({
+          type: 'media-source',
+          video: { ...config, colorGamut: 'rec2020', transferFunction: 'pq' },
+        });
+        hdr = result.supported;
+      } catch {
+        hdr = hdrScreen();
+      }
     }
   }
   if (audio && ac && navigator.mediaCapabilities) {
@@ -115,12 +150,60 @@ export async function browserCapabilities(
       /* Keep the basic result. */
     }
   }
+  /** Whether the browser outputs to six channels or more. */
+  const surroundOutput = () => {
+    if (typeof AudioContext === 'undefined') return false;
+    const context = new AudioContext();
+    const channels = context.destination.maxChannelCount;
+    void context.close().catch(() => {});
+    return channels >= 6;
+  };
+  const plays = async (
+    contentType: string,
+    channels: number,
+    bitrate: number
+  ) => {
+    try {
+      const result = await navigator.mediaCapabilities.decodingInfo({
+        type: 'media-source',
+        audio: {
+          contentType,
+          channels: String(channels),
+          bitrate,
+          samplerate: 48000,
+        },
+      });
+      return result.supported;
+    } catch {
+      return false;
+    }
+  };
+  // Whether converted surround can stay surround, and as what: FLAC at the
+  // source's layout up to 7.1, else 5.1 AAC, asked directly.
+  let surround = false,
+    lossless = false;
+  if ((audio?.channels ?? 2) > 2 && navigator.mediaCapabilities) {
+    const [flac, aac] = await Promise.all([
+      plays('audio/mp4; codecs="flac"', 8, 6912000),
+      plays('audio/mp4; codecs="mp4a.40.2"', 6, 384000),
+    ]);
+    // On a stereo output the transcoder's own downmix (normalised, no
+    // clipping) beats the browser's: surround is kept for speakers, and for
+    // headphones where it's rendered here with an HRTF.
+    surround = (flac || aac) && (headphones || surroundOutput());
+    lossless = surround && flac;
+  }
   const codecs = [vc, ac].filter(Boolean).join(',');
+  // ASS and PGS are drawn here, not burned in, where the renderers run.
+  const subtitles: ('ass' | 'pgs')[] = canRender() ? ['ass', 'pgs'] : [];
   return {
     video: videoSupport,
     audio: audioSupport,
     container:
       !!mime && !!vc && !!el.canPlayType(`${mime}; codecs="${codecs}"`),
     hdr,
+    surround,
+    lossless,
+    subtitles,
   };
 }
