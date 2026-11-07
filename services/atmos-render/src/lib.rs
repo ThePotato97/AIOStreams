@@ -1,0 +1,10 @@
+//! Renders Dolby Atmos objects to binaural stereo the way Dolby Atmos for Headphones does
+//! (DAP-VR 8.1.0), from its traced tuning: per-band PCA HRTF with a low-band ITD phase ramp,
+//! the distance law, the LFE table, and the FOA room (FDN plus early reflections).
+
+pub mod complex;
+pub mod direct;
+pub mod qmf;
+mod qmf_window;
+pub mod room;
+pub mod tuning;
