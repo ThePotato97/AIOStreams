@@ -116,7 +116,7 @@ export function select(meta, request) {
             ? 'retry after failed playback'
             : caps.video !== true
               ? "browser can't decode the video"
-              : 'HDR on an SDR display';
+              : "HDR the browser can't show";
   const audioReason =
     !audio || copyAudio
       ? null
@@ -143,7 +143,24 @@ export function select(meta, request) {
     copyAudio,
   };
 }
-export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
+/** Tone-maps HDR to SDR in floating point on the CPU. */
+const CPU_TONEMAP =
+  'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
+/** The same tone map on the GPU, through OpenCL, from 10-bit frames. */
+const OPENCL_TONEMAP =
+  'format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,hwdownload,format=nv12';
+/**
+ * `options.tonemap`: 'gpu' tone-maps HDR on the NVIDIA GPU (OpenCL) when
+ * encoding with it; 'cpu' always uses the CPU.
+ */
+export function ffmpegArgs(
+  input,
+  meta,
+  request,
+  output,
+  encoder = 'cpu',
+  options = {}
+) {
   const policy = select(meta, request);
   const offset =
     Math.floor(Math.max(0, request.positionMs ?? 0) / 1000 / 4) * 4;
@@ -158,6 +175,13 @@ export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
       '-vaapi_device',
       process.env.VAAPI_DEVICE ?? '/dev/dri/renderD128'
     );
+  const gpuTonemap =
+    encoder === 'nvidia' &&
+    (options.tonemap ?? 'gpu') === 'gpu' &&
+    !policy.copyVideo &&
+    !!policy.video?.hdr;
+  if (gpuTonemap)
+    args.push('-init_hw_device', 'opencl=ocl', '-filter_hw_device', 'ocl');
   // Seek before input for ordinary streams. Burn-in retains the source timeline.
   if (!policy.burn) args.push('-ss', String(offset));
   args.push('-i', input);
@@ -186,9 +210,7 @@ export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
   if (policy.copyVideo) args.push('-c:v', 'copy');
   else {
     if (policy.video?.hdr)
-      filters.push(
-        'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p'
-      );
+      filters.push(gpuTonemap ? OPENCL_TONEMAP : CPU_TONEMAP);
     const height =
       request.quality === '720p'
         ? 720
@@ -251,5 +273,12 @@ export function ffmpegArgs(input, meta, request, output, encoder = 'cpu') {
     `${output}/segment-%06d.m4s`,
     `${output}/index.m3u8`
   );
-  return { args, offsetMs: offset * 1000, policy };
+  // Where HDR was tone-mapped, for the fallback and /health.
+  const tonemap =
+    policy.video?.hdr && !policy.copyVideo
+      ? gpuTonemap
+        ? 'gpu'
+        : 'cpu'
+      : null;
+  return { args, offsetMs: offset * 1000, policy, tonemap };
 }

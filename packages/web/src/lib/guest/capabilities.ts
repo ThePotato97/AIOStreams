@@ -97,7 +97,13 @@ export async function browserCapabilities(
         MediaSource.isTypeSupported(type)));
   let videoSupport = supports(videoType),
     audioSupport = !audio || supports(audioType);
-  const hdr = !!video?.hdr && matchMedia('(dynamic-range: high)').matches;
+  const hdrDisplay =
+    !!video?.hdr && matchMedia('(dynamic-range: high)').matches;
+  // HDR video plays as it is on an HDR display, or where the browser maps it
+  // to SDR itself (Chrome, Edge, Safari). Firefox doesn't, and looks washed
+  // out, so the server tone-maps it there.
+  const hdr =
+    !!video?.hdr && (hdrDisplay || !/\bFirefox\//.test(navigator.userAgent));
   if (video && vc && navigator.mediaCapabilities) {
     try {
       const result = await navigator.mediaCapabilities.decodingInfo({
@@ -108,7 +114,7 @@ export async function browserCapabilities(
           height: video.height ?? 1080,
           bitrate: video.bitrate || media.bitrate || 8000000,
           framerate: video.frameRate || 24,
-          ...(hdr
+          ...(hdrDisplay
             ? {
                 colorGamut: 'rec2020' as const,
                 transferFunction: 'pq' as const,

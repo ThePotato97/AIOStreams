@@ -79,6 +79,70 @@ const request = (extra = {}) => ({
   capabilities: { video: true, audio: true, container: true, hdr: false },
   ...extra,
 });
+test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU otherwise', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'hevc', hdr: true },
+      { index: 1, type: 'audio', codec: 'eac3', default: true },
+    ],
+  };
+  const caps = (hdr) => ({
+    capabilities: { video: true, audio: false, container: true, hdr },
+  });
+  const tonemaps = (args) =>
+    [
+      args.some((a) => a.includes('tonemap_opencl')) && 'opencl',
+      args.some((a) => a.includes('tonemap=hable') && a.includes('zscale')) &&
+        'cpu',
+    ].filter(Boolean);
+  // The browser shows it (an HDR display, or it tone-maps): only audio converts.
+  const shown = ffmpegArgs('in', meta, request(caps(true)), 'out', 'nvidia');
+  assert.equal(shown.policy.mode, 'audio');
+  assert.equal(shown.tonemap, null);
+  assert.deepEqual(tonemaps(shown.args), []);
+  // It doesn't (Firefox on an SDR display): the video converts and tone-maps.
+  const gpu = ffmpegArgs('in', meta, request(caps(false)), 'out', 'nvidia');
+  assert.equal(gpu.policy.videoReason, "HDR the browser can't show");
+  assert.equal(gpu.tonemap, 'gpu');
+  assert.deepEqual(tonemaps(gpu.args), ['opencl']);
+  // The OpenCL device is set up before the input.
+  const device = gpu.args.indexOf('-init_hw_device');
+  assert.ok(device >= 0 && device < gpu.args.indexOf('-i'));
+  assert.equal(gpu.args[device + 1], 'opencl=ocl');
+  assert.ok(gpu.args.includes('h264_nvenc'));
+  // The fallback keeps NVENC and tone-maps on the CPU.
+  const fallback = ffmpegArgs(
+    'in',
+    meta,
+    request(caps(false)),
+    'out',
+    'nvidia',
+    {
+      tonemap: 'cpu',
+    }
+  );
+  assert.equal(fallback.tonemap, 'cpu');
+  assert.deepEqual(tonemaps(fallback.args), ['cpu']);
+  assert.ok(!fallback.args.includes('-init_hw_device'));
+  assert.ok(fallback.args.includes('h264_nvenc'));
+  // Other encoders tone-map on the CPU.
+  for (const encoder of ['cpu', 'vaapi']) {
+    const other = ffmpegArgs('in', meta, request(caps(false)), 'out', encoder);
+    assert.deepEqual(tonemaps(other.args), ['cpu'], encoder);
+    assert.ok(!other.args.includes('-init_hw_device'), encoder);
+  }
+  // SDR video never tone-maps.
+  const sdr = ffmpegArgs(
+    'in',
+    { ...meta, tracks: [{ ...meta.tracks[0], hdr: false }, meta.tracks[1]] },
+    request({ ...caps(false), force: true }),
+    'out',
+    'nvidia'
+  );
+  assert.equal(sdr.tonemap, null);
+  assert.deepEqual(tonemaps(sdr.args), []);
+});
 test('select explains why each stream is converted', () => {
   const meta = {
     durationMs: 60000,

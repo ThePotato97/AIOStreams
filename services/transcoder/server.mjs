@@ -147,13 +147,19 @@ export async function drop(job) {
   await stop(job);
   await removeDir(job.dir);
 }
-function start(job, encoder) {
+/**
+ * Starts FFmpeg for a job. A GPU conversion that fails before its first
+ * segment runs again with the tone map on the CPU (an HDR source), then all
+ * on the CPU.
+ */
+function start(job, encoder, tonemap = 'gpu') {
   const command = ffmpegArgs(
     job.input,
     job.meta,
     job.request,
     job.dir,
-    encoder
+    encoder,
+    { tonemap }
   );
   job.offsetMs = command.offsetMs;
   job.mode = command.policy.mode;
@@ -162,6 +168,7 @@ function start(job, encoder) {
     audio: command.policy.audioReason,
   };
   job.encoder = encoder;
+  job.tonemap = command.tonemap;
   const args = [...command.args];
   args.splice(args.length - 1, 0, '-progress', 'pipe:3');
   const child = spawn('ffmpeg', args, {
@@ -195,7 +202,9 @@ function start(job, encoder) {
     if (code !== 0 && encoder !== 'cpu' && !job.ready) {
       await rm(job.dir, { recursive: true, force: true });
       await mkdir(job.dir, { recursive: true });
-      if (jobs.has(job.id)) start(job, 'cpu');
+      if (!jobs.has(job.id)) return;
+      if (command.tonemap === 'gpu') start(job, encoder, 'cpu');
+      else start(job, 'cpu');
     } else if (code !== 0) job.error = 'Conversion failed';
     else job.finished = true;
   });
@@ -323,6 +332,7 @@ export function createServer() {
             // Why video/audio are converted (null: copied).
             reasons: j.reasons,
             encoder: j.encoder,
+            tonemap: j.tonemap,
             viewers: j.viewers.size,
             producedMs: j.producedMs,
             speed: j.speed,

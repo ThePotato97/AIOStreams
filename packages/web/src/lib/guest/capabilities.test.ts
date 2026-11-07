@@ -1,7 +1,7 @@
 /* eslint-disable lingui/no-unlocalized-strings -- test data, not UI text. */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GuestTrack } from '@aiostreams/core';
-import { codec } from './capabilities';
+import { browserCapabilities, codec } from './capabilities';
 
 const video = (codecName: string, profile?: string, level?: number) =>
   codec({
@@ -24,5 +24,58 @@ describe('codec strings asked of the browser', () => {
   it('asks about HEVC Main 10 as Main 10', () => {
     expect(video('hevc', 'Main', 120)).toBe('hvc1.1.6.L120.B0');
     expect(video('hevc', 'Main 10', -99)).toBe('hvc1.2.4.L153.B0');
+  });
+});
+
+describe('HDR video', () => {
+  const media = {
+    durationMs: 1000,
+    container: 'matroska,webm',
+    bitrate: 1,
+    chapters: [],
+    tracks: [
+      {
+        index: 0,
+        type: 'video',
+        codec: 'hevc',
+        profile: 'Main 10',
+        level: 153,
+        hdr: true,
+        title: '',
+      },
+    ],
+  } as unknown as Parameters<typeof browserCapabilities>[0];
+  const browser = (userAgent: string, hdrDisplay: boolean) => {
+    vi.stubGlobal('document', {
+      createElement: () => ({ canPlayType: () => 'probably' }),
+    });
+    vi.stubGlobal('navigator', { userAgent });
+    vi.stubGlobal('matchMedia', () => ({ matches: hdrDisplay }));
+  };
+  const chrome =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
+  const firefox =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0';
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('plays as it is on an SDR display where the browser tone-maps it', async () => {
+    browser(chrome, false);
+    expect((await browserCapabilities(media)).hdr).toBe(true);
+  });
+  it('is tone-mapped by the server for Firefox on an SDR display', async () => {
+    browser(firefox, false);
+    expect((await browserCapabilities(media)).hdr).toBe(false);
+  });
+  it('plays as it is on an HDR display, Firefox included', async () => {
+    browser(firefox, true);
+    expect((await browserCapabilities(media)).hdr).toBe(true);
+  });
+  it('is not HDR for SDR video', async () => {
+    browser(chrome, true);
+    const sdr = {
+      ...media,
+      tracks: [{ ...media.tracks[0], hdr: false }],
+    } as typeof media;
+    expect((await browserCapabilities(sdr)).hdr).toBe(false);
   });
 });
