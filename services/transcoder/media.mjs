@@ -502,10 +502,11 @@ export function manifestStart(mpd) {
 /** The manifest with the video's full codec string in place of FFmpeg's bare one. */
 export function withVideoCodec(mpd, codec) {
   if (!codec) return mpd;
+  // FFmpeg 6.1 writes the bare sample entry (hvc1); 8.1 writes nothing for copied HEVC.
   return mpd.replace(
-    /(mimeType="video\/mp4" codecs=")([a-z0-9]{4})(")/,
+    /(mimeType="video\/mp4" codecs=")([a-z0-9]{4})?(")/,
     (whole, a, bare, b) =>
-      codec.startsWith(bare.slice(0, 3)) ? `${a}${codec}${b}` : whole
+      !bare || codec.startsWith(bare.slice(0, 3)) ? `${a}${codec}${b}` : whole
   );
 }
 

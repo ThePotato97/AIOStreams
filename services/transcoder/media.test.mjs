@@ -516,7 +516,8 @@ test('real FFmpeg: styled subtitle burn-in', async () => {
 });
 
 test('real FFmpeg: HDR to SDR', async () => {
-  const input = `${dir}/hdr.mkv`,
+  const encoded = `${dir}/hdr-encoded.mkv`,
+    input = `${dir}/hdr.mkv`,
     output = `${dir}/sdr`;
   await exec(
     'ffmpeg',
@@ -543,10 +544,27 @@ test('real FFmpeg: HDR to SDR', async () => {
       'pools=1:frame-threads=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc',
       '-threads',
       '1',
-      input,
+      encoded,
     ],
     { timeout: 30000 }
   );
+  // Tagged in the container too: some x265 builds (jellyfin-ffmpeg's) write no colour VUI,
+  // and FFmpeg 6.1 sets no container tags on a stream copy, so either alone isn't enough.
+  await exec('ffmpeg', [
+    '-v',
+    'error',
+    '-i',
+    encoded,
+    '-c',
+    'copy',
+    '-color_primaries',
+    'bt2020',
+    '-color_trc',
+    'smpte2084',
+    '-colorspace',
+    'bt2020nc',
+    input,
+  ]);
   const { stdout } = await exec('ffprobe', [
     '-v',
     'error',
@@ -646,6 +664,12 @@ test('manifest: the video gets its full codec string', () => {
   assert.equal(withVideoCodec(avc, 'avc1.4d401f'), avc);
   assert.equal(withVideoCodec(mpd, 'av01.0.08M.10'), mpd);
   assert.equal(withVideoCodec(mpd, null), mpd);
+  // FFmpeg 8.1 leaves copied HEVC's codecs empty: filled in.
+  const empty = mpd.replace('codecs="hvc1"', 'codecs=""');
+  assert.match(
+    withVideoCodec(empty, 'hvc1.2.4.L153.B0'),
+    /mimeType="video\/mp4" codecs="hvc1\.2\.4\.L153\.B0"/
+  );
   // Nothing to build from.
   assert.equal(videoCodec(Buffer.alloc(0)), null);
   assert.equal(videoCodec(Buffer.from('not an init segment')), null);
