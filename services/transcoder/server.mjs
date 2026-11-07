@@ -13,6 +13,7 @@ import {
   manifestReady,
   manifestStart,
   videoCodec,
+  withFullDuration,
   withVideoCodec,
 } from './media.mjs';
 
@@ -214,8 +215,16 @@ function start(job, encoder, tonemap = 'gpu') {
       if (command.tonemap === 'gpu') start(job, encoder, 'cpu');
       else start(job, 'cpu');
     } else if (code !== 0) job.error = 'Conversion failed';
+    // A clean exit well before the end: the source stopped sending.
+    else if (stoppedEarly(job)) job.error = 'The source stopped before the end';
     else job.finished = true;
   });
+}
+/** How far before the source's end a finished conversion may stop. */
+const END_MARGIN_MS = 30_000;
+export function stoppedEarly(job) {
+  const total = job.meta?.durationMs;
+  return total > 0 && (job.producedMs ?? 0) < total - END_MARGIN_MS;
 }
 async function prepare(body) {
   const input = inputUrl(body.input);
@@ -471,9 +480,9 @@ export function createServer() {
           job.videoCodec ??= videoCodec(
             await readFile(`${job.dir}/init-0.m4s`).catch(() => Buffer.alloc(0))
           );
-          const mpd = withVideoCodec(
-            await readFile(file, 'utf8'),
-            job.videoCodec
+          const mpd = withFullDuration(
+            withVideoCodec(await readFile(file, 'utf8'), job.videoCodec),
+            job.meta.durationMs
           );
           res.setHeader('Content-Type', 'application/dash+xml');
           res.end(mpd);

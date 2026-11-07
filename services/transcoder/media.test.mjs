@@ -12,6 +12,7 @@ import {
   manifestReady,
   manifestStart,
   videoCodec,
+  withFullDuration,
   withVideoCodec,
 } from './media.mjs';
 const exec = promisify(execFile);
@@ -632,6 +633,112 @@ test('real FFmpeg: copied HEVC is tagged hvc1, with its full codec string', asyn
   assert.match(codec, /^hvc1\.2\.4\.L\d+(\.[0-9A-F]{1,2})*$/);
 });
 
+test('manifest: a finished one lasts as long as the source', () => {
+  // What FFmpeg writes for a job from 40 s of a 60 s file.
+  const mpd =
+    '<MPD type="static" mediaPresentationDuration="PT20.0S" maxSegmentDuration="PT4S"><Period start="PT0.0S"><S t="480000" d="96000" /></Period></MPD>';
+  const full = withFullDuration(mpd, 60_000);
+  assert.match(full, /mediaPresentationDuration="PT60\.000S"/);
+  assert.match(full, /maxSegmentDuration="PT4S"/);
+  // A live manifest has none, and an unknown length leaves it be.
+  assert.equal(
+    withFullDuration('<MPD type="dynamic">', 60_000),
+    '<MPD type="dynamic">'
+  );
+  assert.equal(withFullDuration(mpd, 0), mpd);
+});
+
+test('arguments: NVENC forces IDR keyframes; remote sources reconnect', () => {
+  const meta = {
+    durationMs: 60000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'h264' },
+      { index: 1, type: 'audio', codec: 'eac3', default: true },
+    ],
+  };
+  const nvenc = ffmpegArgs(
+    'http://aio/x',
+    meta,
+    request({ force: true }),
+    'out',
+    'nvidia'
+  ).args;
+  const idr = nvenc.indexOf('-forced-idr');
+  assert.ok(idr > 0 && nvenc[idr + 1] === '1');
+  assert.ok(nvenc.includes('-reconnect_on_network_error'));
+  // The options are for the source: before -i.
+  assert.ok(nvenc.indexOf('-reconnect') < nvenc.indexOf('-i'));
+  // A local file has nothing to reconnect.
+  const local = ffmpegArgs(
+    '/tmp/x.mkv',
+    meta,
+    request({ force: true }),
+    'out'
+  ).args;
+  assert.ok(!local.includes('-reconnect'));
+  assert.ok(!local.includes('-forced-idr'));
+});
+
+test('real FFmpeg: 5.1 downmixes to stereo without clipping', async () => {
+  const input = `${dir}/loud51.mkv`,
+    output = `${dir}/loud51-out`;
+  // Every channel at full scale, in phase: the worst case for a downmix.
+  await exec('ffmpeg', [
+    '-v',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc2=size=160x90:rate=24',
+    '-f',
+    'lavfi',
+    '-i',
+    'aevalsrc=sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t)|sin(2*PI*440*t):c=5.1:s=48000',
+    '-t',
+    '4',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-c:a',
+    'flac',
+    input,
+  ]);
+  const { stdout } = await exec('ffprobe', [
+    '-v',
+    'error',
+    '-show_format',
+    '-show_streams',
+    '-of',
+    'json',
+    input,
+  ]);
+  await mkdir(output);
+  const command = ffmpegArgs(
+    input,
+    metadata(JSON.parse(stdout)),
+    request({
+      capabilities: { video: true, audio: false, container: false, hdr: false },
+    }),
+    output
+  );
+  await exec('ffmpeg', command.args, { timeout: 60000 });
+  const { streams } = await dashOutput(output);
+  // The float peak: a 16-bit measure (volumedetect) never reads over 0 dB.
+  const { stderr } = await exec('ffmpeg', [
+    '-i',
+    streams[1],
+    '-af',
+    'astats=measure_perchannel=none',
+    '-f',
+    'null',
+    '-',
+  ]);
+  const peak = Number(/Peak level dB: (-?[\d.]+)/.exec(stderr)?.[1]);
+  // A plain downmix peaks near +8 dBFS; AAC itself overshoots a little.
+  assert.ok(peak < 0.5, `peaks at ${peak} dBFS`);
+});
+
 test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and GPU fallback', async () => {
   const { createServer: createHttpServer } = await import('node:http');
   const { createReadStream } = await import('node:fs');
@@ -711,6 +818,16 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
       await (await call(`/jobs/${job.id}/manifest.mpd`)).text(),
       /<MPD[\s\S]*codecs="avc1\./
     );
+    // Once finished, the manifest lasts as long as the source (12 s).
+    for (let i = 0; i < 100; i++) {
+      const mpd = await (await call(`/jobs/${job.id}/manifest.mpd`)).text();
+      if (mpd.includes('type="static"')) {
+        assert.match(mpd, /mediaPresentationDuration="PT12\.\d+S"/);
+        break;
+      }
+      assert.ok(i < 99, 'the job never finished');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     // A seek between keyframes reports where the stream really starts: the
     // keyframe, not the floored seek, which put positions seconds off.
     const longInput = `${origin}/party/guest/source/longgop${'b'.repeat(36)}`;

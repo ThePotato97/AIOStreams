@@ -113,3 +113,14 @@ test('native errors are passed on as their code and operation only', () => {
     'Media operation failed'
   );
 });
+
+test('a clean exit well before the end is a failure, not a finish', () => {
+  const job = (producedMs, durationMs = 3_600_000) => ({
+    producedMs,
+    meta: { durationMs },
+  });
+  assert.equal(transcoder.stoppedEarly(job(1_200_000)), true);
+  assert.equal(transcoder.stoppedEarly(job(3_590_000)), false);
+  // A source of unknown length can't be judged.
+  assert.equal(transcoder.stoppedEarly(job(1_000, 0)), false);
+});

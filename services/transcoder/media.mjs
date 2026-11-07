@@ -187,6 +187,19 @@ export function ffmpegArgs(
   // With the video copied, the audio starts at the same keyframe rather than
   // at the seek, as Plex does: no stretch of picture without sound.
   if (policy.copyVideo) args.push('-noaccurate_seek');
+  // A job paused ahead of its viewers leaves the source connection idle,
+  // which the source may close: read on from where it was.
+  if (/^https?:/.test(input))
+    args.push(
+      '-reconnect',
+      '1',
+      '-reconnect_streamed',
+      '1',
+      '-reconnect_on_network_error',
+      '1',
+      '-reconnect_delay_max',
+      '30'
+    );
   args.push('-i', input);
   const filters = [];
   if (policy.burn) {
@@ -239,7 +252,10 @@ export function ffmpegArgs(
         : 'libx264';
     args.push('-c:v', codec);
     if (codec === 'libx264') args.push('-preset', 'veryfast', '-crf', '20');
-    if (codec === 'h264_nvenc') args.push('-preset', 'p4', '-cq', '20');
+    // Forced keyframes are IDR frames only when asked: otherwise segments
+    // can't be cut on them and follow NVENC's own keyframe interval (Plex).
+    if (codec === 'h264_nvenc')
+      args.push('-preset', 'p4', '-cq', '20', '-forced-idr', '1');
     if (codec === 'h264_vaapi' && !height) args.push('-qp', '20');
     if (height) {
       const bitrate = height === 720 ? '4M' : '8M';
@@ -261,8 +277,16 @@ export function ffmpegArgs(
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
   if (policy.audio && !policy.copyAudio)
-    // Keeps converted audio continuous where the source's has gaps (Plex).
-    args.push('-af', 'aresample=async=1', '-ac', '2', '-b:a', '192k');
+    args.push(
+      '-af',
+      // Continuous where the source's audio has gaps, and downmixed to stereo
+      // without clipping, as Plex does: a plain -ac 2 peaks over 0 dBFS.
+      'aresample=async=1:ochl=stereo:rematrix_maxval=1',
+      '-ac',
+      '2',
+      '-b:a',
+      '192k'
+    );
   args.push(
     '-sn',
     '-map_metadata',
@@ -441,5 +465,19 @@ export function withVideoCodec(mpd, codec) {
     /(mimeType="video\/mp4" codecs=")([a-z0-9]{4})(")/,
     (whole, a, bare, b) =>
       codec.startsWith(bare.slice(0, 3)) ? `${a}${codec}${b}` : whole
+  );
+}
+
+/**
+ * A finished manifest says the presentation lasts as long as the source.
+ * FFmpeg writes the length it converted, while the segments keep the
+ * source's timestamps: a job from 40 s of a 60 s file says 20 s, with every
+ * segment past that end.
+ */
+export function withFullDuration(mpd, durationMs) {
+  if (!(durationMs > 0)) return mpd;
+  return mpd.replace(
+    /mediaPresentationDuration="[^"]*"/,
+    `mediaPresentationDuration="PT${(durationMs / 1000).toFixed(3)}S"`
   );
 }
