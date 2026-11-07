@@ -78,9 +78,13 @@ impl Renderer {
     pub fn slot(&mut self, inputs: &[&[f32]], left: &mut [f32], right: &mut [f32]) {
         let mut ears = [[C32::ZERO; BANDS]; 2];
         let mut send = vec![[C32::ZERO; 4]; BANDS];
+        while self.analyses.len() < inputs.len() {
+            self.analyses.push(Analysis::new());
+        }
         for (i, x) in inputs.iter().enumerate() {
             let h = self.analyses[i].process(&self.fb, x);
-            let g = &self.gains[i];
+            // an input without state for this block (metadata not yet seen) is silent
+            let Some(g) = self.gains.get(i) else { continue };
             for b in 0..BANDS {
                 ears[0][b] += g.ears[0][b] * h[b];
                 ears[1][b] += g.ears[1][b] * h[b];

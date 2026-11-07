@@ -5,9 +5,11 @@
 pub mod complex;
 pub mod direct;
 pub mod filterbank;
+pub mod input;
 pub mod objects;
 pub mod qmf;
 pub mod render;
 mod qmf_window;
 pub mod room;
+pub mod truehd_in;
 pub mod tuning;
