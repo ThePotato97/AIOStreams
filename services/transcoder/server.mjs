@@ -50,6 +50,26 @@ function inputUrl(value) {
     throw Error('Invalid source handle');
   return url.href;
 }
+/**
+ * Why ffprobe failed, safe to pass on: its last error line with every URL
+ * replaced. ffprobe only ever sees AIOStreams' source handle, but a handle is
+ * still a credential, and nothing upstream belongs in an error.
+ */
+export function probeFailure(error) {
+  if (error?.killed || error?.signal === 'SIGTERM')
+    return 'Source probe timed out';
+  const line =
+    String(error?.stderr ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .pop() ?? '';
+  const reason = line
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, 'source')
+    .replace(/^source:\s*/i, '')
+    .slice(0, 160);
+  return reason ? `Source probe failed: ${reason}` : 'Source probe failed';
+}
 async function json(req) {
   let text = '';
   for await (const chunk of req) {
@@ -76,9 +96,9 @@ async function probe(input) {
       { timeout: 45000, maxBuffer: 4 * 1024 * 1024 }
     )
       .then(({ stdout }) => metadata(JSON.parse(stdout)))
-      .catch(() => {
+      .catch((error) => {
         probes.delete(input);
-        throw Error('Source probe failed');
+        throw Error(probeFailure(error));
       });
     probes.set(input, task);
     if (probes.size > 200) probes.delete(probes.keys().next().value);

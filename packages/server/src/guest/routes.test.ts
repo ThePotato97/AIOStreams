@@ -21,6 +21,11 @@ const fixture = vi.hoisted(() => ({
   memoCalls: 0,
   workerDown: false,
   logs: [] as { level: string; data: unknown; message: string }[],
+  // A fake source server, so the pre-probe check sees real HTTP answers.
+  upstream: '',
+  sourcePath: '/media/private-token',
+  probes: 0,
+  probeFailures: 0,
 }));
 vi.mock('@aiostreams/core', () => ({
   createLogger: () =>
@@ -40,7 +45,11 @@ vi.mock('@aiostreams/core', () => ({
       transcoderSecret: 's'.repeat(32),
       internalUrl: 'http://internal',
     },
-    bootstrap: { baseUrl: 'http://internal' },
+    bootstrap: {
+      get baseUrl() {
+        return fixture.upstream;
+      },
+    },
   },
 }));
 vi.mock('../routes/jellyfin/context.js', () => ({
@@ -81,7 +90,7 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
         : [
             {
               msid: 'source',
-              url: 'https://provider.invalid/private-token',
+              url: `${fixture.upstream}${fixture.sourcePath}`,
               filename: 'episode.mkv',
               container: 'mkv',
               subtitles: [],
@@ -118,6 +127,8 @@ async function api(path: string, token = '', body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
+const errorOf = async (response: Response) =>
+  ((await response.json()) as { error?: string }).error;
 async function invitation() {
   const result = await api('/host', 'host-token', proof());
   expect(result.status).toBe(200);
@@ -144,7 +155,26 @@ function join(token: string) {
   session.member = 'guest';
   fixture.members.push({ id: 'guest', key: 'g'.repeat(22) });
 }
+let upstream: Server;
 beforeAll(async () => {
+  // What a source can answer: the file, AIOStreams' placeholder clips (as
+  // the real playback route redirects to them), an error page, or a 404.
+  const files = express();
+  files.get('/media/private-token', (_req, res) =>
+    res.status(206).type('video/mp4').send('x')
+  );
+  files.get('/downloading', (_req, res) =>
+    res.redirect(307, '/static/downloading.mp4')
+  );
+  files.get('/failed', (_req, res) =>
+    res.redirect(307, `${fixture.upstream}/static/download_failed.mp4`)
+  );
+  files.get('/static/:file', (_req, res) => res.type('video/mp4').send('x'));
+  files.get('/html', (_req, res) => res.type('html').send('<html></html>'));
+  files.get('/loop', (_req, res) => res.redirect(302, '/loop'));
+  upstream = files.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => upstream.on('listening', resolve));
+  fixture.upstream = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
     if (!url.startsWith('http://worker')) return originalFetch(input, init);
@@ -152,7 +182,20 @@ beforeAll(async () => {
       throw Object.assign(new TypeError('fetch failed'), {
         cause: { code: 'ECONNREFUSED' },
       });
-    if (url.endsWith('/probe')) return Response.json(media);
+    if (url.endsWith('/probe')) {
+      fixture.probes++;
+      if (fixture.probeFailures > 0) {
+        fixture.probeFailures--;
+        return Response.json(
+          {
+            error:
+              'Source probe failed: Invalid data found when processing input',
+          },
+          { status: 400 }
+        );
+      }
+      return Response.json(media);
+    }
     if (url.endsWith('/prepare')) {
       if (fixture.slow)
         await new Promise<void>((resolve) =>
@@ -175,6 +218,7 @@ beforeAll(async () => {
 afterAll(async () => {
   vi.restoreAllMocks();
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => upstream.close(() => resolve()));
 });
 beforeEach(() => {
   fixture.party = crypto.randomUUID().replaceAll('-', '').slice(0, 22);
@@ -187,6 +231,9 @@ beforeEach(() => {
   fixture.memoCalls = 0;
   fixture.workerDown = false;
   fixture.logs = [];
+  fixture.sourcePath = '/media/private-token';
+  fixture.probes = 0;
+  fixture.probeFailures = 0;
 });
 describe('guest playback authorization', () => {
   it('requires host credentials and rejects malformed invitations', async () => {
@@ -413,5 +460,89 @@ describe('guest playback authorization', () => {
       'http://tv.example'
     );
     expect(await response.json()).toEqual({ enabled: true, conversion: true });
+  });
+  describe('sources that are not ready or not media', () => {
+    async function joined() {
+      const secret = await invitation(),
+        token = await guest(secret);
+      join(token);
+      return token;
+    }
+    it('reports a file that is still downloading, and is not probed', async () => {
+      fixture.sourcePath = '/downloading';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(425);
+      expect(response.headers.get('retry-after')).toBe('10');
+      expect(await response.json()).toMatchObject({
+        error: 'The file is still downloading',
+        retryAfter: 10,
+      });
+      expect(fixture.probes).toBe(0);
+    });
+    it("passes on AIOStreams' own error clip as the error", async () => {
+      fixture.sourcePath = '/failed';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        'The download failed; pick another source'
+      );
+      expect(fixture.probes).toBe(0);
+    });
+    it('refuses a page that is not media', async () => {
+      fixture.sourcePath = '/html';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        "The source didn't return a media file"
+      );
+    });
+    it('reports a source that answers with an error', async () => {
+      fixture.sourcePath = '/missing';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe('The source answered 404');
+    });
+    it('stops following a source that redirects forever', async () => {
+      fixture.sourcePath = '/loop';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        'The source redirects too many times'
+      );
+    });
+    it('retries a probe that fails once', async () => {
+      fixture.probeFailures = 1;
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(200);
+      expect(fixture.probes).toBe(2);
+    });
+    it('gives the probe reason after three failures, then backs off', async () => {
+      fixture.probeFailures = 99;
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        'Source probe failed: Invalid data found when processing input'
+      );
+      expect(fixture.probes).toBe(3);
+      // Within the 5 s backoff the next poll doesn't probe again.
+      expect((await api('/current', token)).status).toBe(502);
+      expect(fixture.probes).toBe(3);
+    }, 15000);
+    it("a user's own playback reports downloading too", async () => {
+      fixture.sourcePath = '/downloading';
+      const response = await api('/own/open', 'host-token', {
+        itemId: 'c'.repeat(32),
+        sourceId: 'source',
+      });
+      expect(response.status).toBe(425);
+      expect(response.headers.get('retry-after')).toBe('10');
+    });
   });
 });

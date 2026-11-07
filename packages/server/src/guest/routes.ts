@@ -22,6 +22,7 @@ import { locate, ensureMemo } from '../routes/jellyfin/playback.js';
 import { guestPartyState } from '../party/relay.js';
 import { ticketExpiry } from '../party/ticket.js';
 import { guestSessions, randomSecret, type GuestSession } from './sessions.js';
+import { StaticFiles } from '../utils/static-errors.js';
 
 const router: Router = Router();
 const key = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
@@ -53,7 +54,7 @@ interface Binding {
   entries: Map<string, Entry>;
   sources: Map<string, Promise<Source>>;
   /** Recent resolution or probe failures, so polling guests don't retry them. */
-  failures: Map<string, { error: unknown; until: number }>;
+  failures: Map<string, { error: unknown; until: number; count: number }>;
   /** When `ownerToken` was last confirmed to belong to a signed-in host. */
   ownerCheckedAt: number;
   bingeGroup?: string;
@@ -82,7 +83,8 @@ function errorCause(error: unknown): string {
   if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return 'timeout';
   return e?.cause?.code ?? e?.code ?? e?.cause?.name ?? e?.name ?? 'unknown';
 }
-const FAILURE_BACKOFF_MS = 30000;
+/** How long a failed source waits before it is tried again: 5 s, then 10 s, then 30 s. */
+const FAILURE_BACKOFF_MS = [5000, 10000, 30000];
 const OWNER_CHECK_MS = 30000;
 const bindings = new Map<string, Binding>();
 /** Marks a source opened by a signed-in user for their own playback. */
@@ -167,7 +169,10 @@ async function worker(path: string, body?: unknown): Promise<any> {
       { path, cause: errorCause(error), url: config.party.transcoderUrl },
       'transcoder unreachable'
     );
-    fail(502, 'Transcoder unavailable');
+    throw Object.assign(new Error('Transcoder unavailable'), {
+      status: 502,
+      unreachable: true,
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -292,9 +297,9 @@ async function current(req: Request) {
     entry.sourceId,
     entry.filename,
   ]);
+  // Kept after it expires, so the next failure backs off longer.
   const failure = state.binding.failures.get(revision);
   if (failure && failure.until > Date.now()) throw failure.error;
-  state.binding.failures.delete(revision);
   // Remember a failure for a while: every guest polls /current every couple
   // of seconds, and each retry runs the host's whole addon pipeline.
   const remember = (error: unknown) => {
@@ -307,11 +312,18 @@ async function current(req: Request) {
           typeof status === 'number' ? (error as Error).message : undefined,
         cause: typeof status === 'number' ? undefined : errorCause(error),
       },
-      `guest source unavailable; retrying in ${FAILURE_BACKOFF_MS / 1000}s`
+      'guest source unavailable; backing off'
     );
+    const count = (state.binding.failures.get(revision)?.count ?? 0) + 1;
+    const after = (error as { retryAfter?: number }).retryAfter;
     state.binding.failures.set(revision, {
       error,
-      until: Date.now() + FAILURE_BACKOFF_MS,
+      count,
+      until:
+        Date.now() +
+        (after
+          ? after * 1000
+          : FAILURE_BACKOFF_MS[Math.min(count, FAILURE_BACKOFF_MS.length) - 1]),
     });
     if (state.binding.failures.size > 100)
       for (const [k, f] of state.binding.failures)
@@ -350,7 +362,7 @@ async function current(req: Request) {
   }
   const source = await pending;
   // Concurrent polls share one probe.
-  const probe = (source.media ??= worker('/probe', { input: input(source) }));
+  const probe = (source.media ??= probeMedia(source));
   let media: GuestMedia;
   try {
     media = await probe;
@@ -361,6 +373,8 @@ async function current(req: Request) {
     }
     throw error;
   }
+  // Working again: the next failure starts from the shortest wait.
+  state.binding.failures.delete(revision);
   return { ...state, source, media };
 }
 function ownSession(token: string): OwnSession {
@@ -612,7 +626,7 @@ router.post('/own/open', async (req, res) => {
   sources.set(stream.handle, stream);
   let media: GuestMedia;
   try {
-    media = await worker('/probe', { input: input(stream) });
+    media = await probeMedia(stream);
   } catch (error) {
     sources.delete(stream.handle);
     throw error;
@@ -695,49 +709,183 @@ router.post(['/touch', '/own/touch'], async (req, res) => {
   res.json({ ok: true });
 });
 const CROSS_ORIGIN_HEADERS = new Set(['range', 'user-agent', 'accept']);
-async function forward(source: Source, req: Request, res: Response) {
+const MAX_REDIRECTS = 10;
+/**
+ * Opens the source, following its redirects. The source's headers may carry
+ * the host's credentials (API keys, proxy tokens, ...): another origin only
+ * gets the harmless ones.
+ */
+async function openUpstream(
+  source: Source,
+  method: 'GET' | 'HEAD',
+  range?: string
+) {
   const headers: Record<string, string> = Object.fromEntries(
     Object.entries(source.record.requestHeaders ?? {}).map(([name, value]) => [
       name.toLowerCase(),
       value,
     ])
   );
-  if (req.headers.range) headers.range = req.headers.range;
+  if (range) headers.range = range;
   const target = new URL(source.record.url, config.bootstrap.baseUrl);
-  let upstream = await request(target, {
-    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-    headers,
-    bodyTimeout: 0,
-    headersTimeout: 30000,
-  });
+  const open = (url: URL) =>
+    request(url, { method, headers, bodyTimeout: 0, headersTimeout: 30000 });
+  let upstream = await open(target);
   let next = target;
-  for (
-    let hop = 0;
-    hop < 5 &&
+  let hops = 0;
+  while (
     upstream.statusCode >= 300 &&
     upstream.statusCode < 400 &&
-    upstream.headers.location;
-    hop++
+    upstream.headers.location
   ) {
+    if (++hops > MAX_REDIRECTS) {
+      await upstream.body.dump().catch(() => {});
+      fail(502, 'The source redirects too many times');
+    }
     const location = new URL(String(upstream.headers.location), next);
     if (!['http:', 'https:'].includes(location.protocol)) {
-      upstream.body.destroy();
+      await upstream.body.dump().catch(() => {});
       fail(502, 'Invalid source redirect');
     }
     await upstream.body.dump();
-    // The source's headers may carry the host's credentials (API keys,
-    // proxy tokens, ...): another origin only gets the harmless ones.
     if (location.origin !== next.origin)
       for (const name of Object.keys(headers))
         if (!CROSS_ORIGIN_HEADERS.has(name)) delete headers[name];
     next = location;
-    upstream = await request(next, {
-      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-      headers,
-      bodyTimeout: 0,
-      headersTimeout: 30000,
-    });
+    upstream = await open(next);
   }
+  return { upstream, url: next };
+}
+/** AIOStreams' own "downloading" / error clips, which players are sent instead of a file. */
+const PLACEHOLDERS: Record<string, { status: number; message: string }> = {
+  [StaticFiles.DOWNLOADING]: {
+    status: 425,
+    message: 'The file is still downloading',
+  },
+  [StaticFiles.DOWNLOAD_FAILED]: {
+    status: 502,
+    message: 'The download failed; pick another source',
+  },
+  [StaticFiles.NO_MATCHING_FILE]: {
+    status: 502,
+    message: 'No matching file in that release; pick another source',
+  },
+  [StaticFiles.TOO_MANY_REQUESTS]: {
+    status: 503,
+    message: 'The debrid service is rate limiting; retrying shortly',
+  },
+  [StaticFiles.CONTENT_PROXY_LIMIT_REACHED]: {
+    status: 503,
+    message: 'Too many streams through the proxy at once; retrying shortly',
+  },
+  [StaticFiles.STORE_LIMIT_EXCEEDED]: {
+    status: 502,
+    message: 'The debrid storage limit is reached',
+  },
+  [StaticFiles.PAYMENT_REQUIRED]: {
+    status: 502,
+    message: 'The debrid subscription needs renewing',
+  },
+  [StaticFiles.UNAUTHORIZED]: {
+    status: 502,
+    message: 'The debrid service rejected the credentials',
+  },
+  [StaticFiles.FORBIDDEN]: {
+    status: 502,
+    message: 'The debrid service refused access',
+  },
+  [StaticFiles.UNAVAILABLE_FOR_LEGAL_REASONS]: {
+    status: 502,
+    message: 'This file is unavailable for legal reasons',
+  },
+  [StaticFiles.INTERNAL_SERVER_ERROR]: {
+    status: 502,
+    message: 'The source failed with a server error',
+  },
+  [StaticFiles.OK]: {
+    status: 502,
+    message: "The source didn't return the video",
+  },
+};
+/** Seconds a viewer waits before a retryable source state is tried again. */
+const RETRY_AFTER: Record<number, number> = { 425: 10, 503: 15 };
+function placeholderOf(url: URL) {
+  const origins = [config.bootstrap.baseUrl, config.party.internalUrl]
+    .filter((u): u is string => !!u)
+    .map((u) => new URL(u).origin);
+  const file = /\/static\/([\w.-]+)$/.exec(url.pathname)?.[1];
+  return file && origins.includes(url.origin) ? PLACEHOLDERS[file] : undefined;
+}
+const sourceError = (status: number, message: string) =>
+  Object.assign(new Error(message), {
+    status,
+    retryAfter: RETRY_AFTER[status],
+  });
+/**
+ * Opens a little of the source before it is probed or played: a link that
+ * isn't ready lands on one of AIOStreams' placeholder clips or an error page,
+ * which would otherwise be converted as if it were the episode.
+ */
+async function checkSource(source: Source): Promise<void> {
+  let opened;
+  try {
+    opened = await openUpstream(source, 'GET', 'bytes=0-0');
+  } catch (error) {
+    if (typeof (error as { status?: number }).status === 'number') throw error;
+    logger.warn({ cause: errorCause(error) }, 'guest source unreachable');
+    throw sourceError(502, 'The source could not be reached');
+  }
+  const { upstream, url } = opened;
+  // Discarded cleanly: destroy() would raise an unhandled abort. A source
+  // that ignores the range is cut off after a little.
+  await upstream.body.dump({ limit: 65536 }).catch(() => {});
+  const placeholder = placeholderOf(url);
+  if (placeholder) {
+    logger.warn(
+      { file: url.pathname.split('/').pop(), status: placeholder.status },
+      'guest source is a placeholder'
+    );
+    throw sourceError(placeholder.status, placeholder.message);
+  }
+  if (upstream.statusCode >= 400) {
+    logger.warn(
+      { status: upstream.statusCode, host: url.hostname },
+      'guest source returned an error'
+    );
+    throw sourceError(502, `The source answered ${upstream.statusCode}`);
+  }
+  const type = String(upstream.headers['content-type'] ?? '');
+  if (/^(text\/|image\/|application\/(json|xml|xhtml))/i.test(type)) {
+    logger.warn(
+      { type: type.split(';')[0], host: url.hostname },
+      'guest source is not media'
+    );
+    throw sourceError(502, "The source didn't return a media file");
+  }
+}
+/** Checks the source, then probes it, retrying a probe that fails once. */
+async function probeMedia(source: Source): Promise<GuestMedia> {
+  await checkSource(source);
+  let last: unknown;
+  for (const wait of [0, 1000, 3000]) {
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    try {
+      return await worker('/probe', { input: input(source) });
+    } catch (error) {
+      last = error;
+      // The transcoder being down or full won't change in a second.
+      const e = error as { status?: number; unreachable?: boolean };
+      if (e.status === 503 || e.unreachable) break;
+    }
+  }
+  throw last;
+}
+async function forward(source: Source, req: Request, res: Response) {
+  const { upstream, url: next } = await openUpstream(
+    source,
+    req.method === 'HEAD' ? 'HEAD' : 'GET',
+    req.headers.range
+  );
   if (upstream.statusCode >= 400)
     logger.warn(
       { status: upstream.statusCode, host: next.hostname },
@@ -909,6 +1057,8 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
     return;
   }
   const status = error instanceof z.ZodError ? 400 : (error.status ?? 500);
+  if (typeof error.retryAfter === 'number')
+    res.set('Retry-After', String(error.retryAfter));
   // Path only: guest media URLs carry the session token in the query.
   if (status === 500)
     logger.error(
@@ -922,6 +1072,7 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
         : error instanceof z.ZodError
           ? 'Invalid request'
           : error.message,
+    retryAfter: error.retryAfter,
   });
 });
 const sweep = setInterval(() => {

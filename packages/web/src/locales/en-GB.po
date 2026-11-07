@@ -5472,3 +5472,15 @@ msgstr "Your rating"
 #: src/pages/settings/cache.tsx
 msgid "Your watch history and totals."
 msgstr "Your watch history and totals."
+
+#: src/lib/playback/convert.ts
+msgid "Conversion is unavailable on this server."
+msgstr "Conversion is unavailable on this server."
+
+#: src/lib/playback/convert.ts
+msgid "Couldn't convert the audio for this browser, so it may play without sound."
+msgstr "Couldn't convert the audio for this browser, so it may play without sound."
+
+#: src/lib/playback/convert.ts
+msgid "Still downloading; it starts when it's ready."
+msgstr "Still downloading; it starts when it's ready."

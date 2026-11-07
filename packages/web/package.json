@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "preview": "rsbuild preview",
     "lint": "eslint src",
-    "i18n:extract": "lingui extract --clean && lingui extract-template"
+    "i18n:extract": "lingui extract --clean && lingui extract-template",
+    "test": "vitest run --passWithNoTests"
   },
   "browserslist": [
     "chrome >= 94",

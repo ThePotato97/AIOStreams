@@ -34,7 +34,10 @@ export class GuestApi {
     if (!res.ok)
       throw Object.assign(
         new Error(data.error ?? 'Guest playback unavailable'),
-        { status: res.status }
+        {
+          status: res.status,
+          retryAfter: data.retryAfter as number | undefined,
+        }
       );
     return data as T;
   }
