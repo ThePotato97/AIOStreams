@@ -8,9 +8,10 @@
 //! Near, Mid, Far; Mid where it has none), as Dolby's Reference Player does; `--modes windows`
 //! renders everything Near, as Windows does.
 //!
-//! `--loudness windows` (default) decodes DD+ as Windows does (RF mode), `--loudness reference`
-//! as the Reference Player does (LINE mode). TrueHD gets the Reference Player's dialnorm either
-//! way (Windows doesn't decode TrueHD).
+//! `--loudness reference` (default) decodes as the Reference Player does: DD+ in LINE mode, TrueHD
+//! with its dialnorm, dialogue at -31 dBFS in both. `--loudness windows` decodes DD+ as Windows does
+//! (RF mode: dialogue at -20 dBFS on frames carrying compr, heavy compression); TrueHD keeps the
+//! Reference Player's dialnorm (Windows doesn't decode TrueHD).
 
 use std::io::{BufWriter, Read, Write};
 
@@ -30,8 +31,8 @@ fn main() -> Result<()> {
         Some(other) => bail!("unsupported --modes {other} (stream or windows)"),
     };
     let loudness = match value("--loudness") {
-        Some("windows") | None => Loudness::Windows,
-        Some("reference") => Loudness::Reference,
+        Some("reference") | None => Loudness::Reference,
+        Some("windows") => Loudness::Windows,
         Some(other) => bail!("unsupported --loudness {other} (windows or reference)"),
     };
     let mut feed: Box<dyn Feed> = match value("--format") {

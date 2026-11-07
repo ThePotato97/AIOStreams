@@ -19,9 +19,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Loudness {
     /// Windows' DD+ decoder: RF mode. TrueHD as the Reference Player (Windows doesn't decode it).
-    #[default]
     Windows,
-    /// The Reference Player: DD+ in LINE mode, TrueHD with dialnorm and no DRC.
+    /// The Reference Player: DD+ in LINE mode, TrueHD with dialnorm and no DRC. Dialogue at
+    /// -31 dBFS in both formats.
+    #[default]
     Reference,
 }
 
