@@ -147,6 +147,24 @@ export async function browserCapabilities(
       /* Keep the basic result. */
     }
   }
+  // Whether converted surround can stay surround: 5.1 AAC, asked directly.
+  let surround = false;
+  if ((audio?.channels ?? 2) > 2 && navigator.mediaCapabilities) {
+    try {
+      const result = await navigator.mediaCapabilities.decodingInfo({
+        type: 'media-source',
+        audio: {
+          contentType: 'audio/mp4; codecs="mp4a.40.2"',
+          channels: '6',
+          bitrate: 384000,
+          samplerate: 48000,
+        },
+      });
+      surround = result.supported;
+    } catch {
+      /* Stereo, as before. */
+    }
+  }
   const codecs = [vc, ac].filter(Boolean).join(',');
   return {
     video: videoSupport,
@@ -154,5 +172,6 @@ export async function browserCapabilities(
     container:
       !!mime && !!vc && !!el.canPlayType(`${mime}; codecs="${codecs}"`),
     hdr,
+    surround,
   };
 }

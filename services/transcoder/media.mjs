@@ -301,17 +301,24 @@ export function ffmpegArgs(
     );
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
-  if (policy.audio && !policy.copyAudio)
+  if (policy.audio && !policy.copyAudio) {
+    // Surround stays surround, as 5.1 AAC: browsers play it and downmix to
+    // the speakers there are. AAC's own 7.1 places its extra pair as front
+    // wides, which players map differently, so 7.1 becomes 5.1.
+    const surround =
+      request.capabilities?.surround === true &&
+      (policy.audio.channels ?? 2) > 2;
     args.push(
       '-af',
-      // Continuous where the source's audio has gaps, and downmixed to stereo
-      // without clipping, as Plex does: a plain -ac 2 peaks over 0 dBFS.
-      'aresample=async=1:ochl=stereo:rematrix_maxval=1',
+      // Continuous where the source's audio has gaps, and downmixed without
+      // clipping, as Plex does: a plain -ac 2 peaks over 0 dBFS.
+      `aresample=async=1:ochl=${surround ? '5.1' : 'stereo'}:rematrix_maxval=1`,
       '-ac',
-      '2',
+      surround ? '6' : '2',
       '-b:a',
-      '192k'
+      surround ? '384k' : '192k'
     );
+  }
   args.push(
     '-sn',
     '-map_metadata',

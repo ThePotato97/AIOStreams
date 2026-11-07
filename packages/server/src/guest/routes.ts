@@ -428,6 +428,7 @@ const capabilitySchema = z.object({
   audio: z.boolean(),
   container: z.boolean(),
   hdr: z.boolean(),
+  surround: z.boolean().optional(),
 });
 const playbackSchema = z.object({
   revision: z.string().length(64),

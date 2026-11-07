@@ -30,6 +30,8 @@ export interface GuestCapabilities {
   audio: boolean;
   container: boolean;
   hdr: boolean;
+  /** Plays 5.1 AAC: converted surround stays surround. */
+  surround?: boolean;
 }
 export interface GuestPlaybackRequest {
   revision: string;
