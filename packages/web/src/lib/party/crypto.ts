@@ -43,6 +43,20 @@ async function derive(code: string): Promise<Uint8Array> {
   return new Uint8Array(bits);
 }
 
+const GUEST = new TextEncoder().encode('aiostreams-guest-1');
+
+/**
+ * The key that lets someone watch the party in a browser. It comes from the
+ * party key, so anyone with the invite can work it out and the relay, which
+ * knows only the id, can't. The host registers it to allow browser guests.
+ */
+export function guestSecret(keys: PartyKeys): string {
+  const input = new Uint8Array(GUEST.length + keys.key.length);
+  input.set(GUEST);
+  input.set(keys.key, GUEST.length);
+  return base64url(sha256(input));
+}
+
 let last: { code: string; keys: Promise<PartyKeys> } | null = null;
 
 /** The last code's keys are kept: a preview and the join after it both need them. */
