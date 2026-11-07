@@ -13,6 +13,14 @@ fn main() {
         }
         let words = (((data[i + 2] as usize & 7) << 8) | data[i + 3] as usize) + 1;
         let end = (i + words * 2).min(data.len());
+        let strmtyp = data[i + 2] >> 6;
+        if strmtyp != 1 {
+            let key = match atmos_render::loudness::frame_compr(&data[i..end]) {
+                Some(c) => format!("compr {c}"),
+                None => "no compr".to_string(),
+            };
+            *gains.entry(key).or_default() += 1;
+        }
         if let Some(c) = atmos_render::joc::find_container(&data[i..end]) {
             if let Some(j) = c.joc {
                 *seen.entry((j.dmx, j.channels, j.objects)).or_default() += 1;

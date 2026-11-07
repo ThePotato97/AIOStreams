@@ -12,12 +12,15 @@ use std::thread::JoinHandle;
 use crate::channels::{self, Static, WAV};
 use crate::input::{Block, Feed};
 use crate::joc::{Upmix, find_container};
+use crate::loudness::{self, Loudness};
 use crate::objects::{Kind, Modes, Scene};
 use crate::render::Source;
 
 /// One access unit: an independent frame and its dependent substreams.
 struct Unit {
     samples: usize,
+    /// The access unit's first frame's compr word (None: compre = 0).
+    compr: Option<i8>,
     joc: Option<crate::joc::JocFrame>,
     oamd: Option<oamd::ObjectAudioMetadataPayload>,
 }
@@ -39,6 +42,7 @@ pub struct Eac3 {
     pcm_buf: VecDeque<f32>,
     upmix: Upmix,
     scene: Scene,
+    loudness: Loudness,
     atmos: Option<bool>,
     samples: u64,
     /// Bed channel IDs of the core channels (no JOC), None = LFE.
@@ -118,12 +122,12 @@ fn spawn_reader(mut out: std::process::ChildStdout, tx: Sender<Pcm>) -> JoinHand
 }
 
 impl Eac3 {
-    /// `ffmpeg` decodes the core. Its DRC follows Windows' DD+ decoder, which runs Dolby's
-    /// decoder in RF mode (dialogue to -20 dBFS, heavy compression): FFmpeg's nearest are
-    /// `heavy_compr` and `target_level -20`, an approximation [I].
-    pub fn new(ffmpeg: &str, modes: Modes) -> anyhow::Result<Self> {
+    /// `ffmpeg` decodes the core, with DRC and dialnorm set up for `loudness` (`loudness.rs`).
+    pub fn new(ffmpeg: &str, modes: Modes, loudness: Loudness) -> anyhow::Result<Self> {
         let mut child = Command::new(ffmpeg)
-            .args(["-v", "error", "-heavy_compr", "1", "-target_level", "-20", "-f", "eac3", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_f32le", "pipe:1"])
+            .args(["-v", "error"])
+            .args(loudness::ffmpeg_args(loudness))
+            .args(["-f", "eac3", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_f32le", "pipe:1"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -143,6 +147,7 @@ impl Eac3 {
             pcm_buf: VecDeque::new(),
             upmix: Upmix::new(),
             scene: Scene::new(modes),
+            loudness,
             atmos: None,
             samples: 0,
             core_beds: Vec::new(),
@@ -202,7 +207,7 @@ impl Eac3 {
                 if let Some(u) = self.current.take() {
                     self.units.push_back(u);
                 }
-                self.current = Some(Unit { samples: blocks * 256, joc, oamd });
+                self.current = Some(Unit { samples: blocks * 256, compr: loudness::frame_compr(&frame), joc, oamd });
             } else if let Some(u) = self.current.as_mut() {
                 if u.joc.is_none() {
                     u.joc = joc;
@@ -255,7 +260,10 @@ impl Eac3 {
                 return;
             }
             let u = self.units.pop_front().unwrap();
-            let pcm: Vec<f32> = self.pcm_buf.drain(..u.samples * channels).collect();
+            // Windows' RF offset on frames carrying compr; the decoder's clip to +/-1 (the JOC
+            // path clips its own output).
+            let factor = loudness::frame_factor(self.loudness, u.compr);
+            let pcm: Vec<f32> = self.pcm_buf.drain(..u.samples * channels).map(|v| v * factor).collect();
             let chan = |bit: u32| order.iter().position(|b| *b == bit);
             let col = |c: usize| -> Vec<f32> { (0..u.samples).map(|s| pcm[s * channels + c]).collect() };
             // Windows' decoder runs JOC only on a 3/2 core (L, R, C and a surround pair).
@@ -302,7 +310,8 @@ impl Eac3 {
                 }
                 out(Block { start: self.samples, samples: channels_out });
             } else {
-                out(Block { start: self.samples, samples: (0..channels).map(col).collect() });
+                let clip = |c: usize| col(c).into_iter().map(|v| v.clamp(-1.0, 1.0)).collect();
+                out(Block { start: self.samples, samples: (0..channels).map(clip).collect() });
             }
             self.samples += u.samples as u64;
         }

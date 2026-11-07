@@ -7,12 +7,17 @@
 //! `--modes stream` (default) renders each element in the stream's own headphone mode (Off,
 //! Near, Mid, Far; Mid where it has none), as Dolby's Reference Player does; `--modes windows`
 //! renders everything Near, as Windows does.
+//!
+//! `--loudness windows` (default) decodes DD+ as Windows does (RF mode), `--loudness reference`
+//! as the Reference Player does (LINE mode). TrueHD gets the Reference Player's dialnorm either
+//! way (Windows doesn't decode TrueHD).
 
 use std::io::{BufWriter, Read, Write};
 
 use anyhow::{Result, bail};
 use atmos_render::eac3_in::Eac3;
 use atmos_render::input::{Feed, Pipeline};
+use atmos_render::loudness::Loudness;
 use atmos_render::objects::Modes;
 use atmos_render::truehd_in::TrueHd;
 
@@ -24,9 +29,14 @@ fn main() -> Result<()> {
         Some("windows") => Modes::Windows,
         Some(other) => bail!("unsupported --modes {other} (stream or windows)"),
     };
+    let loudness = match value("--loudness") {
+        Some("windows") | None => Loudness::Windows,
+        Some("reference") => Loudness::Reference,
+        Some(other) => bail!("unsupported --loudness {other} (windows or reference)"),
+    };
     let mut feed: Box<dyn Feed> = match value("--format") {
         Some("truehd") | None => Box::new(TrueHd::new(modes)),
-        Some("eac3") => Box::new(Eac3::new(value("--ffmpeg").unwrap_or("ffmpeg"), modes)?),
+        Some("eac3") => Box::new(Eac3::new(value("--ffmpeg").unwrap_or("ffmpeg"), modes, loudness)?),
         Some(other) => bail!("unsupported --format {other}"),
     };
     let mut pipeline = Pipeline::new()?;

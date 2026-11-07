@@ -24,6 +24,8 @@ pub struct TrueHd {
     /// Where a channel presentation's channels (no OAMD) are placed.
     channel_beds: Vec<Static>,
     atmos: Option<bool>,
+    /// Dialnorm per presentation (2, 6, 8 and 16 channels), from the last major sync.
+    dialnorm: [u8; 4],
     samples: u64,
     last_len: usize,
     resyncing: bool,
@@ -76,6 +78,7 @@ impl TrueHd {
             scene: Scene::new(modes),
             channel_beds: Vec::new(),
             atmos: None,
+            dialnorm: [0; 4],
             samples: 0,
             last_len: 40,
             resyncing: true,
@@ -93,7 +96,18 @@ impl TrueHd {
             let statics = decoded.channel_labels.iter().map(|&l| label_static(l)).collect();
             self.channel_beds = channels::retyped(statics, self.scene.modes);
         }
-        let scale = 1.0 / (1u32 << 23) as f32;
+        // The Reference Player's dialnorm (both loudness settings: Windows doesn't decode TrueHD):
+        // the decoded presentation's, DN - 31 dB.
+        let dn = if self.atmos == Some(true) {
+            self.dialnorm[3]
+        } else {
+            match ch {
+                2 => self.dialnorm[0],
+                6 => self.dialnorm[1],
+                _ => self.dialnorm[2],
+            }
+        };
+        let scale = crate::loudness::truehd_dialnorm(dn) / (1u32 << 23) as f32;
         let samples: Vec<Vec<f32>> = (0..ch)
             .map(|c| (0..n).map(|s| decoded.pcm_data[s][c] as f32 * scale).collect())
             .collect();
@@ -133,6 +147,10 @@ impl Feed for TrueHd {
                 self.silence(out);
                 continue;
             };
+            if let Some(cm) = au.major_sync_info.as_ref().and_then(|ms| ms.channel_meaning.fba()) {
+                let sixteen = cm.extra_channel_meaning.as_ref().map(|e| e.sixteench_dialogue_norm).unwrap_or(0);
+                self.dialnorm = [cm.twoch_dialogue_norm, cm.sixch_dialogue_norm, cm.eightch_dialogue_norm, sixteen];
+            }
             match self.decoder.decode_presentations(&au, &ALL) {
                 Ok(decoded) => {
                     self.resyncing = false;
