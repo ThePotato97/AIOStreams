@@ -11,9 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
  && apt-get purge -y curl gnupg && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-# NVIDIA's runtime mounts its OpenCL library (driver capability "compute"),
-# which the OpenCL loader finds through this entry: GPU tone mapping uses it.
-RUN mkdir -p /etc/OpenCL/vendors && echo libnvidia-opencl.so.1 > /etc/OpenCL/vendors/nvidia.icd
 COPY server.mjs media.mjs ./
 RUN mkdir /cache && chown node:node /cache
 USER node

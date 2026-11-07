@@ -15,6 +15,7 @@ import {
   videoCodec,
   withFullDuration,
   withVideoCodec,
+  nvdecDecodes,
 } from './media.mjs';
 const exec = promisify(execFile);
 let dir, media;
@@ -230,35 +231,98 @@ test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU othe
   const meta = {
     durationMs: 60000,
     tracks: [
-      { index: 0, type: 'video', codec: 'hevc', hdr: true },
+      {
+        index: 0,
+        type: 'video',
+        codec: 'hevc',
+        pixelFormat: 'yuv420p10le',
+        transfer: 'smpte2084',
+        hdr: true,
+      },
       { index: 1, type: 'audio', codec: 'eac3', default: true },
     ],
   };
   const caps = (hdr) => ({
     capabilities: { video: true, audio: false, container: true, hdr },
   });
+  const vf = (args) => args[args.indexOf('-vf') + 1] ?? '';
   const tonemaps = (args) =>
     [
-      args.some((a) => a.includes('tonemap_opencl')) && 'opencl',
-      args.some((a) => a.includes('tonemap=hable') && a.includes('zscale')) &&
-        'cpu',
+      vf(args).includes('tonemap_cuda') &&
+        !vf(args).includes('hwupload') &&
+        'cuda',
+      vf(args).includes('hwupload,tonemap_cuda') && 'upload',
+      vf(args).includes('tonemapx=tonemap=hable') && 'cpu',
     ].filter(Boolean);
   // The browser shows it (an HDR display, or it tone-maps): only audio converts.
   const shown = ffmpegArgs('in', meta, request(caps(true)), 'out', 'nvidia');
   assert.equal(shown.policy.mode, 'audio');
   assert.equal(shown.tonemap, null);
+  assert.equal(shown.decode, null);
   assert.deepEqual(tonemaps(shown.args), []);
-  // It doesn't (Firefox on an SDR display): the video converts and tone-maps.
+  assert.ok(!shown.args.includes('-hwaccel'));
+  // It doesn't (Firefox on an SDR display): decoded, scaled and tone-mapped on
+  // the GPU, the frames staying there into NVENC (Jellyfin's chain).
   const gpu = ffmpegArgs('in', meta, request(caps(false)), 'out', 'nvidia');
   assert.equal(gpu.policy.videoReason, "HDR the browser can't show");
   assert.equal(gpu.tonemap, 'gpu');
-  assert.deepEqual(tonemaps(gpu.args), ['opencl']);
-  // The OpenCL device is set up before the input.
+  assert.equal(gpu.decode, 'gpu');
+  assert.deepEqual(tonemaps(gpu.args), ['cuda']);
+  const input = gpu.args.indexOf('-i');
   const device = gpu.args.indexOf('-init_hw_device');
-  assert.ok(device >= 0 && device < gpu.args.indexOf('-i'));
-  assert.equal(gpu.args[device + 1], 'opencl=ocl');
+  assert.ok(device >= 0 && device < input);
+  assert.equal(gpu.args[device + 1], 'cuda=cu:0');
+  const hwaccel = gpu.args.indexOf('-hwaccel');
+  assert.ok(hwaccel >= 0 && hwaccel < input);
+  assert.equal(gpu.args[hwaccel + 1], 'cuda');
+  assert.equal(
+    gpu.args[gpu.args.indexOf('-hwaccel_output_format') + 1],
+    'cuda'
+  );
+  assert.equal(
+    vf(gpu.args),
+    "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,scale_cuda=w='trunc(iw/2)*2':h='trunc(ih/2)*2',tonemap_cuda=tonemap=hable:desat=0:t=bt709:m=bt709:p=bt709:range=tv:format=yuv420p"
+  );
   assert.ok(gpu.args.includes('h264_nvenc'));
-  // The fallback keeps NVENC and tone-maps on the CPU.
+  // A height cap scales on the GPU too.
+  const capped = ffmpegArgs(
+    'in',
+    meta,
+    request({ ...caps(false), quality: '1080p' }),
+    'out',
+    'nvidia'
+  );
+  assert.match(
+    vf(capped.args),
+    /scale_cuda=w=-2:h='trunc\(min\(1080,ih\)\/2\)\*2'/
+  );
+  // HLG keeps its own transfer.
+  const hlg = ffmpegArgs(
+    'in',
+    {
+      ...meta,
+      tracks: [{ ...meta.tracks[0], transfer: 'arib-std-b67' }, meta.tracks[1]],
+    },
+    request(caps(false)),
+    'out',
+    'nvidia'
+  );
+  assert.match(vf(hlg.args), /color_trc=arib-std-b67/);
+  // First fallback: decoded on the CPU, tone-mapped on the GPU.
+  const upload = ffmpegArgs('in', meta, request(caps(false)), 'out', 'nvidia', {
+    decode: 'cpu',
+    tonemap: 'gpu',
+  });
+  assert.equal(upload.decode, 'cpu');
+  assert.equal(upload.tonemap, 'gpu');
+  assert.deepEqual(tonemaps(upload.args), ['upload']);
+  assert.ok(!upload.args.includes('-hwaccel'));
+  assert.equal(
+    upload.args[upload.args.indexOf('-init_hw_device') + 1],
+    'cuda=cu:0'
+  );
+  assert.ok(upload.args.includes('h264_nvenc'));
+  // Then NVENC with the tone map on the CPU.
   const fallback = ffmpegArgs(
     'in',
     meta,
@@ -266,6 +330,7 @@ test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU othe
     'out',
     'nvidia',
     {
+      decode: 'cpu',
       tonemap: 'cpu',
     }
   );
@@ -273,22 +338,160 @@ test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU othe
   assert.deepEqual(tonemaps(fallback.args), ['cpu']);
   assert.ok(!fallback.args.includes('-init_hw_device'));
   assert.ok(fallback.args.includes('h264_nvenc'));
+  // A GPU decode only comes with the GPU tone map.
+  const mixed = ffmpegArgs('in', meta, request(caps(false)), 'out', 'nvidia', {
+    decode: 'gpu',
+    tonemap: 'cpu',
+  });
+  assert.equal(mixed.decode, 'cpu');
   // Other encoders tone-map on the CPU.
   for (const encoder of ['cpu', 'vaapi']) {
     const other = ffmpegArgs('in', meta, request(caps(false)), 'out', encoder);
     assert.deepEqual(tonemaps(other.args), ['cpu'], encoder);
     assert.ok(!other.args.includes('-init_hw_device'), encoder);
+    assert.equal(other.decode, 'cpu', encoder);
   }
-  // SDR video never tone-maps.
+  // SDR video never tone-maps, and is still decoded on the GPU.
   const sdr = ffmpegArgs(
     'in',
-    { ...meta, tracks: [{ ...meta.tracks[0], hdr: false }, meta.tracks[1]] },
+    {
+      ...meta,
+      tracks: [
+        {
+          ...meta.tracks[0],
+          hdr: false,
+          pixelFormat: 'yuv420p',
+          transfer: 'bt709',
+        },
+        meta.tracks[1],
+      ],
+    },
     request({ ...caps(false), force: true }),
     'out',
     'nvidia'
   );
   assert.equal(sdr.tonemap, null);
+  assert.equal(sdr.decode, 'gpu');
   assert.deepEqual(tonemaps(sdr.args), []);
+  assert.equal(
+    vf(sdr.args),
+    "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,scale_cuda=w='trunc(iw/2)*2':h='trunc(ih/2)*2':format=yuv420p"
+  );
+});
+test('NVDEC: only the codecs and formats it decodes, never rotated or with burn-in', () => {
+  const v = (codec, pixelFormat) => ({ codec, pixelFormat });
+  assert.equal(nvdecDecodes(v('h264', 'yuv420p')), true);
+  assert.equal(nvdecDecodes(v('h264', 'yuv420p10le')), false);
+  assert.equal(nvdecDecodes(v('av1', 'yuv420p10le')), true);
+  assert.equal(nvdecDecodes(v('vp9', 'yuv420p12le')), false);
+  assert.equal(nvdecDecodes(v('hevc', 'yuv444p12le')), true);
+  assert.equal(nvdecDecodes(v('prores', 'yuv422p10le')), false);
+  const meta = (extra) => ({
+    durationMs: 60000,
+    tracks: [
+      {
+        index: 0,
+        type: 'video',
+        codec: 'h264',
+        pixelFormat: 'yuv420p',
+        ...extra,
+      },
+      { index: 1, type: 'audio', codec: 'aac', default: true },
+      { index: 2, type: 'subtitle', codec: 'dvd_subtitle' },
+    ],
+  });
+  const req = (extra) =>
+    request({
+      force: true,
+      capabilities: { video: true, audio: true, container: true },
+      ...extra,
+    });
+  assert.equal(ffmpegArgs('in', meta(), req(), 'out', 'nvidia').decode, 'gpu');
+  assert.equal(
+    ffmpegArgs(
+      'in',
+      meta({ pixelFormat: 'yuv420p10le' }),
+      req(),
+      'out',
+      'nvidia'
+    ).decode,
+    'cpu'
+  );
+  assert.equal(
+    ffmpegArgs('in', meta({ rotation: -90 }), req(), 'out', 'nvidia').decode,
+    'cpu'
+  );
+  assert.equal(
+    ffmpegArgs('in', meta(), req({ subtitle: 2 }), 'out', 'nvidia').decode,
+    'cpu'
+  );
+});
+test('Dolby Vision profile 5: HDR, never copied, tone-mapped through its RPU', () => {
+  const raw = (profile, compatibility, transfer) => ({
+    format: { duration: '60' },
+    streams: [
+      {
+        index: 0,
+        codec_type: 'video',
+        codec_name: 'hevc',
+        pix_fmt: 'yuv420p10le',
+        color_transfer: transfer,
+        side_data_list: [
+          {
+            side_data_type: 'DOVI configuration record',
+            dv_profile: profile,
+            dv_level: 6,
+            dv_bl_signal_compatibility_id: compatibility,
+          },
+          { side_data_type: 'Display Matrix', rotation: 0 },
+        ],
+      },
+      {
+        index: 1,
+        codec_type: 'audio',
+        codec_name: 'eac3',
+        disposition: { default: 1 },
+      },
+    ],
+  });
+  // Profile 5 carries no colour tags; profile 8.1 has an HDR10 base layer.
+  const p5 = metadata(raw(5, 0, undefined)).tracks[0];
+  assert.deepEqual(p5.dovi, { profile: 5, compatibility: 0 });
+  assert.equal(p5.hdr, true);
+  assert.equal(p5.rotation, 0);
+  const p8 = metadata(raw(8, 1, 'smpte2084')).tracks[0];
+  assert.deepEqual(p8.dovi, { profile: 8, compatibility: 1 });
+  assert.equal(p8.hdr, true);
+  const original = request({
+    capabilities: { video: true, audio: true, container: true, hdr: true },
+  });
+  // Profile 8.1 plays as HDR10 where the browser shows HDR; profile 5 can't.
+  assert.equal(
+    select(metadata(raw(8, 1, 'smpte2084')), original).copyVideo,
+    true
+  );
+  const p5policy = select(metadata(raw(5, 0, undefined)), original);
+  assert.equal(p5policy.copyVideo, false);
+  assert.equal(p5policy.videoReason, 'Dolby Vision profile 5');
+  // Every chain tone-maps it as PQ; the filters apply the RPU by default.
+  for (const [encoder, options, filter] of [
+    ['nvidia', {}, 'tonemap_cuda'],
+    ['nvidia', { decode: 'cpu' }, 'hwupload,tonemap_cuda'],
+    ['cpu', {}, 'tonemapx'],
+  ]) {
+    const { args } = ffmpegArgs(
+      'in',
+      metadata(raw(5, 0, undefined)),
+      original,
+      'out',
+      encoder,
+      options
+    );
+    const chain = args[args.indexOf('-vf') + 1];
+    assert.match(chain, /color_trc=smpte2084/, encoder);
+    assert.ok(chain.includes(filter), `${encoder} ${chain}`);
+    assert.ok(!chain.includes('apply_dovi=0'), encoder);
+  }
 });
 test('subtitles: burned in only where the browser cannot draw them', () => {
   const meta = {
@@ -595,6 +798,67 @@ test('real FFmpeg: HDR to SDR', async () => {
     { timeout: 30000 }
   );
   assert.equal(await codecOf((await dashOutput(output)).streams[0]), 'h264');
+});
+
+test('real FFmpeg: Dolby Vision profile 5 is tone-mapped through its RPU', async () => {
+  const input = new URL('./fixtures/dolby-vision-p5.mkv', import.meta.url)
+    .pathname;
+  const { stdout } = await exec('ffprobe', [
+    '-v',
+    'error',
+    '-show_format',
+    '-show_streams',
+    '-of',
+    'json',
+    input,
+  ]);
+  const meta = metadata(JSON.parse(stdout));
+  assert.deepEqual(meta.tracks[0].dovi, { profile: 5, compatibility: 0 });
+  assert.equal(meta.tracks[0].hdr, true);
+  const { args, policy } = ffmpegArgs(
+    input,
+    meta,
+    request({
+      capabilities: { video: true, audio: true, container: true, hdr: true },
+    }),
+    `${dir}/unused`
+  );
+  assert.equal(policy.copyVideo, false);
+  const chain = args[args.indexOf('-vf') + 1];
+  // The CPU chain's first frame, with the RPU applied and without: they differ
+  // only if the RPU reaches the tone map through the filters before it.
+  const frame = async (vf) =>
+    (
+      await exec(
+        'ffmpeg',
+        [
+          '-v',
+          'error',
+          '-i',
+          input,
+          '-frames:v',
+          '1',
+          '-vf',
+          vf,
+          '-f',
+          'rawvideo',
+          '-',
+        ],
+        { encoding: 'buffer', maxBuffer: 1 << 24 }
+      )
+    ).stdout;
+  const applied = await frame(chain);
+  const ignored = await frame(
+    chain.replace('tonemapx=', 'tonemapx=apply_dovi=0:')
+  );
+  assert.equal(applied.length, ignored.length);
+  let difference = 0;
+  for (let i = 0; i < applied.length; i++)
+    difference += Math.abs(applied[i] - ignored[i]);
+  assert.ok(
+    difference / applied.length > 10,
+    String(difference / applied.length)
+  );
 });
 
 test('real FFmpeg: copied video and converted audio stay in step after a seek', async () => {

@@ -51,7 +51,7 @@ environment:
   NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
 ```
 
-With NVIDIA, HDR is tone-mapped on the GPU through OpenCL (`tonemap_opencl`), which needs the `compute` capability. If that fails, the conversion runs again with the tone map on the CPU and NVENC encoding, then all on the CPU. `/health` reports where each job tone-maps (`tonemap`: `gpu`, `cpu` or null).
+With NVIDIA, conversions follow Jellyfin's chain on jellyfin-ffmpeg: NVDEC decodes (H.264, MPEG-2, VC-1, MPEG-4 and VP8 in 8-bit, VP9 and AV1 up to 10-bit, HEVC up to 12-bit and 4:4:4), `scale_cuda` scales, and HDR is tone-mapped with `tonemap_cuda`, the frames staying on the GPU into NVENC. Video NVDEC can't decode, a rotated picture or subtitle burn-in is decoded on the CPU and tone-mapped on the GPU from uploaded frames. If a conversion fails before its first segment it runs again with the video decoded on the CPU, then with the tone map on the CPU (`tonemapx`) and NVENC encoding, then all on the CPU. `/health` reports where each job decodes (`decode`) and tone-maps (`tonemap`): `gpu`, `cpu` or null. Every tone map applies a Dolby Vision RPU where there is one, which Dolby Vision profile 5 (no HDR10 base layer) needs for its colours: profile 5 is always converted, since browsers aren't asked whether they play Dolby Vision. The curve is Hable without desaturation (Jellyfin's default is BT.2390).
 
 Driver/backend availability depends on the host. Hardware configuration examples require device testing on your server.
 
@@ -59,6 +59,6 @@ Driver/backend availability depends on the host. Hardware configuration examples
 
 Run `node server.mjs` in this directory with `TRANSCODER_SECRET`, `AIOSTREAMS_INTERNAL_URL`, and optionally `CACHE_DIR` set. Set the matching `PARTY_*` variables in AIOStreams. The companion accepts only opaque source handles under the configured AIOStreams origin, not arbitrary guest URLs. All companion endpoints require the shared secret.
 
-Run `node services/transcoder/media.test.mjs` from the repository root with FFmpeg/ffprobe installed. Tests generate local fixtures, start local HTTP servers, and verify actual remuxing, audio/video conversion, seek generations, subtitle extraction/burn-in, HDR tone mapping, job reuse, capacity, and GPU-to-CPU fallback. Guest authorization tests are in `packages/server/src/guest`.
+Run `node services/transcoder/media.test.mjs` from the repository root with jellyfin-ffmpeg's `ffmpeg`/`ffprobe` on the PATH (the CPU tone map is its `tonemapx`), or inside the image. Tests generate local fixtures, start local HTTP servers, and verify actual remuxing, audio/video conversion, seek generations, subtitle extraction/burn-in, HDR tone mapping, Dolby Vision profile 5 through its RPU (`fixtures/`), job reuse, capacity, and GPU-to-CPU fallback. Guest authorization tests are in `packages/server/src/guest`.
 
 Authenticated `GET /health` reports active jobs, selected encoder, progress, viewers, and generic failures. Source URLs, credentials, and invite secrets are never included in this response or FFmpeg error messages. Configure your reverse proxy to redact query strings for `/party/guest/media` and `/party/guest/subtitle`: media elements require scoped session credentials in those URLs. The companion is single-instance and uses ephemeral jobs; distributed recovery is outside this version.

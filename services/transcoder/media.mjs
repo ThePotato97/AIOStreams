@@ -35,7 +35,15 @@ export function metadata(raw) {
         bitrate: Number(s.bit_rate || 0),
         channels: s.channels,
         sampleRate: Number(s.sample_rate || 48000),
-        hdr: ['smpte2084', 'arib-std-b67'].includes(s.color_transfer),
+        pixelFormat: s.pix_fmt,
+        transfer: s.color_transfer,
+        rotation: rotation(s),
+        dovi: dovi(s),
+        // Dolby Vision profile 5 has no HDR10 base layer (and often no colour
+        // tags): HDR all the same, whose colours only its RPU makes right.
+        hdr:
+          ['smpte2084', 'arib-std-b67'].includes(s.color_transfer) ||
+          dovi(s)?.profile === 5,
         title:
           s.tags?.title ?? s.tags?.language ?? `${s.codec_type} ${s.index}`,
         language: s.tags?.language,
@@ -78,6 +86,25 @@ export function duration(raw) {
       );
   return Number.isFinite(best) && best > 0 ? Math.round(best * 1000) : 0;
 }
+/** The stream's Dolby Vision configuration record, if any. */
+function dovi(s) {
+  const record = (s.side_data_list ?? []).find(
+    (d) => d.side_data_type === 'DOVI configuration record'
+  );
+  return record
+    ? {
+        profile: Number(record.dv_profile),
+        compatibility: Number(record.dv_bl_signal_compatibility_id),
+      }
+    : undefined;
+}
+/** Degrees the display matrix rotates the picture by, 0 without one. */
+function rotation(s) {
+  const matrix = (s.side_data_list ?? []).find(
+    (d) => d.side_data_type === 'Display Matrix'
+  );
+  return Number(matrix?.rotation) || 0;
+}
 function rate(value) {
   const [a, b = 1] = String(value ?? '0')
     .split('/')
@@ -117,7 +144,10 @@ export function select(meta, request) {
     original &&
     !request.force &&
     caps.video === true &&
-    (!video.hdr || caps.hdr === true);
+    (!video.hdr || caps.hdr === true) &&
+    // No browser capability for Dolby Vision is reported: profile 5 shown
+    // as HDR10 has the wrong colours, so it is always converted.
+    video.dovi?.profile !== 5;
   const copyAudio =
     !!audio && original && !request.force && caps.audio === true;
   const direct =
@@ -141,7 +171,9 @@ export function select(meta, request) {
             ? 'retry after failed playback'
             : caps.video !== true
               ? "browser can't decode the video"
-              : "HDR the browser can't show";
+              : video.dovi?.profile === 5
+                ? 'Dolby Vision profile 5'
+                : "HDR the browser can't show";
   const audioReason =
     !audio || copyAudio
       ? null
@@ -168,15 +200,38 @@ export function select(meta, request) {
     copyAudio,
   };
 }
-/** Tone-maps HDR to SDR in floating point on the CPU. */
-const CPU_TONEMAP =
-  'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
-/** The same tone map on the GPU, through OpenCL, from 10-bit frames. */
-const OPENCL_TONEMAP =
-  'format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,hwdownload,format=nv12';
+/*
+ * Video conversion follows Jellyfin's chains (EncodingHelper.cs) on
+ * jellyfin-ffmpeg: on NVIDIA, NVDEC decode, scale_cuda and tonemap_cuda with
+ * the frames kept on the GPU into NVENC; tonemap_cuda on uploaded frames
+ * where NVDEC can't decode; tonemapx on the CPU otherwise. Jellyfin's
+ * filters apply a Dolby Vision RPU (apply_dovi, on by default), which is
+ * what gives profile 5 its colours. The curve is Hable without
+ * desaturation, as before (Jellyfin's default is BT.2390).
+ */
+const TONEMAP = 'tonemap=hable:desat=0:t=bt709:m=bt709:p=bt709:range=tv';
+/** Jellyfin's GetInputHdrParam: the source's HDR colour tags, made explicit. */
+const hdrParams = (video) =>
+  `setparams=color_primaries=bt2020:color_trc=${video.transfer === 'arib-std-b67' ? 'arib-std-b67' : 'smpte2084'}:colorspace=bt2020nc`;
+const SDR_PARAMS =
+  'setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709';
+/** Jellyfin's GetNvdecVidDecoder: the codecs and formats NVDEC decodes. */
+export function nvdecDecodes(video) {
+  const f = video?.pixelFormat;
+  const b8 = f === 'yuv420p' || f === 'yuvj420p';
+  const b10 = b8 || f === 'yuv420p10le';
+  const b12 =
+    b10 || ['yuv444p', 'yuv444p10le', 'yuv420p12le', 'yuv444p12le'].includes(f);
+  const codec = video?.codec;
+  if (['h264', 'mpeg2video', 'vc1', 'mpeg4', 'vp8'].includes(codec)) return b8;
+  if (['vp9', 'av1'].includes(codec)) return b10;
+  if (codec === 'hevc') return b12;
+  return false;
+}
 /**
- * `options.tonemap`: 'gpu' tone-maps HDR on the NVIDIA GPU (OpenCL) when
- * encoding with it; 'cpu' always uses the CPU.
+ * `options.decode`: 'gpu' decodes on the NVIDIA GPU where it can, 'cpu'
+ * never. `options.tonemap`: 'gpu' tone-maps HDR on the NVIDIA GPU, 'cpu' on
+ * the CPU. Both only apply when encoding with NVENC.
  */
 export function ffmpegArgs(
   input,
@@ -205,8 +260,28 @@ export function ffmpegArgs(
     (options.tonemap ?? 'gpu') === 'gpu' &&
     !policy.copyVideo &&
     !!policy.video?.hdr;
-  if (gpuTonemap)
-    args.push('-init_hw_device', 'opencl=ocl', '-filter_hw_device', 'ocl');
+  // Frames stay on the GPU from NVDEC to NVENC. Not with burn-in (its
+  // overlay is on the CPU) nor a rotated picture (FFmpeg's autorotate is on
+  // the CPU), and only with HDR tone-mapped on the GPU too.
+  const gpuDecode =
+    encoder === 'nvidia' &&
+    (options.decode ?? 'gpu') === 'gpu' &&
+    !policy.copyVideo &&
+    !policy.burn &&
+    !policy.video?.rotation &&
+    nvdecDecodes(policy.video) &&
+    (!policy.video?.hdr || gpuTonemap);
+  if (gpuTonemap || gpuDecode)
+    args.push('-init_hw_device', 'cuda=cu:0', '-filter_hw_device', 'cu');
+  if (gpuDecode)
+    args.push(
+      '-hwaccel',
+      'cuda',
+      '-hwaccel_device',
+      'cu',
+      '-hwaccel_output_format',
+      'cuda'
+    );
   // Seek before input for ordinary streams. Burn-in retains the source timeline.
   if (!policy.burn) args.push('-ss', String(offset));
   // With the video copied, the audio starts at the same keyframe rather than
@@ -253,16 +328,40 @@ export function ffmpegArgs(
     // Browsers and Safari's player expect HEVC tagged hvc1.
     if (policy.video?.codec === 'hevc') args.push('-tag:v', 'hvc1');
   } else {
-    if (policy.video?.hdr)
-      filters.push(gpuTonemap ? OPENCL_TONEMAP : CPU_TONEMAP);
     const height =
       request.quality === '720p'
         ? 720
         : request.quality === '1080p'
           ? 1080
           : null;
-    if (height) filters.push(`scale=w=-2:h='min(${height},ih)'`);
-    filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2', 'format=yuv420p');
+    const hdr = !!policy.video?.hdr;
+    if (gpuDecode) {
+      // Jellyfin's GetNvidiaVidFiltersPrefered with NVDEC and NVENC.
+      const size = height
+        ? `w=-2:h='trunc(min(${height},ih)/2)*2'`
+        : `w='trunc(iw/2)*2':h='trunc(ih/2)*2'`;
+      // HEVC range extensions (4:4:4, 12-bit) go to tonemap_cuda as P010.
+      const rext = !['yuv420p', 'yuvj420p', 'yuv420p10le'].includes(
+        policy.video.pixelFormat
+      );
+      filters.push(
+        hdr ? hdrParams(policy.video) : SDR_PARAMS,
+        `scale_cuda=${size}${hdr ? (rext ? ':format=p010' : '') : ':format=yuv420p'}`
+      );
+      if (hdr) filters.push(`tonemap_cuda=${TONEMAP}:format=yuv420p`);
+    } else {
+      if (hdr) filters.push(hdrParams(policy.video));
+      // Scaled before the tone map, as Jellyfin does: fewer pixels to map.
+      if (height) filters.push(`scale=w=-2:h='min(${height},ih)'`);
+      if (hdr)
+        filters.push(
+          gpuTonemap
+            ? // Jellyfin's chain for frames decoded on the CPU.
+              `format=p010le,hwupload,tonemap_cuda=${TONEMAP}:format=yuv420p,hwdownload`
+            : `tonemapx=${TONEMAP}:format=yuv420p`
+        );
+      filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2', 'format=yuv420p');
+    }
     if (hw) filters.push('hwupload');
     if (policy.burn && !['ass', 'ssa'].includes(policy.subtitle.codec)) {
       args.push(
@@ -367,14 +466,16 @@ export function ffmpegArgs(
     'chunk-$RepresentationID$-$Number%05d$.m4s',
     `${output}/manifest.mpd`
   );
-  // Where HDR was tone-mapped, for the fallback and /health.
+  // Where the video was decoded and HDR tone-mapped, for the fallback and
+  // /health.
   const tonemap =
     policy.video?.hdr && !policy.copyVideo
       ? gpuTonemap
         ? 'gpu'
         : 'cpu'
       : null;
-  return { args, offsetMs: offset * 1000, policy, tonemap };
+  const decode = policy.copyVideo ? null : gpuDecode ? 'gpu' : 'cpu';
+  return { args, offsetMs: offset * 1000, policy, tonemap, decode };
 }
 
 /** The boxes in an ISO BMFF byte range: [type, start of content, end]. */
