@@ -34,6 +34,11 @@ export interface GuestCapabilities {
   surround?: boolean;
   /** Plays FLAC up to 7.1: converted surround is lossless, at its own layout. */
   lossless?: boolean;
+  /**
+   * Listening on headphones: TrueHD and E-AC-3 (Atmos or not) are rendered to binaural stereo
+   * on the server, by Dolby Atmos for Headphones' renderer.
+   */
+  binaural?: boolean;
   /** Subtitle formats the browser draws itself, rather than burned in. */
   subtitles?: ('ass' | 'pgs')[];
 }
@@ -59,6 +64,8 @@ export interface GuestPlayback {
   subtitleUrl?: string;
   /** How the subtitle is served: WebVTT, ASS for JASSUB, PGS for libpgs. */
   subtitleFormat?: 'vtt' | 'ass' | 'sup';
+  /** The audio was rendered to binaural on the server: the player adds no virtualiser. */
+  binaural?: boolean;
   /** Fonts attached to the file, for an ASS subtitle. */
   fontUrls?: string[];
 }

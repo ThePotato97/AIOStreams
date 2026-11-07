@@ -3,7 +3,7 @@ import type React from 'react';
 import { checkSubtitleFile, readSubtitleFile } from '../subtitles/files';
 import { toast } from 'sonner';
 import { subtitleLine } from '../subtitles/style';
-import { corsFor, virtualSurround } from './headphones';
+import { corsFor, setServerBinaural, virtualSurround } from './headphones';
 import { ownTrackLabel } from './controller';
 import type {
   EngineFactory,
@@ -238,6 +238,7 @@ export function videoEngine(
         onFullscreen();
         el.autoplay = !next.paused;
         if (next.paused) set({ paused: true });
+        setServerBinaural(el, !!next.binaural);
         surround ??= virtualSurround(el);
         if (attach) attach(el, next.url);
         else el.src = next.url;

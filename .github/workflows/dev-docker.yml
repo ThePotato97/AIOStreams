@@ -99,6 +99,7 @@ jobs:
       image: aiostreams-transcoder
       registry: ${{ needs.setup.outputs.registry }}
       tags: ${{ needs.setup.outputs.tag }}
-      context: services/transcoder
+      # services/, not services/transcoder: the image builds atmos-render too.
+      context: services
       dockerfile: services/transcoder/Dockerfile
       cache-scope: aiostreams-transcoder-

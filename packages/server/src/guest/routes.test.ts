@@ -27,6 +27,8 @@ const fixture = vi.hoisted(() => ({
   internal: '',
   hits: { public: 0, internal: 0 },
   probeInputs: [] as string[],
+  /** The capabilities each prepare forwarded to the transcoder. */
+  prepareCapabilities: [] as Record<string, unknown>[],
   sourcePath: '/media/private-token',
   probes: 0,
   probeFailures: 0,
@@ -34,7 +36,11 @@ const fixture = vi.hoisted(() => ({
   scopes: [] as (string | undefined)[],
   chain: { hits: 0, expireA: false, thenTo: '/media/B' },
   // What the transcoder prepares, and how it sends a segment.
-  prepared: { mode: 'direct' } as { mode: string; id?: string },
+  prepared: { mode: 'direct' } as {
+    mode: string;
+    id?: string;
+    binaural?: boolean;
+  },
   segment: 'slow' as 'slow' | 'silent',
   segmentAborts: 0,
   // What the transcoder answers: a full one, released jobs, extraction.
@@ -297,6 +303,13 @@ function spyFetch() {
       });
     }
     if (url.endsWith('/prepare')) {
+      fixture.prepareCapabilities.push(
+        (
+          JSON.parse(String(init?.body ?? '{}')) as {
+            request?: { capabilities?: Record<string, unknown> };
+          }
+        ).request?.capabilities ?? {}
+      );
       if (fixture.full)
         return Response.json(
           {
@@ -810,6 +823,37 @@ describe('guest playback authorization', () => {
   });
 });
 describe('converted media', () => {
+  it('asks for binaural rendering and says when the transcoder did it', async () => {
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const ask = (binaural: boolean) =>
+      api('/own/prepare', token, {
+        revision,
+        quality: 'original',
+        positionMs: 0,
+        capabilities: {
+          video: true,
+          audio: false,
+          container: true,
+          hdr: false,
+          binaural,
+        },
+      });
+    fixture.prepared = { mode: 'audio', id: 'job-binaural', binaural: true };
+    const rendered = (await (await ask(true)).json()) as { binaural?: boolean };
+    expect(fixture.prepareCapabilities.at(-1)?.binaural).toBe(true);
+    expect(rendered.binaural).toBe(true);
+    // the transcoder didn't render it (a fallback, or a track it doesn't read)
+    fixture.prepared = { mode: 'audio', id: 'job-plain' };
+    const plain = (await (await ask(true)).json()) as { binaural?: boolean };
+    expect(plain.binaural).toBeUndefined();
+  });
   async function ownSegment() {
     fixture.prepared = { mode: 'audio', id: 'job-1' };
     const opened = await api('/own/open', 'host-token', {

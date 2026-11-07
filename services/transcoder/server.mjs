@@ -9,6 +9,9 @@ import { pathToFileURL } from 'node:url';
 import {
   metadata,
   ffmpegArgs,
+  demuxArgs,
+  rendererArgs,
+  firstPacketTime,
   select,
   manifestReady,
   manifestStart,
@@ -164,6 +167,7 @@ const running = (child) =>
  * writes the last segment and playlist while it shuts down.
  */
 export function stop(job) {
+  killHelpers(job);
   const child = job.child;
   if (!running(child)) return Promise.resolve();
   const exited = new Promise((resolve) => child.once('exit', resolve));
@@ -183,19 +187,117 @@ export async function drop(job) {
   await stop(job);
   await removeDir(job.dir);
 }
+/** How long a binaural conversion waits for its first audio packet. */
+const AUDIO_START_TIMEOUT_MS = 60_000;
+/** Stops a binaural conversion's demuxer and renderer. */
+function killHelpers(job) {
+  const helpers = job.helpers;
+  if (!helpers) return;
+  job.helpers = null;
+  helpers.stopping = true;
+  for (const c of [helpers.demux, helpers.renderer])
+    if (running(c)) c.kill('SIGKILL');
+}
 /**
- * Starts FFmpeg for a job. A GPU conversion that fails before its first
+ * Starts a job's conversion. A GPU conversion that fails before its first
  * segment runs again with the video decoded on the CPU, then with the tone
- * map on the CPU too (an HDR source), then all on the CPU.
+ * map on the CPU too (an HDR source), then all on the CPU. A binaural one
+ * (the audio rendered to headphones by atmos-render) runs as three processes:
+ * FFmpeg demuxing the audio track, atmos-render, and the converting FFmpeg,
+ * which reads the rendered audio on pipe:4 from the first audio packet's
+ * timestamp. If its demuxer or renderer fails before the first segment, the
+ * conversion runs again without binaural rendering, and the player's own
+ * virtualiser takes over (`binaural` in the response says which).
  */
 function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
+  killHelpers(job);
+  const policy = select(job.meta, job.request);
+  job.binaural = policy.binaural;
+  if (!policy.binaural) {
+    startMain(job, encoder, gpu, {});
+    return;
+  }
+  const offset =
+    Math.floor(Math.max(0, job.request.positionMs ?? 0) / 1000 / 4) * 4;
+  const demux = spawn('ffmpeg', demuxArgs(job.input, policy, offset), {
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+  });
+  const renderer = spawn(
+    process.env.ATMOS_RENDER ?? 'atmos-render',
+    rendererArgs(policy),
+    {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }
+  );
+  const helpers = { demux, renderer, stopping: false, failed: false };
+  job.helpers = helpers;
+  // Do not log their stderr: FFmpeg's can contain credentials.
+  demux.stderr.resume();
+  renderer.stderr.resume();
+  renderer.stdin.on('error', () => {});
+  demux.stdout.pipe(renderer.stdin);
+  const fail = () => {
+    if (helpers.stopping || helpers.failed || job.helpers !== helpers) return;
+    helpers.failed = true;
+    if (!job.ready) void withoutBinaural(job, encoder, gpu);
+  };
+  for (const c of [demux, renderer]) {
+    c.on('error', fail);
+    c.on('exit', (code) => {
+      if (code !== 0) fail();
+    });
+  }
+  // Rendered audio is held until the converting FFmpeg starts.
+  let held = [];
+  const hold = (chunk) => held.push(chunk);
+  renderer.stdout.on('data', hold);
+  const timer = setTimeout(fail, AUDIO_START_TIMEOUT_MS);
+  timer.unref();
+  let text = '';
+  let main = null;
+  demux.stdio[3].on('data', (chunk) => {
+    if (main || helpers.stopping) return; // drained, so the demuxer never blocks on it
+    text += chunk;
+    const audioStart = firstPacketTime(text);
+    if (audioStart == null) return;
+    clearTimeout(timer);
+    main = startMain(job, encoder, gpu, { audioStart });
+    const sink = main.stdio[4];
+    sink.on('error', () => {});
+    renderer.stdout.off('data', hold);
+    for (const chunk of held) sink.write(chunk);
+    held = [];
+    renderer.stdout.pipe(sink);
+  });
+}
+/** Runs a binaural conversion again with the audio converted as usual. */
+async function withoutBinaural(job, encoder, gpu) {
+  const main = job.child;
+  job.child = null;
+  killHelpers(job);
+  if (running(main)) {
+    main.kill('SIGCONT');
+    main.kill('SIGKILL');
+    await new Promise((resolve) => main.once('exit', resolve));
+  }
+  job.request = {
+    ...job.request,
+    capabilities: { ...job.request.capabilities, binaural: false },
+  };
+  await rm(job.dir, { recursive: true, force: true });
+  await mkdir(job.dir, { recursive: true });
+  if (!jobs.has(job.id)) return;
+  start(job, encoder, gpu);
+}
+/** Starts the converting FFmpeg; `extra` adds to `ffmpegArgs`' options. */
+function startMain(job, encoder, gpu, extra) {
   const command = ffmpegArgs(
     job.input,
     job.meta,
     job.request,
     job.dir,
     encoder,
-    gpu
+    { ...gpu, ...extra }
   );
   job.offsetMs = command.offsetMs;
   job.mode = command.policy.mode;
@@ -209,7 +311,9 @@ function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
   const args = [...command.args];
   args.splice(args.length - 1, 0, '-progress', 'pipe:3');
   const child = spawn('ffmpeg', args, {
-    stdio: ['ignore', 'ignore', 'pipe', 'pipe'],
+    stdio: command.policy.binaural
+      ? ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
+      : ['ignore', 'ignore', 'pipe', 'pipe'],
   });
   job.child = child;
   let progress = '';
@@ -245,11 +349,15 @@ function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
       else if (command.tonemap === 'gpu')
         start(job, encoder, { decode: 'cpu', tonemap: 'cpu' });
       else start(job, 'cpu');
-    } else if (code !== 0) job.error = 'Conversion failed';
+    } else if (code !== 0 && !job.ready && job.binaural)
+      // all on the CPU and still failing: without binaural rendering
+      await withoutBinaural(job, encoder, gpu);
+    else if (code !== 0) job.error = 'Conversion failed';
     // A clean exit well before the end: the source stopped sending.
     else if (stoppedEarly(job)) job.error = 'The source stopped before the end';
     else job.finished = true;
   });
+  return child;
 }
 /**
  * Starts writing a file with FFmpeg, once per key. Until it's written the
@@ -346,6 +454,7 @@ async function prepare(body) {
     policy.copyVideo,
     policy.copyAudio,
     policy.burn,
+    policy.binaural,
   ]);
   const positionMs = request.positionMs;
   let job = [...jobs.values()].find(
@@ -433,6 +542,9 @@ async function prepare(body) {
     mode: job.mode,
     offsetMs: 0,
     startMs: job.offsetMs,
+    // Whether the audio was rendered to binaural here: the player's own
+    // virtualiser stays off for it.
+    binaural: !!job.binaural,
     meta,
   };
 }
@@ -463,9 +575,11 @@ export function createServer() {
             encoder: j.encoder,
             tonemap: j.tonemap,
             decode: j.decode,
+            binaural: !!j.binaural,
             viewers: j.viewers.size,
             producedMs: j.producedMs,
             speed: j.speed,
+            finished: !!j.finished,
             error: j.error,
           })),
         });

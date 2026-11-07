@@ -111,6 +111,82 @@ function rate(value) {
     .map(Number);
   return b && Number.isFinite(a / b) ? a / b : 0;
 }
+/** Audio codecs atmos-render reads, and the raw format FFmpeg hands them over in. */
+export const BINAURAL_CODECS = { truehd: 'truehd', eac3: 'eac3' };
+/**
+ * The demuxing FFmpeg of a binaural conversion: the source's audio track as a raw elementary
+ * stream on pipe:1 for atmos-render, and the same packets' timestamps (framemd5, flushed per
+ * packet) on pipe:3, whose first gives where the rendered audio starts.
+ */
+export function demuxArgs(input, policy, offset) {
+  const format = BINAURAL_CODECS[policy.audio.codec];
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-nostdin',
+    '-ss',
+    String(offset),
+    ...(/^https?:/.test(input)
+      ? [
+          '-reconnect',
+          '1',
+          '-reconnect_streamed',
+          '1',
+          '-reconnect_on_network_error',
+          '1',
+          '-reconnect_delay_max',
+          '30',
+        ]
+      : []),
+    '-copyts',
+    '-i',
+    input,
+    '-map',
+    `0:${policy.audio.index}`,
+    '-c',
+    'copy',
+    '-f',
+    format,
+    'pipe:1',
+    '-map',
+    `0:${policy.audio.index}`,
+    '-c',
+    'copy',
+    '-flush_packets',
+    '1',
+    '-f',
+    'framemd5',
+    'pipe:3',
+  ];
+}
+/** atmos-render's arguments for a policy's audio track. */
+export function rendererArgs(policy) {
+  const format = BINAURAL_CODECS[policy.audio.codec];
+  return [
+    '--format',
+    format,
+    ...(format === 'eac3' ? ['--ffmpeg', 'ffmpeg'] : []),
+  ];
+}
+/**
+ * The first packet's timestamp in seconds, from framemd5 output (a "#tb 0: 1/1000" header,
+ * then "0, dts, pts, duration, size, hash" lines); null until there is one.
+ */
+export function firstPacketTime(text) {
+  let tb = null;
+  for (const line of text.split('\n')) {
+    const header = /^#tb \d+: (\d+)\/(\d+)/.exec(line);
+    if (header) tb = Number(header[1]) / Number(header[2]);
+    else if (tb && /^\d+,/.test(line)) {
+      const fields = line.split(',').map((f) => f.trim());
+      if (fields.length < 6) return null;
+      const pts = Number(fields[2]);
+      return Number.isFinite(pts) ? pts * tb : null;
+    }
+  }
+  return null;
+}
 export function select(meta, request) {
   const video = meta.tracks.find((t) => t.type === 'video');
   const audios = meta.tracks.filter((t) => t.type === 'audio');
@@ -148,8 +224,15 @@ export function select(meta, request) {
     // No browser capability for Dolby Vision is reported: profile 5 shown
     // as HDR10 has the wrong colours, so it is always converted.
     video.dovi?.profile !== 5;
+  // Rendered to binaural here (atmos-render, Dolby Atmos for Headphones' renderer) where the
+  // player asks for it and the track is one the renderer reads: TrueHD or E-AC-3 at 48 kHz.
+  const binaural =
+    !!audio &&
+    caps.binaural === true &&
+    BINAURAL_CODECS[audio.codec] !== undefined &&
+    (audio.sampleRate ?? 48000) === 48000;
   const copyAudio =
-    !!audio && original && !request.force && caps.audio === true;
+    !!audio && !binaural && original && !request.force && caps.audio === true;
   const direct =
     original &&
     !request.force &&
@@ -177,11 +260,13 @@ export function select(meta, request) {
   const audioReason =
     !audio || copyAudio
       ? null
-      : !original
-        ? `quality ${request.quality}`
-        : request.force
-          ? 'retry after failed playback'
-          : "browser can't decode the audio";
+      : binaural
+        ? 'binaural rendering'
+        : !original
+          ? `quality ${request.quality}`
+          : request.force
+            ? 'retry after failed playback'
+            : "browser can't decode the audio";
   return {
     videoReason,
     audioReason,
@@ -198,6 +283,7 @@ export function select(meta, request) {
     burn,
     copyVideo,
     copyAudio,
+    binaural,
   };
 }
 /*
@@ -301,6 +387,21 @@ export function ffmpegArgs(
       '30'
     );
   args.push('-i', input);
+  // A binaural conversion's audio: atmos-render's 48 kHz float stereo on pipe:4, starting at the
+  // source timestamp of the first audio packet (options.audioStart, seconds).
+  if (policy.binaural)
+    args.push(
+      '-f',
+      'f32le',
+      '-ar',
+      '48000',
+      '-ch_layout',
+      'stereo',
+      '-itsoffset',
+      String(options.audioStart ?? offset),
+      '-i',
+      'pipe:4'
+    );
   const filters = [];
   if (policy.burn) {
     // FFmpeg's subtitle decoder feeds an overlay without
@@ -322,7 +423,8 @@ export function ffmpegArgs(
       ? '[vsub]'
       : `0:${policy.video.index}`
   );
-  if (policy.audio) args.push('-map', `0:${policy.audio.index}`);
+  if (policy.audio)
+    args.push('-map', policy.binaural ? '1:a' : `0:${policy.audio.index}`);
   if (policy.copyVideo) {
     args.push('-c:v', 'copy');
     // Browsers and Safari's player expect HEVC tagged hvc1.
@@ -400,7 +502,14 @@ export function ffmpegArgs(
     );
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
-  if (policy.audio && !policy.copyAudio) {
+  if (policy.binaural) {
+    // Already stereo for headphones: FLAC where the browser plays it, else AAC.
+    args.push(
+      ...(request.capabilities?.lossless === true
+        ? ['-c:a', 'flac', '-sample_fmt', 's32']
+        : ['-b:a', '192k'])
+    );
+  } else if (policy.audio && !policy.copyAudio) {
     // Surround stays surround where wanted (a surround output, or the
     // player's virtual surround for headphones): lossless FLAC at the
     // source's layout, up to 7.1, where the browser plays it, else 5.1 AAC
@@ -475,7 +584,7 @@ export function ffmpegArgs(
         : 'cpu'
       : null;
   const decode = policy.copyVideo ? null : gpuDecode ? 'gpu' : 'cpu';
-  return { args, offsetMs: offset * 1000, policy, tonemap, decode };
+  return { args, offsetMs: offset * 1000, offset, policy, tonemap, decode };
 }
 
 /** The boxes in an ISO BMFF byte range: [type, start of content, end]. */

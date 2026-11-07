@@ -220,10 +220,24 @@ function apply(graph: Graph, on: boolean) {
  * The graph is made the first time it's turned on, and then stays: an
  * element's sound can't leave Web Audio once it's in.
  */
+/** Elements whose audio the server already rendered for headphones, and their updates. */
+const rendered = new WeakMap<HTMLMediaElement, boolean>();
+const updates = new WeakMap<HTMLMediaElement, () => void>();
+
+/**
+ * Says whether an element's current audio was rendered to binaural on the server: the virtualiser
+ * stays off for it (it would put the binaural pair through an HRTF again).
+ */
+export function setServerBinaural(el: HTMLMediaElement, binaural: boolean) {
+  rendered.set(el, binaural);
+  updates.get(el)?.();
+}
+
 export function virtualSurround(el: HTMLMediaElement): () => void {
-  let on = false;
+  let setting = false;
   let building: Promise<void> | null = null;
   const update = () => {
+    const on = setting && !rendered.get(el);
     const graph = graphs.get(el);
     if (graph) return apply(graph, on);
     if (!on || building || !audible(el) || typeof AudioContext === 'undefined')
@@ -232,7 +246,8 @@ export function virtualSurround(el: HTMLMediaElement): () => void {
       .then((made) => {
         graphs.set(el, made);
         live.add(made);
-        apply(made, on);
+        // as things stand once it's made
+        apply(made, setting && !rendered.get(el));
       })
       .catch(() => {})
       .finally(() => {
@@ -241,12 +256,14 @@ export function virtualSurround(el: HTMLMediaElement): () => void {
   };
   // Sound joins Web Audio only once a source it can hear is playing.
   el.addEventListener('loadedmetadata', update);
+  updates.set(el, update);
   const unwatch = watchHeadphones((now) => {
-    on = now;
+    setting = now;
     update();
   });
   return () => {
     unwatch();
+    updates.delete(el);
     el.removeEventListener('loadedmetadata', update);
   };
 }

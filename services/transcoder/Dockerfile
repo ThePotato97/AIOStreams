@@ -1,3 +1,9 @@
+# atmos-render: Dolby Atmos for Headphones' renderer, for binaural conversions.
+FROM rust:1-bookworm AS atmos-render
+WORKDIR /src
+COPY atmos-render ./
+RUN cargo build --release --locked && strip target/release/atmos-render
+
 FROM node:24-bookworm-slim
 # jellyfin-ffmpeg, Jellyfin's FFmpeg build (CUDA/NVENC, VA-API, QSV, OpenCL and Vulkan, with
 # tonemap_cuda/tonemap_opencl and libplacebo), from Jellyfin's repository.
@@ -11,7 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
  && apt-get purge -y curl gnupg && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY server.mjs media.mjs ./
+COPY --from=atmos-render /src/target/release/atmos-render /usr/local/bin/atmos-render
+COPY transcoder/server.mjs transcoder/media.mjs ./
 RUN mkdir /cache && chown node:node /cache
 USER node
 ENV PORT=3100 CACHE_DIR=/cache

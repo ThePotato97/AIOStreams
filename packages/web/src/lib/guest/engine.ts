@@ -402,6 +402,7 @@ export function guestEngine(
           startMs: Math.max(0, target - result.offsetMs),
           paused,
           subtitles: [],
+          binaural: !!result.binaural,
         });
         if (result.subtitleUrl)
           void attachSubtitle(result, at, controller.signal);
@@ -454,13 +455,18 @@ export function guestEngine(
       unwatch ??= watchHeadphones((now) => {
         headphones = now;
         if (askedHeadphones === null || askedHeadphones === now) return;
-        const channels = current().media.tracks.find(
+        const track = current().media.tracks.find(
           (t) => t.type === 'audio' && t.index === audio
-        )?.channels;
+        );
         const converted = preparing
           ? true
           : playback?.mode === 'audio' || playback?.mode === 'video';
-        if (converted && (channels ?? 2) > 2)
+        // The server renders TrueHD and E-AC-3 to binaural for headphones: turning them on asks
+        // for that, and turning them off leaves binaural audio that has to be converted again.
+        const binaural =
+          (now && (track?.codec === 'truehd' || track?.codec === 'eac3')) ||
+          (!now && !!playback?.binaural);
+        if ((converted && (track?.channels ?? 2) > 2) || binaural)
           void prepare(preparing ? target : position());
       });
     };

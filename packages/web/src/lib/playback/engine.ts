@@ -38,6 +38,8 @@ export interface EngineFile {
   prefs: PlaybackPrefs;
   subtitles: ServerSubtitle[];
   subtitleDelayMs: number;
+  /** The audio was rendered to binaural on the server: no virtualiser is added here. */
+  binaural?: boolean;
   /** Null for an engine that keeps the device's own. */
   volume: { volume: number; muted: boolean } | null;
 }

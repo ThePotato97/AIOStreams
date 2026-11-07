@@ -28,7 +28,7 @@ FFmpeg jobs are shared when source, selected tracks, encoding profile and availa
 
 ## Hardware encoding
 
-CPU (`TRANSCODER_ENCODER=cpu`) is the default. The image includes Debian FFmpeg with libx264, libass, zscale and hardware encoder backends. Unsupported hardware initialization falls back to CPU before playback begins.
+CPU (`TRANSCODER_ENCODER=cpu`) is the default. The image includes jellyfin-ffmpeg (libx264, libass, zscale, tonemapx and hardware encoder backends). Unsupported hardware initialization falls back to CPU before playback begins.
 
 For Intel/AMD VAAPI, set `TRANSCODER_ENCODER=vaapi` and add to the transcoder service:
 
@@ -53,12 +53,16 @@ environment:
 
 With NVIDIA, conversions follow Jellyfin's chain on jellyfin-ffmpeg: NVDEC decodes (H.264, MPEG-2, VC-1, MPEG-4 and VP8 in 8-bit, VP9 and AV1 up to 10-bit, HEVC up to 12-bit and 4:4:4), `scale_cuda` scales, and HDR is tone-mapped with `tonemap_cuda`, the frames staying on the GPU into NVENC. Video NVDEC can't decode, a rotated picture or subtitle burn-in is decoded on the CPU and tone-mapped on the GPU from uploaded frames. If a conversion fails before its first segment it runs again with the video decoded on the CPU, then with the tone map on the CPU (`tonemapx`) and NVENC encoding, then all on the CPU. `/health` reports where each job decodes (`decode`) and tone-maps (`tonemap`): `gpu`, `cpu` or null. Every tone map applies a Dolby Vision RPU where there is one, which Dolby Vision profile 5 (no HDR10 base layer) needs for its colours: profile 5 is always converted, since browsers aren't asked whether they play Dolby Vision. The curve is Hable without desaturation (Jellyfin's default is BT.2390).
 
+### Binaural audio for headphones
+
+When the player says it's on headphones (`capabilities.binaural`), TrueHD and E-AC-3 tracks at 48 kHz, Atmos or not, are rendered to binaural stereo by `atmos-render` (`services/atmos-render`, built into the image), a renderer following Dolby Atmos for Headphones from traced values; its departures from Dolby's engine are listed in its `DEVIATIONS.md`. The conversion runs as three processes: FFmpeg demuxes the audio track (and reports its first packet's timestamp), `atmos-render` renders it, and the converting FFmpeg reads the rendered stereo from that timestamp, encoding it as FLAC where the browser plays it, else AAC. The response's `binaural` says whether it was rendered here, and the player then adds no virtualiser of its own. If the demuxer or renderer fails before the first segment, the conversion runs again without it and `binaural` is false. `ATMOS_RENDER` overrides the renderer's path.
+
 Driver/backend availability depends on the host. Hardware configuration examples require device testing on your server.
 
 ## Development and verification
 
 Run `node server.mjs` in this directory with `TRANSCODER_SECRET`, `AIOSTREAMS_INTERNAL_URL`, and optionally `CACHE_DIR` set. Set the matching `PARTY_*` variables in AIOStreams. The companion accepts only opaque source handles under the configured AIOStreams origin, not arbitrary guest URLs. All companion endpoints require the shared secret.
 
-Run `node services/transcoder/media.test.mjs` from the repository root with jellyfin-ffmpeg's `ffmpeg`/`ffprobe` on the PATH (the CPU tone map is its `tonemapx`), or inside the image. Tests generate local fixtures, start local HTTP servers, and verify actual remuxing, audio/video conversion, seek generations, subtitle extraction/burn-in, HDR tone mapping, Dolby Vision profile 5 through its RPU (`fixtures/`), job reuse, capacity, and GPU-to-CPU fallback. Guest authorization tests are in `packages/server/src/guest`.
+Run `node --test services/transcoder/` from the repository root with jellyfin-ffmpeg's `ffmpeg`/`ffprobe` on the PATH (the CPU tone map is its `tonemapx`), or inside the image. Tests generate local fixtures, start local HTTP servers, and verify actual remuxing, audio/video conversion, seek generations, subtitle extraction/burn-in, HDR tone mapping, Dolby Vision profile 5 through its RPU (`fixtures/`), job reuse, capacity, GPU-to-CPU fallback, and binaural conversions (`binaural.test.mjs`, which needs `atmos-render`: in the image, or `ATMOS_RENDER` pointing at a build). Guest authorization tests are in `packages/server/src/guest`.
 
 Authenticated `GET /health` reports active jobs, selected encoder, progress, viewers, and generic failures. Source URLs, credentials, and invite secrets are never included in this response or FFmpeg error messages. Configure your reverse proxy to redact query strings for `/party/guest/media` and `/party/guest/subtitle`: media elements require scoped session credentials in those URLs. The companion is single-instance and uses ephemeral jobs; distributed recovery is outside this version.

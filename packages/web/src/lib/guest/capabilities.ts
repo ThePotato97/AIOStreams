@@ -204,6 +204,9 @@ export async function browserCapabilities(
     hdr,
     surround,
     lossless,
+    // On headphones the server renders TrueHD and E-AC-3 to binaural itself (Dolby Atmos for
+    // Headphones' renderer); other audio is virtualised here.
+    binaural: headphones,
     subtitles,
   };
 }
