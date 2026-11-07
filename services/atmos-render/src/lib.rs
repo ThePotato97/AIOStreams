@@ -3,6 +3,7 @@
 //! the distance law, the LFE table, and the FOA room (FDN plus early reflections).
 
 pub mod bits;
+pub mod channels;
 pub mod complex;
 pub mod direct;
 pub mod eac3_in;

@@ -3,7 +3,9 @@
 //!   late:  0.7071 W -> allpass diffusers -> 4-line FDN; line outputs tapped later, scaled by EQ
 //!   early: sum_j H_j(b) M_j send(b, n - d_j)   (Atmos for Headphones: 6 taps)
 //!   out:   L/R += sum_k B[b][k] (EQ[b][k] line_k + ER_k)
-//! The stage runs while a Mid or Far input was present in the last `room_hold` slots.
+//! Atmos for Headphones keeps the room running: the hold of `room_hold` slots after the last Mid
+//! or Far element only stops it when tag 60 is set, which the shipped tuning doesn't, and then it
+//! freezes (nothing is cleared), as the Reference Player's does (`sub_180018B70`).
 
 use crate::complex::C32;
 use crate::tuning::{BANDS, Tuning};
@@ -43,7 +45,6 @@ pub struct Room {
     pos: usize,
     ring: usize,
     since_mid_far: usize,
-    running: bool,
 }
 
 impl Room {
@@ -63,26 +64,15 @@ impl Room {
                 send: vec![[C32::ZERO; 4]; ring],
             })
             .collect();
-        Self { bands, pos: 0, ring, since_mid_far: usize::MAX, running: false }
-    }
-
-    fn reset(&mut self, t: &Tuning) {
-        let fresh = Room::new(t);
-        self.bands = fresh.bands;
+        Self { bands, pos: 0, ring, since_mid_far: usize::MAX }
     }
 
     /// One slot: `send[b]` is this slot's FOA send per band; adds the room to `ears`.
     pub fn process(&mut self, t: &Tuning, send: &[[C32; 4]], mid_far: bool, ears: &mut [[C32; BANDS]; 2]) {
         self.since_mid_far = if mid_far { 0 } else { self.since_mid_far.saturating_add(1) };
-        let active = self.since_mid_far <= t.room_hold;
-        if !active {
-            if self.running {
-                self.reset(t);
-                self.running = false;
-            }
+        if t.near_send_off && self.since_mid_far > t.room_hold {
             return;
         }
-        self.running = true;
         let ring = self.ring;
         let at = |pos: usize, back: usize| (pos + ring - back) % ring;
         let p = self.pos;
@@ -131,7 +121,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decays_and_stops_after_the_hold() {
+    fn decays_and_keeps_running_after_the_hold() {
         let t = Tuning::load().unwrap();
         let mut room = Room::new(&t);
         let mut energy = Vec::new();
@@ -153,8 +143,9 @@ mod tests {
         let early: f32 = energy[1..23].iter().sum();
         let later: f32 = energy[150..172].iter().sum();
         assert!(later < early * 1e-2, "{later} vs {early}");
-        // and stops once no Mid/Far input has appeared for the hold
-        assert!(energy[t.room_hold + 2..].iter().all(|&e| e == 0.0));
+        // and keeps running past the hold (tag 60 = 0): the tail is still there, decaying
+        assert!(energy[t.room_hold + 2] > 0.0);
+        assert!(energy[t.room_hold + 2] < energy[t.room_hold - 50]);
     }
 
     #[test]

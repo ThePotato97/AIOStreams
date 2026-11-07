@@ -44,7 +44,7 @@ pub struct Tuning {
     pub b0: f32,
     pub beta: f32,
     pub modes: [ModeSet; 4],
-    /// Zero Near-mode room sends (tag 60).
+    /// Tag 60: zeroes Near-mode room sends, and lets the room stop after its hold.
     pub near_send_off: bool,
     /// Slots the room keeps running after the last Mid/Far input.
     pub room_hold: usize,
@@ -210,8 +210,15 @@ pub const LFE_TABLE: [f32; LFE_BANDS] = [
     0.0034901, -0.0158601, -0.0007230, 0.0018819, -0.0004217, 0.0000329, 0.0000317, 0.0000006,
 ];
 
-/// Input headroom the Atmos for Headphones encoder applies to every input slot.
-pub const INPUT_HEADROOM: f32 = 0.7079;
+/// Input headroom the Windows encoder (`DolbyHrtfEnc.dll` `SetAudioObject`) applies to every
+/// input sample, the LFE included, before clipping to +/-1.
+pub const INPUT_HEADROOM: f32 = 0.70794576;
+
+/// The omni term's weight inside r0: 0.70710677 x 0.99984896 (`sub_18003F850`).
+pub const OMNI_GAIN: f32 = 0.70700;
+
+/// Scale on the binaural output (`dapvr_render_objects_and_scale` -> `sub_1800EAB60(buf, -3)`).
+pub const OUTPUT_SCALE: f32 = 0.125;
 
 /// Per-ear HRTF gain with near-field ILD off (both tunings).
 pub const EAR_GAIN: f32 = 0.70711;

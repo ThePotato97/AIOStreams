@@ -411,7 +411,13 @@ impl OAElementMD {
                 state.extended_object_element = Some(extended_object_element);
             }
             OAElementType::Headphone => {
-                state.headphone_element = Some(HeadphoneElement::read(state, reader)?);
+                // Local change, as Dolby's parser (oamdi_parse_headphone_element): only the
+                // first headphone element counts, and one for an alternate object set is skipped.
+                if state.headphone_element.is_none()
+                    && md.alternate_object_data_id_idx.unwrap_or(0) == 0
+                {
+                    state.headphone_element = Some(HeadphoneElement::read(state, reader)?);
+                }
             }
             OAElementType::BedObject => {
                 if state.bed_object_element.is_some() {
@@ -948,6 +954,15 @@ impl HeadphoneElement {
         };
 
         let (objects, blocks) = (state.object_count, element.num_obj_info_blocks);
+        // Local change, as Dolby's parser: a block count other than the object element's fails
+        // the whole payload.
+        if let Some(object) = &state.object_element {
+            let expected = object.md_update_info.num_obj_info_blocks;
+            ensure!(
+                expected == blocks,
+                "headphone element has {blocks} blocks, the object element {expected}"
+            );
+        }
 
         // A mode this does not define reads nothing more, and the element carries no
         // rendering intent rather than a guessed one.
@@ -992,6 +1007,12 @@ impl HeadphoneElement {
                 && object_index != isf.start
                 && let Some(first) = data.get(isf.start).cloned()
             {
+                // Local change, as Dolby's parser: the object's own codes are read and
+                // discarded; it takes the first ISF object's.
+                for _ in 0..blocks {
+                    reader.get_n::<u8>(2)?;
+                    reader.get()?;
+                }
                 data.push(first);
                 continue;
             }
@@ -1964,8 +1985,8 @@ mod tests {
 
         assert_eq!(element.headphone_data[0][0].hp_render_mode, 2);
         assert!(element.headphone_data[0][0].hp_head_track_disable);
-        // Only three modes are defined, and a fourth code reads as the highest.
-        assert_eq!(element.headphone_data[0][1].hp_render_mode, 2);
+        // Local change: the 2-bit code passes through; 3 is Mid in Dolby's renderer.
+        assert_eq!(element.headphone_data[0][1].hp_render_mode, 3);
         assert!(!element.headphone_data[0][1].hp_head_track_disable);
 
         Ok(())

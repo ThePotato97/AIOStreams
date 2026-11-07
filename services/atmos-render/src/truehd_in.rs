@@ -9,9 +9,9 @@ use truehd::process::parse::Parser;
 use truehd::structs::channel::ChannelLabel;
 use truehd::utils::errors::ExtractError;
 
+use crate::channels::{self, Static};
 use crate::input::{Block, Feed};
-use crate::objects::{Kind, Scene};
-use crate::direct::Mode;
+use crate::objects::{Modes, Scene};
 use crate::render::Source;
 
 const ALL: [bool; MAX_PRESENTATIONS] = [true; MAX_PRESENTATIONS];
@@ -21,8 +21,8 @@ pub struct TrueHd {
     parser: Parser,
     decoder: Decoder,
     scene: Scene,
-    /// Bed IDs of a channel presentation (no OAMD), per channel; None = LFE.
-    channel_beds: Vec<Option<u32>>,
+    /// Where a channel presentation's channels (no OAMD) are placed.
+    channel_beds: Vec<Static>,
     atmos: Option<bool>,
     samples: u64,
     last_len: usize,
@@ -32,39 +32,48 @@ pub struct TrueHd {
     lead: usize,
 }
 
-/// Dolby channel ID of a TrueHD channel label (None for LFE). Labels outside Dolby's bed table
-/// get the nearest of its positions [I].
-fn label_id(label: ChannelLabel) -> Option<u32> {
+/// Where a TrueHD channel label goes, as the Windows encoder's static slots (`channels.rs`).
+/// Labels Windows has no slot for are marked [I].
+fn label_static(label: ChannelLabel) -> Static {
     use ChannelLabel::*;
-    Some(match label {
-        L => 1,
-        R => 2,
-        C | Cb | Tc | Tfc => 3,
-        LFE | LFE2 => return None,
-        Ls | Lsd => 5,
-        Rs | Rsd => 6,
-        Lb => 7,
-        Rb => 8,
-        Tfl => 9,
-        Tfr => 10,
-        Tsl => 11,
-        Tsr => 12,
-        Tbl => 13,
-        Tbr => 14,
-        Lw | Lsc => 15,
-        Rw | Rsc => 16,
-    })
+    match label {
+        L => Static::Bed(1),
+        R => Static::Bed(2),
+        C => Static::Bed(3),
+        LFE | LFE2 => Static::Lfe,
+        Ls => Static::Bed(5),
+        Rs => Static::Bed(6),
+        Lb => Static::Bed(7),
+        Rb => Static::Bed(8),
+        Cb => Static::At([0.5, 1.0, 0.0]), // back centre, as the encoder's slot 16
+        Tfl => Static::Bed(9),
+        Tfr => Static::Bed(10),
+        Tbl => Static::Bed(13),
+        Tbr => Static::Bed(14),
+        // No Windows slot: Dolby's bed table [I].
+        Tsl => Static::Bed(11),
+        Tsr => Static::Bed(12),
+        Lw => Static::Bed(15),
+        Rw => Static::Bed(16),
+        // No Windows slot and no bed ID: at their labels' places [I].
+        Lsd => Static::Bed(5),
+        Rsd => Static::Bed(6),
+        Lsc => Static::At([0.25, 0.0, 0.0]),
+        Rsc => Static::At([0.75, 0.0, 0.0]),
+        Tc => Static::At([0.5, 0.5, 1.0]),
+        Tfc => Static::At([0.5, 0.0, 1.0]),
+    }
 }
 
 impl TrueHd {
-    pub fn new() -> Self {
+    pub fn new(modes: Modes) -> Self {
         let mut parser = Parser::default();
         parser.set_required_presentations(&ALL);
         Self {
             extractor: Extractor::default(),
             parser,
             decoder: Decoder::default(),
-            scene: Scene::default(),
+            scene: Scene::new(modes),
             channel_beds: Vec::new(),
             atmos: None,
             samples: 0,
@@ -81,13 +90,8 @@ impl TrueHd {
             self.scene.update(p, self.samples);
         }
         if self.atmos == Some(false) && self.channel_beds.len() != ch {
-            let ids: Vec<Option<u32>> = decoded.channel_labels.iter().map(|&l| label_id(l)).collect();
-            let has = |id| ids.contains(&Some(id));
-            let retype = has(5) && has(6) && !has(7) && !has(8);
-            self.channel_beds = ids
-                .into_iter()
-                .map(|id| id.map(|i| if retype && (i == 5 || i == 6) { i + 2 } else { i }))
-                .collect();
+            let statics = decoded.channel_labels.iter().map(|&l| label_static(l)).collect();
+            self.channel_beds = channels::retyped(statics, self.scene.modes);
         }
         let scale = 1.0 / (1u32 << 23) as f32;
         let samples: Vec<Vec<f32>> = (0..ch)
@@ -165,29 +169,9 @@ impl Feed for TrueHd {
         if self.atmos == Some(true) {
             self.scene.advance(sample);
             // Until the first OAMD the inputs are unknown: silent.
-            self.scene
-                .inputs
-                .iter()
-                .map(|i| {
-                    let (pos, gain) = i.state(sample);
-                    match i.kind {
-                        Kind::Lfe => Source::Lfe { gain },
-                        _ => Source::Positioned { pos, mode: i.mode, gain },
-                    }
-                })
-                .collect()
+            self.scene.sources()
         } else {
-            self.channel_beds
-                .iter()
-                .map(|id| match id {
-                    None => Source::Lfe { gain: 1.0 },
-                    Some(id) => Source::Positioned {
-                        pos: crate::direct::bed_position(*id).unwrap(),
-                        mode: Mode::Mid,
-                        gain: 1.0,
-                    },
-                })
-                .collect()
+            self.channel_beds.iter().map(|&s| channels::source(s, self.scene.modes)).collect()
         }
     }
 }

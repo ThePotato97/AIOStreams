@@ -9,10 +9,10 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use crate::direct::{Mode, bed_position};
+use crate::channels::{self, Static, WAV};
 use crate::input::{Block, Feed};
 use crate::joc::{Upmix, find_container};
-use crate::objects::{Kind, Scene};
+use crate::objects::{Kind, Modes, Scene};
 use crate::render::Source;
 
 /// One access unit: an independent frame and its dependent substreams.
@@ -42,23 +42,9 @@ pub struct Eac3 {
     atmos: Option<bool>,
     samples: u64,
     /// Bed channel IDs of the core channels (no JOC), None = LFE.
-    core_beds: Vec<Option<u32>>,
+    core_beds: Vec<Static>,
 }
 
-/// FFmpeg's WAV channel mask bits, in channel order: Dolby channel ID (None = LFE).
-const MASK: [(u32, Option<u32>); 11] = [
-    (0x1, Some(1)),
-    (0x2, Some(2)),
-    (0x4, Some(3)),
-    (0x8, None),
-    (0x10, Some(7)),
-    (0x20, Some(8)),
-    (0x100, Some(3)), // back centre: no Dolby bed position; nearest [I]
-    (0x200, Some(5)),
-    (0x400, Some(6)),
-    (0x800, Some(3)),
-    (0x20000, Some(3)),
-];
 
 /// AC-3 frame size in 16-bit words (ATSC A/52 table 5.18), by fscod and frmsizecod.
 fn ac3_frame_words(fscod: usize, code: usize) -> Option<usize> {
@@ -72,8 +58,9 @@ fn ac3_frame_words(fscod: usize, code: usize) -> Option<usize> {
     })
 }
 
-fn mask_channels(mask: u32) -> Vec<(u32, Option<u32>)> {
-    MASK.iter().filter(|(b, _)| mask & b != 0).copied().collect()
+/// The WAV mask bits present, in channel order.
+fn mask_bits(mask: u32) -> Vec<u32> {
+    WAV.iter().map(|&(b, _)| b).filter(|b| mask & b != 0).collect()
 }
 
 fn spawn_reader(mut out: std::process::ChildStdout, tx: Sender<Pcm>) -> JoinHandle<()> {
@@ -131,9 +118,12 @@ fn spawn_reader(mut out: std::process::ChildStdout, tx: Sender<Pcm>) -> JoinHand
 }
 
 impl Eac3 {
-    pub fn new(ffmpeg: &str) -> anyhow::Result<Self> {
+    /// `ffmpeg` decodes the core. Its DRC follows Windows' DD+ decoder, which runs Dolby's
+    /// decoder in RF mode (dialogue to -20 dBFS, heavy compression): FFmpeg's nearest are
+    /// `heavy_compr` and `target_level -20`, an approximation [I].
+    pub fn new(ffmpeg: &str, modes: Modes) -> anyhow::Result<Self> {
         let mut child = Command::new(ffmpeg)
-            .args(["-v", "error", "-f", "eac3", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_f32le", "pipe:1"])
+            .args(["-v", "error", "-heavy_compr", "1", "-target_level", "-20", "-f", "eac3", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_f32le", "pipe:1"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -152,7 +142,7 @@ impl Eac3 {
             layout: None,
             pcm_buf: VecDeque::new(),
             upmix: Upmix::new(),
-            scene: Scene::default(),
+            scene: Scene::new(modes),
             atmos: None,
             samples: 0,
             core_beds: Vec::new(),
@@ -243,15 +233,7 @@ impl Eac3 {
             match msg {
                 Some(Pcm::Layout { channels, mask }) => {
                     self.layout = Some((channels, mask));
-                    self.core_beds = mask_channels(mask).into_iter().map(|(_, id)| id).collect();
-                    let has = |id| self.core_beds.contains(&Some(id));
-                    if has(5) && has(6) && !has(7) && !has(8) {
-                        for id in self.core_beds.iter_mut().flatten() {
-                            if *id == 5 || *id == 6 {
-                                *id += 2; // 5.1 surrounds at the rear corners
-                            }
-                        }
-                    }
+                    self.core_beds = channels::retyped(channels::wav_mask(mask), self.scene.modes);
                 }
                 Some(Pcm::Samples(v)) => {
                     self.pcm_buf.extend(v);
@@ -267,16 +249,19 @@ impl Eac3 {
     /// Emit every access unit whose PCM has arrived.
     fn emit(&mut self, out: &mut dyn FnMut(Block)) {
         let Some((channels, mask)) = self.layout else { return };
-        let order = mask_channels(mask);
+        let order = mask_bits(mask);
         while let Some(u) = self.units.front() {
             if self.pcm_buf.len() < u.samples * channels {
                 return;
             }
             let u = self.units.pop_front().unwrap();
             let pcm: Vec<f32> = self.pcm_buf.drain(..u.samples * channels).collect();
-            let chan = |bit: u32| order.iter().position(|(b, _)| *b == bit);
+            let chan = |bit: u32| order.iter().position(|b| *b == bit);
             let col = |c: usize| -> Vec<f32> { (0..u.samples).map(|s| pcm[s * channels + c]).collect() };
-            if self.atmos.is_none() && (u.joc.is_some() || u.oamd.is_some()) {
+            // Windows' decoder runs JOC only on a 3/2 core (L, R, C and a surround pair).
+            let side = |s: u32, b: u32| chan(s).or(chan(b));
+            let core_32 = [chan(0x1), chan(0x2), chan(0x4), side(0x200, 0x10), side(0x400, 0x20)].iter().all(Option::is_some);
+            if self.atmos.is_none() && core_32 && (u.joc.is_some() || u.oamd.is_some()) {
                 self.atmos = Some(true);
             }
             if let Some(p) = &u.oamd {
@@ -287,7 +272,6 @@ impl Eac3 {
                     self.upmix.frame(j, u.samples / 64);
                 }
                 // JOC inputs: L R C Ls Rs (Lb Rb); a 5.1 without sides uses its backs
-                let side = |s: u32, b: u32| chan(s).or(chan(b));
                 let inputs: Vec<Vec<f32>> = [Some(chan(0x1)), Some(chan(0x2)), Some(chan(0x4)), Some(side(0x200, 0x10)), Some(side(0x400, 0x20)), Some(chan(0x10)), Some(chan(0x20))]
                     .into_iter()
                     .map(|c| c.flatten().map(col).unwrap_or_else(|| vec![0.0; u.samples]))
@@ -367,25 +351,9 @@ impl Feed for Eac3 {
     fn sources(&mut self, sample: u64) -> Vec<Source> {
         if self.atmos == Some(true) {
             self.scene.advance(sample);
-            self.scene
-                .inputs
-                .iter()
-                .map(|i| {
-                    let (pos, gain) = i.state(sample);
-                    match i.kind {
-                        Kind::Lfe => Source::Lfe { gain },
-                        _ => Source::Positioned { pos, mode: i.mode, gain },
-                    }
-                })
-                .collect()
+            self.scene.sources()
         } else {
-            self.core_beds
-                .iter()
-                .map(|id| match id {
-                    None => Source::Lfe { gain: 1.0 },
-                    Some(id) => Source::Positioned { pos: bed_position(*id).unwrap(), mode: Mode::Mid, gain: 1.0 },
-                })
-                .collect()
+            self.core_beds.iter().map(|&s| channels::source(s, self.scene.modes)).collect()
         }
     }
 }

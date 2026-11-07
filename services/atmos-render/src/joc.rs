@@ -1,8 +1,10 @@
 //! E-AC-3 Joint Object Coding: the EMDF container (found anywhere in a frame's bits, as the
 //! payloads sit in skip fields), the JOC payload, and the upmix of the core channels to objects in
-//! the 64-band JOC QMF domain. Ported from Cavern (`ExtensibleMetadataDecoder`, `JointObjectCoding*`),
-//! except that each frame's 24 interpolated matrices come from that frame's payload and are
-//! applied in order (Cavern's applier steps its timeslot against the channel count).
+//! the 64-band JOC QMF domain. The structure is ported from Cavern (`ExtensibleMetadataDecoder`,
+//! `JointObjectCoding*`); the values follow Windows' DD+ decoder (`DolbyDecMFT.dll`, parameters doc
+//! Q16): its Huffman trees, band tables and QMF prototype are the ones here, its dequantisation
+//! steps (410 and 205 in Q15, x16), clip gain, surround stage and output clip are applied as it
+//! applies them. Each frame's 24 interpolated matrices come from that frame's payload.
 
 use crate::bits::Bits;
 use crate::complex::C32;
@@ -13,6 +15,24 @@ const SYNC: u32 = 0x5838;
 const OAMD_ID: u32 = 11;
 const JOC_ID: u32 = 14;
 const MAX_CHANNELS: usize = 7;
+/// Windows' decoder takes at most 15 objects.
+const MAX_OBJECTS: usize = 15;
+/// Slots per frame.
+const FRAME_SLOTS: usize = 24;
+/// The surround stage's band-0 filter (re 0x1800EEE40, im 0x1800EEDE0), and the delay the other
+/// bands and channels get to line up with it.
+const SURROUND_FIR_RE: [f32; 21] = [
+    0.0013996040, 0.0038391508, 0.0075126425, 0.0124193737, 0.0183674283, 0.0249701627, 0.0316790082,
+    0.0378500037, 0.0428341255, 0.0460756160, 0.0472001210, 0.0460756160, 0.0428341255, 0.0378500037,
+    0.0316790082, 0.0249701627, 0.0183674283, 0.0124193737, 0.0075126425, 0.0038391508, 0.0013996040,
+];
+const SURROUND_FIR_IM: [f32; 21] = [
+    -0.0006242550, -0.0019234687, -0.0042654648, -0.0081683081, -0.0143272011, -0.0237598605,
+    -0.0375723280, -0.0557756945, -0.0756827668, -0.0917247236, -0.5979374051, -0.0917247236,
+    -0.0756827668, -0.0557756945, -0.0375723280, -0.0237598605, -0.0143272011, -0.0081683081,
+    -0.0042654648, -0.0019234687, -0.0006242550,
+];
+const SURROUND_DELAY: usize = 10;
 
 /// What one frame's EMDF container held.
 pub struct Container {
@@ -128,8 +148,11 @@ struct ObjectInfo {
 
 /// One frame's JOC payload.
 pub struct JocFrame {
+    /// `joc_dmx_config_idx`.
+    pub dmx: u32,
     pub channels: usize,
     pub objects: usize,
+    /// Clip gain: 2^(x - 4) (32 + y) / 512.
     pub gain: f32,
     info: Vec<ObjectInfo>,
 }
@@ -152,11 +175,15 @@ impl JocFrame {
         }
         let channels = if dmx == 0 || dmx == 3 { 5 } else { 7 };
         let objects = b.read(6)? as usize + 1;
+        if objects > MAX_OBJECTS {
+            return None;
+        }
         if b.read(3)? != 0 {
             return None; // joc_ext_config_idx
         }
-        let gain_power = b.read(3)? as i32;
-        let gain = 1.0 + (b.read(5)? as f32 / 32.0) * (2f32).powi(gain_power - 4);
+        let x = b.read(3)? as i32;
+        let y = b.read(5)? as f32;
+        let gain = (2f32).powi(x - 4) * (32.0 + y) / 512.0;
         b.skip(10)?; // sequence counter
         let mut info = vec![ObjectInfo::default(); objects];
         for o in info.iter_mut() {
@@ -169,8 +196,13 @@ impl JocFrame {
                 o.steep = b.bit()?;
                 o.points = b.read(1)? as usize + 1;
                 if o.steep {
+                    // Slot offsets: below 24 and increasing (Windows); used as offset + 1 (Cavern).
                     for dp in 0..o.points {
-                        o.offsets[dp] = b.read(5)? as usize + 1;
+                        let raw = b.read(5)? as usize;
+                        if raw >= FRAME_SLOTS || (dp > 0 && raw + 1 <= o.offsets[dp - 1]) {
+                            return None;
+                        }
+                        o.offsets[dp] = raw + 1;
                     }
                 }
             }
@@ -206,7 +238,7 @@ impl JocFrame {
                 }
             }
         }
-        Some(Self { channels, objects, gain, info })
+        Some(Self { dmx, channels, objects, gain, info })
     }
 }
 
@@ -229,8 +261,13 @@ pub struct Upmix {
     map: [[usize; SUBBANDS]; 8],
     pub channels: usize,
     pub objects: usize,
+    dmx: u32,
+    /// Clip gain: the previous frame's, and this frame's (ramped to over its first 256 samples).
+    gain_from: f32,
     gain: f32,
     timeslot: usize,
+    /// The surround stage's history: the last 21 slots of every channel's bands.
+    history: Vec<[[C32; SUBBANDS]; MAX_CHANNELS]>,
 }
 
 impl Upmix {
@@ -244,8 +281,11 @@ impl Upmix {
             map: band_map(),
             channels: 0,
             objects: 0,
-            gain: 1.0,
+            dmx: 0,
+            gain_from: 1.0 / 16.0,
+            gain: 1.0 / 16.0,
             timeslot: 0,
+            history: Vec::new(),
         }
     }
 
@@ -253,6 +293,8 @@ impl Upmix {
     pub fn frame(&mut self, joc: &JocFrame, timeslots: usize) {
         self.channels = joc.channels;
         self.objects = joc.objects;
+        self.dmx = joc.dmx;
+        self.gain_from = self.gain;
         self.gain = joc.gain;
         while self.analysis.len() < MAX_CHANNELS {
             self.analysis.push(Analysis::new());
@@ -272,21 +314,24 @@ impl Upmix {
         if !o.active {
             return out;
         }
-        let center = (o.quant * 48 + 48) as i32;
-        let step = 0.2 - o.quant as f32 * 0.1;
+        // Nq = 96 or 192 indices; dequantised as 410 (idx - 48) or 205 (idx - 96) in Q15, x16 in
+        // the kernel: steps of 0.2001953 and 0.1000977.
+        let nq = if o.quant == 1 { 192 } else { 96 };
+        let center = nq / 2;
+        let step = (if o.quant == 1 { 205.0 } else { 410.0 }) * 16.0 / 32768.0;
         // mix[dp][ch][pb]
         let mut mix = vec![[[0f32; 23]; MAX_CHANNELS]; o.points];
         if o.sparse {
-            let max = center * 2;
-            let offset = (o.quant * 50 + 50) as i32;
+            // one channel per band, the others at the centre; values offset 50 / 100
+            let offset = if o.quant == 1 { 100 } else { 50 };
             for dp in 0..o.points {
                 let mut channel = o.channel[dp][0];
                 let mut value = offset;
                 for pb in 0..o.bands {
                     if pb != 0 {
-                        channel = (channel + o.channel[dp][pb]) % ch_count as i32;
+                        channel = (channel + o.channel[dp][pb]).rem_euclid(ch_count as i32);
                     }
-                    value = (value + o.vector[dp][pb]) % max;
+                    value = (value + o.vector[dp][pb]).rem_euclid(nq);
                     for ch in 0..ch_count {
                         let v = if ch as i32 == channel { value } else { center };
                         mix[dp][ch][pb] = (v - center) as f32 * step;
@@ -294,19 +339,15 @@ impl Upmix {
                 }
             }
         } else {
-            let c = center as f32 * step;
-            let max = c * 2.0;
+            // band 0 = (Nq/2 + s) mod Nq, then each band = previous + s, mod Nq
             for dp in 0..o.points {
                 for ch in 0..ch_count {
                     let src = &o.matrix[dp][ch];
-                    let dst = &mut mix[dp][ch];
-                    dst[0] = (c + src[0] as f32 * step) % max;
-                    for pb in 1..o.bands {
-                        let next = (dst[pb - 1] + src[pb] as f32 * step) % max;
-                        dst[pb - 1] -= c;
-                        dst[pb] = next;
+                    let mut idx = center;
+                    for pb in 0..o.bands {
+                        idx = (idx + src[pb]).rem_euclid(nq);
+                        mix[dp][ch][pb] = (idx - center) as f32 * step;
                     }
-                    dst[o.bands - 1] -= c;
                 }
             }
         }
@@ -336,7 +377,7 @@ impl Upmix {
             let second = expand(&mix[1]);
             if o.steep {
                 for (ts, slot) in out.iter_mut().enumerate() {
-                    *slot = if ts + 1 < o.offsets[0] { prev } else if ts + 1 < o.offsets[1] { first } else { second };
+                    *slot = if ts < o.offsets[0] { prev } else if ts < o.offsets[1] { first } else { second };
                 }
             } else {
                 let half = timeslots / 2;
@@ -363,8 +404,19 @@ impl Upmix {
     /// writes 64 samples per object.
     pub fn slot(&mut self, core: &[&[f32]], objects: &mut [Vec<f32>]) {
         let mut bands = [[C32::ZERO; SUBBANDS]; MAX_CHANNELS];
+        // The clip gain multiplies the time-domain downmix, ramping from the previous frame's
+        // to this frame's over the first 256 samples.
+        let mut scaled = [0f32; SUBBANDS];
         for ch in 0..self.channels {
-            self.analysis[ch].process(&self.m, core[ch], &mut bands[ch]);
+            for (k, v) in scaled.iter_mut().enumerate() {
+                let n = self.timeslot * SUBBANDS + k;
+                let g = if n < 256 { self.gain_from + (self.gain - self.gain_from) * n as f32 / 256.0 } else { self.gain };
+                *v = core[ch][k] * g;
+            }
+            self.analysis[ch].process(&self.m, &scaled, &mut bands[ch]);
+        }
+        if self.dmx == 3 || self.dmx == 4 {
+            bands = self.surround(bands);
         }
         let ts = self.timeslot.min(self.interp.first().map(|v| v.len().saturating_sub(1)).unwrap_or(0));
         for (obj, out) in objects.iter_mut().enumerate().take(self.objects) {
@@ -377,12 +429,37 @@ impl Upmix {
             }
             out.resize(SUBBANDS, 0.0);
             self.synthesis[obj].process(&self.m, &q, out);
-            if self.gain != 1.0 {
-                for s in out.iter_mut() {
-                    *s *= self.gain;
-                }
+            // x16, clipped to +/-1
+            for s in out.iter_mut() {
+                *s = (*s * 16.0).clamp(-1.0, 1.0);
             }
         }
         self.timeslot += 1;
+    }
+
+    /// Downmix configs 3 and 4: channels 3 and 4 (the surrounds) times -j, in band 0 through a
+    /// 21-tap complex filter across slots; every other band and channel delayed 10 slots to line
+    /// up with it. Channels 3 and 4's bands from 1 up are delayed too [I: the notes say "the other
+    /// channels"]; the matrices aren't delayed [I].
+    fn surround(&mut self, bands: [[C32; SUBBANDS]; MAX_CHANNELS]) -> [[C32; SUBBANDS]; MAX_CHANNELS] {
+        let taps = SURROUND_FIR_RE.len();
+        if self.history.len() != taps {
+            self.history = vec![[[C32::ZERO; SUBBANDS]; MAX_CHANNELS]; taps];
+        }
+        self.history.rotate_right(1);
+        self.history[0] = bands;
+        let mut out = self.history[SURROUND_DELAY];
+        let minus_j = C32::new(0.0, -1.0);
+        for ch in [3, 4] {
+            for sb in 1..SUBBANDS {
+                out[ch][sb] = out[ch][sb] * minus_j;
+            }
+            let mut acc = C32::ZERO;
+            for t in 0..taps {
+                acc += self.history[t][ch][0] * C32::new(SURROUND_FIR_RE[t], SURROUND_FIR_IM[t]);
+            }
+            out[ch][0] = acc;
+        }
+        out
     }
 }

@@ -1,10 +1,11 @@
 //! Per-input gains, as `hpv_update_object_filters` (Reference Player) and `sub_18003E550`
 //! (Atmos for Headphones) compute them: position warp and distance, the PCA HRTF, the ITD as a
 //! phase ramp on the farther ear, the distance law, and the room send. The common x8 of every
-//! path is dropped: it only sets the filterbank's scale.
+//! path is not applied: it undoes the metadata-gain convention (unity = 4096 = Q15 0.125), and
+//! metadata gains here are already linear with unity 1.0.
 
 use crate::complex::C32;
-use crate::tuning::{BANDS, EAR_GAIN, ITD_BANDS, LFE_BANDS, LFE_TABLE, SH_TERMS, Tuning};
+use crate::tuning::{BANDS, EAR_GAIN, ITD_BANDS, LFE_BANDS, LFE_TABLE, OMNI_GAIN, SH_TERMS, Tuning};
 
 /// Speed of sound the ITD path lengths use (m/s).
 const SPEED_OF_SOUND: f32 = 343.3;
@@ -115,18 +116,53 @@ pub struct Geometry {
     pub metres: f32,
 }
 
+fn sgn(v: f32) -> f32 {
+    if v < 0.0 {
+        -1.0
+    } else if v > 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// The cube -> sphere warp of `hpv_meta_to_cartesian_warp_clamp` (as `scripts/warp.py` ports
+/// it): X = 1 - 2y, Y = 1 - 2x, Z = z; azimuth kept, elevation = atan(Z / max(|X|, |Y|)),
+/// radius = max(|X|, |Y|, |Z|). The room centre (X = Y = 0) gives (0, 0, Z).
+pub fn cube_to_sphere(pos: [f32; 3]) -> [f32; 3] {
+    let (x, z) = (1.0 - 2.0 * pos[1], pos[2]);
+    let v15 = 2.0 * pos[0] - 1.0; // = -Y
+    if v15 == 0.0 && x == 0.0 {
+        return [0.0, 0.0, z];
+    }
+    let (a18, mut a19) = (x.abs(), v15.abs());
+    let (v21, v24) = if a19 <= a18 {
+        let r = ((v15 / x).abs() * sgn(v15), sgn(x));
+        a19 = a18;
+        r
+    } else {
+        (sgn(v15), (x / v15).abs() * sgn(x))
+    };
+    let h = v24 * v24 + v21 * v21;
+    if z == 0.0 {
+        let k = 1.0 / h.sqrt();
+        return [x * k, -(v15 * k), 0.0];
+    }
+    let (v28, v16) = if z.abs() <= a19 { ((z / a19).abs() * sgn(z), sgn(z)) } else { (sgn(z), (a19 / z).abs() * sgn(a19)) };
+    let v33 = v16 * v16 + v28 * v28;
+    let k = 1.0 / (h * v33).sqrt();
+    [x * k, -(v15 * k), z / v33.sqrt()]
+}
+
 /// Dolby x/y/z (0..1; x left->right, y front->back, z floor->ceiling) -> direction and distance:
-/// X = 1 - 2y, Y = 1 - 2x, Z = z; cube -> sphere (direction kept, radius = max-norm); per-axis
-/// mode scales; d = vector length.
+/// the warp, the mode's per-axis scales, d = vector length. Atmos for Headphones has no box step.
 pub fn warp(t: &Tuning, pos: [f32; 3], mode: Mode) -> Geometry {
-    let p = [1.0 - 2.0 * pos[1], 1.0 - 2.0 * pos[0], pos[2]];
-    let r = p.iter().fold(0f32, |m, v| m.max(v.abs()));
-    let n = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+    let p = cube_to_sphere(pos);
     let m = &t.modes[mode as usize];
-    let u = if n > 0.0 { [p[0] / n, p[1] / n, p[2] / n] } else { [0.0; 3] };
-    let v = [u[0] * r * m.fwd_scale, u[1] * r * m.lat_scale, u[2] * r * m.z_scale];
+    let v = [p[0] * m.fwd_scale, p[1] * m.lat_scale, p[2] * m.z_scale];
     let d = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    let dir = if d > 0.0 { [v[0] / d, v[1] / d, v[2] / d] } else { [0.0; 3] };
+    // At (almost) zero distance the direction is straight ahead.
+    let dir = if d > 1e-6 { [v[0] / d, v[1] / d, v[2] / d] } else { [1.0, 0.0, 0.0] };
     Geometry { dir, d, metres: d * t.b0 * m.p6 }
 }
 
@@ -157,16 +193,17 @@ pub fn itd(t: &Tuning, g: &Geometry, mode: Mode) -> (f32, Option<usize>) {
     (tau, far)
 }
 
-/// Gains of a positioned input (bed channel or object) with metadata gain `gain`.
+/// Gains of a positioned input (bed channel or object) with metadata gain `gain`. The encoder's
+/// input headroom is applied to the samples, before the renderer (`input.rs`).
 pub fn input_gains(t: &Tuning, pos: [f32; 3], mode: Mode, gain: f32) -> InputGains {
-    let g = gain * crate::tuning::INPUT_HEADROOM;
+    let g = gain;
     let mut out = InputGains { ears: [[C32::ZERO; BANDS]; 2], send: [0.0; 4], holds_room: false };
     if mode == Mode::Off {
-        // Amplitude pan, no HRTF, no room: theta = pi p6_0 (0.5 (0.5 - x) + 0.25 p7_0).
-        // Traced in the Reference Player; that Atmos for Headphones uses the same formula with
-        // its own mode-0 values is unverified.
+        // `hpv_offmode_pan_gains`: an equal-power pan from x alone, the same gain in every band;
+        // no warp, HRTF, distance law or room.
         let m0 = &t.modes[0];
-        let theta = std::f32::consts::PI * m0.p6 * (0.5 * (0.5 - pos[0]) + 0.25 * m0.p7);
+        let u = (m0.p6 * (1.0 - 2.0 * pos[0]) * m0.lat_scale).clamp(-1.0, 1.0);
+        let theta = std::f32::consts::FRAC_PI_4 * (1.0 + u);
         let (l, r) = (g * theta.sin().max(0.0), g * theta.cos().max(0.0));
         for b in 0..BANDS {
             out.ears[0][b] = C32::real(l);
@@ -180,8 +217,8 @@ pub fn input_gains(t: &Tuning, pos: [f32; 3], mode: Mode, gain: f32) -> InputGai
     let a = (geo.d / m.r0).min(1.0);
     let y = basis(geo.dir[0], geo.dir[1], geo.dir[2]);
     let g_dir = EAR_GAIN * g * gd * a;
-    // Inside r0 the directional weights fade toward an omni term (k = 0, x0.707) [I: weight].
-    let g_omni = EAR_GAIN * g * gd * (1.0 - a) * std::f32::consts::FRAC_1_SQRT_2;
+    // Inside r0 the directional weights fade toward the k = 0 column (Y_0 = 1), weighted 0.70700.
+    let g_omni = OMNI_GAIN * g * gd * (1.0 - a);
     for ear in 0..2 {
         let coef = &t.hrtf_coef[ear];
         let w: Vec<f32> = coef
@@ -196,9 +233,8 @@ pub fn input_gains(t: &Tuning, pos: [f32; 3], mode: Mode, gain: f32) -> InputGai
     let (tau, far) = itd(t, &geo, mode);
     if let Some(ear) = far {
         for b in 0..ITD_BANDS {
-            // e^(+j w_b tau) with w_b < 0. Through DAP-VR's filterbank this is the delay; the notes'
-            // e^(-j w_b tau) advances the farther ear instead (test in render.rs). To confirm in
-            // hpv_itd_phase_ramp.
+            // e^(-j |w_b| tau) (w_b < 0): a delay of the farther ear, `hpv_itd_phase_ramp`. The
+            // conjugated image bands (1, 3) get the same phasor.
             out.ears[ear][b] = out.ears[ear][b] * C32::cis(t.itd_omega[b] * tau);
         }
     }
@@ -213,7 +249,7 @@ pub fn input_gains(t: &Tuning, pos: [f32; 3], mode: Mode, gain: f32) -> InputGai
 
 /// The LFE path: g T[b] to both ears, bands 0-15; no HRTF, ITD or room.
 pub fn lfe_gains(gain: f32) -> InputGains {
-    let g = gain * crate::tuning::INPUT_HEADROOM;
+    let g = gain;
     let mut out = InputGains { ears: [[C32::ZERO; BANDS]; 2], send: [0.0; 4], holds_room: false };
     for b in 0..LFE_BANDS {
         out.ears[0][b] = C32::real(g * LFE_TABLE[b]);
@@ -237,9 +273,12 @@ mod tests {
         assert!((g.metres - 1.5).abs() < 0.01, "{}", g.metres);
         let az = g.dir[1].atan2(g.dir[0]).to_degrees();
         assert!((az - 45.0).abs() < 0.1);
-        let g = warp(&t, bed_position(9).unwrap(), Mode::Mid);
-        let el = g.dir[2].asin().to_degrees();
-        assert!((el - 35.26).abs() < 0.1, "{el}");
+        // the top channels sit at +45 degrees (elevation = atan(Z / max(|X|, |Y|)))
+        let p = cube_to_sphere(bed_position(9).unwrap());
+        let el = p[2].atan2(p[0].hypot(p[1])).to_degrees();
+        assert!((el - 45.0).abs() < 0.01, "{el}");
+        // and the radius is the max-norm
+        assert!(((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs() < 1e-5);
         let g = warp(&t, bed_position(8).unwrap(), Mode::Mid);
         assert!((g.dir[1].atan2(g.dir[0]).to_degrees() + 135.0).abs() < 0.1);
     }
@@ -250,7 +289,7 @@ mod tests {
         let gains = input_gains(&t, bed_position(3).unwrap(), Mode::Mid, 1.0);
         let geo = warp(&t, bed_position(3).unwrap(), Mode::Mid);
         let gd = 1.0 / (1.0 + t.beta * geo.metres * geo.metres).sqrt();
-        let direct = EAR_GAIN * crate::tuning::INPUT_HEADROOM * gd;
+        let direct = EAR_GAIN * gd;
         let db = 20.0 * (gains.send[0] / direct).log10();
         assert!((db - 6.5).abs() < 0.1, "{db}");
     }
@@ -277,10 +316,33 @@ mod tests {
         let off = input_gains(&t, [0.0, 0.0, 0.0], Mode::Off, 1.0);
         assert!((20.0 * (mid / near).log10() - 15.4).abs() < 0.3);
         assert_eq!(off.send, [0.0; 4]);
-        // x = 0: nothing in the right ear; the centre is even (theta = pi/4 with either tuning)
-        assert!(off.ears[0][10].re > 0.5 && off.ears[1][10].re.abs() < 1e-3);
-        let centre = input_gains(&t, [0.5, 0.0, 0.0], Mode::Off, 1.0);
-        assert!((centre.ears[0][10].re - centre.ears[1][10].re).abs() < 1e-4);
+        // the traced equal-power law: x = 0, 0.25, 0.5, 0.75, 1
+        for (x, l, r) in [(0.0, 1.0, 0.0), (0.25, 0.924, 0.383), (0.5, 0.707, 0.707), (0.75, 0.383, 0.924), (1.0, 0.0, 1.0)] {
+            let g = input_gains(&t, [x, 0.3, 0.7], Mode::Off, 1.0);
+            assert!((g.ears[0][40].re - l).abs() < 2e-3 && (g.ears[1][40].re - r).abs() < 2e-3, "x {x}");
+        }
+    }
+
+    #[test]
+    fn the_warp_matches_the_port() {
+        // warp.py: 'Ltm' (0, 16384, 32767) -> (0, 1, 1)/sqrt(2) direction, radius 1;
+        // an object at z = -0.5 at the front left corner keeps radius 1, elevation -26.57
+        let p = cube_to_sphere([0.0, 0.5, 1.0]);
+        assert!((p[0]).abs() < 1e-6 && (p[1] - 0.70711).abs() < 1e-4 && (p[2] - 0.70711).abs() < 1e-4, "{p:?}");
+        let p = cube_to_sphere([0.0, 0.0, -0.5]);
+        let el = p[2].atan2(p[0].hypot(p[1])).to_degrees();
+        assert!((el + 26.565).abs() < 0.01, "{el}");
+        // the room centre: straight up, length |z|
+        assert_eq!(cube_to_sphere([0.5, 0.5, 0.25]), [0.0, 0.0, 0.25]);
+    }
+
+    #[test]
+    fn the_omni_term_is_the_k0_column_at_0_707() {
+        let t = t();
+        // At the room centre (d = 0) H = 0.707 g sum_c B[b][c] C[c][0]
+        let g = input_gains(&t, [0.5, 0.5, 0.0], Mode::Mid, 1.0);
+        let h: f32 = (0..t.hrtf_coef[0].len()).map(|c| t.hrtf_basis[0][20][c] * t.hrtf_coef[0][c][0]).sum();
+        assert!((g.ears[0][20].re - 0.707 * h).abs() < 1e-5);
     }
 
     #[test]

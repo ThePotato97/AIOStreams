@@ -2,15 +2,16 @@
 //! LFE or room send) updated once per 256-sample block, the room on the FOA bus, and the two ears
 //! through the synthesis filterbank.
 //!
-//! Absolute level: the filterbank here reconstructs at unity, and the engine's common x8 (on every
-//! path alike) is left out; that factor only offsets a scaling elsewhere in the engine's fixed-
-//! point chain [I], and relative levels are as traced.
+//! Absolute level as traced: the filterbank reconstructs at unity (0.999991 in the engine), the
+//! common x8 undoes the metadata-gain convention and so isn't applied to linear gains, and the
+//! binaural output is scaled by 2^-3.
+//! (The encoder's input headroom is applied to the samples in `input.rs`.)
 
 use crate::complex::C32;
 use crate::direct::{InputGains, Mode, input_gains, lfe_gains};
 use crate::filterbank::{Analysis, LATENCY, Synthesis, Tables};
 use crate::room::Room;
-use crate::tuning::{BANDS, Tuning};
+use crate::tuning::{BANDS, OUTPUT_SCALE, Tuning};
 
 pub const SLOT: usize = 64;
 /// Metadata updates take effect per block of four slots.
@@ -20,8 +21,9 @@ pub use crate::filterbank::LATENCY as FILTERBANK_LATENCY;
 /// What the renderer needs to know about an input for one block.
 #[derive(Debug, Clone, Copy)]
 pub enum Source {
-    /// Dolby x/y/z, render mode, linear metadata gain.
-    Positioned { pos: [f32; 3], mode: Mode, gain: f32 },
+    /// Dolby x/y/z, render mode, linear metadata gain, and whether the element is active
+    /// (an inactive element isn't in the engine's descriptor array).
+    Positioned { pos: [f32; 3], mode: Mode, gain: f32, active: bool },
     Lfe { gain: f32 },
     Silent,
 }
@@ -63,11 +65,13 @@ impl Renderer {
         self.holds_room = false;
         for s in sources {
             let g = match *s {
-                Source::Positioned { pos, mode, gain } => input_gains(&self.t, pos, mode, gain),
+                Source::Positioned { pos, mode, gain, .. } => input_gains(&self.t, pos, mode, gain),
                 Source::Lfe { gain } => lfe_gains(gain),
                 Source::Silent => lfe_gains(0.0),
             };
-            let active = matches!(*s, Source::Positioned { gain, .. } if gain > 0.0);
+            // Any active Mid/Far element that isn't the LFE resets the room's hold, whatever its
+            // gain or position.
+            let active = matches!(*s, Source::Positioned { active: true, .. });
             self.holds_room |= g.holds_room && active;
             self.sends.push(g.send.iter().any(|&v| v != 0.0));
             self.gains.push(g);
@@ -100,6 +104,9 @@ impl Renderer {
         self.room.process(&self.t, &send, self.holds_room, &mut ears);
         self.synth[0].process(&self.fb, &ears[0], left);
         self.synth[1].process(&self.fb, &ears[1], right);
+        for v in left.iter_mut().chain(right.iter_mut()) {
+            *v *= OUTPUT_SCALE;
+        }
     }
 
     pub const fn latency() -> usize {
@@ -123,7 +130,7 @@ mod tests {
         x[10 * SLOT] = 1.0;
         for s in 0..n {
             if s % 4 == 0 {
-                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Off, gain: 1.0 }]);
+                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Off, gain: 1.0, active: true }]);
                 // Off has no HRTF: use Mid for the real test below; Off checked for the pan side
             }
             let (a, b) = (s * SLOT, s * SLOT + SLOT);
@@ -136,7 +143,7 @@ mod tests {
         let (mut l, mut rr) = (vec![0f32; n * SLOT], vec![0f32; n * SLOT]);
         for s in 0..n {
             if s % 4 == 0 {
-                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Mid, gain: 1.0 }]);
+                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Mid, gain: 1.0, active: true }]);
             }
             let (a, b) = (s * SLOT, s * SLOT + SLOT);
             r.slot(&[&x[a..b]], &mut l[a..b], &mut rr[a..b]);
@@ -188,9 +195,9 @@ mod tests {
         let high = run(&mut r, &x);
         let mut r2 = Renderer::new().unwrap();
         let low = run(&mut r2, &lo);
-        // ~+7 dB plateau (x headroom) at 50 Hz, nothing at 5 kHz
+        // ~+7 dB plateau at 50 Hz, then the output's 2^-3; nothing at 5 kHz
         let low_db = 10.0 * (low / 0.5).log10();
-        assert!((low_db - (7.0 + 20.0 * 0.7079f32.log10())).abs() < 1.0, "50 Hz {low_db:.1} dB");
+        assert!((low_db - (7.0 + 20.0 * OUTPUT_SCALE.log10())).abs() < 1.0, "50 Hz {low_db:.1} dB");
         assert!(high < low * 1e-4, "5 kHz leaks");
     }
 }

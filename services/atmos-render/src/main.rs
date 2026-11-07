@@ -3,23 +3,30 @@
 //! has the input's length and timing.
 //!
 //!   ffmpeg -i film.mkv -map 0:a:0 -c copy -f truehd - | atmos-render --format truehd > out.f32
+//!
+//! `--modes stream` (default) renders each element in the stream's own headphone mode (Off,
+//! Near, Mid, Far; Mid where it has none), as Dolby's Reference Player does; `--modes windows`
+//! renders everything Near, as Windows does.
 
 use std::io::{BufWriter, Read, Write};
 
 use anyhow::{Result, bail};
 use atmos_render::eac3_in::Eac3;
 use atmos_render::input::{Feed, Pipeline};
+use atmos_render::objects::Modes;
 use atmos_render::truehd_in::TrueHd;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let format = args.iter().position(|a| a == "--format").and_then(|i| args.get(i + 1)).map(String::as_str);
-    let mut feed: Box<dyn Feed> = match format {
-        Some("truehd") | None => Box::new(TrueHd::new()),
-        Some("eac3") => {
-            let ffmpeg = args.iter().position(|a| a == "--ffmpeg").and_then(|i| args.get(i + 1)).map(String::as_str);
-            Box::new(Eac3::new(ffmpeg.unwrap_or("ffmpeg"))?)
-        }
+    let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str);
+    let modes = match value("--modes") {
+        Some("stream") | None => Modes::Stream,
+        Some("windows") => Modes::Windows,
+        Some(other) => bail!("unsupported --modes {other} (stream or windows)"),
+    };
+    let mut feed: Box<dyn Feed> = match value("--format") {
+        Some("truehd") | None => Box::new(TrueHd::new(modes)),
+        Some("eac3") => Box::new(Eac3::new(value("--ffmpeg").unwrap_or("ffmpeg"), modes)?),
         Some(other) => bail!("unsupported --format {other}"),
     };
     let mut pipeline = Pipeline::new()?;

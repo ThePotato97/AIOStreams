@@ -1,6 +1,7 @@
 //! What a decoder hands the renderer, and the slot/block scheduling between them.
 
 use crate::render::{BLOCK, Renderer, SLOT, Source};
+use crate::tuning::INPUT_HEADROOM;
 
 /// Decoded audio: one Vec per input channel, all the same length, starting at sample `start`.
 pub struct Block {
@@ -47,8 +48,9 @@ impl Pipeline {
             let have = self.pending.first().map(|p| p.len()).unwrap_or(0);
             self.pending = vec![vec![0.0; have]; block.samples.len()];
         }
+        // The Windows encoder's input headroom, then its clip to +/-1, on every sample.
         for (p, s) in self.pending.iter_mut().zip(block.samples) {
-            p.extend(s);
+            p.extend(s.into_iter().map(|v| (v * INPUT_HEADROOM).clamp(-1.0, 1.0)));
         }
         self.taken += n as u64;
         self.render(feed, emit);
