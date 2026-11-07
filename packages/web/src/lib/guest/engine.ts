@@ -10,6 +10,16 @@ import type {
 import { videoEngine } from '../playback/video';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
+import {
+  afterFailure,
+  elementFailure,
+  hlsFailure,
+  hlsPlayer,
+  recovery,
+  sessionGone,
+  type Failure,
+  type Tries,
+} from './failure';
 
 /** A target this little past what is written is waited for, not re-prepared. */
 const UNWRITTEN_WAIT_MS = 60_000;
@@ -29,9 +39,24 @@ export function guestEngine(
      * of seconds; off for a viewer's own seeks, which should land where asked.
      */
     holdUnwritten?: () => boolean;
+    /**
+     * Whether a stream the browser can't decode is converted in full before
+     * playback is reported failed. Off for a user's own playback, which then
+     * plays the file directly instead.
+     */
+    convertOnDecodeError?: boolean;
+    /** The error shown once playback fails, from what failed. */
+    failedMessage?: (detail: string) => string;
+    /** The playback session is gone; reported as failed unless handled. */
+    onExpired?: (message: string) => void;
   } = {}
 ) {
   const holdUnwritten = options.holdUnwritten ?? (() => true);
+  const convertOnDecodeError = options.convertOnDecodeError ?? true;
+  const failedMessage =
+    options.failedMessage ??
+    ((detail: string) =>
+      t`Playback failed (${detail}). Try another quality or ask the host to select another source.`);
   let changeQuality: (
     quality: 'original' | '1080p' | '720p'
   ) => void = () => {};
@@ -42,6 +67,10 @@ export function guestEngine(
     let controller: AbortController | undefined;
     let hls: Hls | undefined;
     let force = false;
+    /** Recoveries tried since a fragment last played. */
+    let tries: Tries = { network: 0, media: 0 };
+    /** The prepare whose playback has been reported failed, once. */
+    let failedAt = -1;
     let quality: 'original' | '1080p' | '720p' = 'original';
     let audio: number | undefined, subtitle: number | undefined;
     let paused = true,
@@ -70,17 +99,57 @@ export function guestEngine(
         },
       });
     };
+    const expired = (message: string) => {
+      if (failedAt === generation) return;
+      failedAt = generation;
+      if (options.onExpired) options.onExpired(message);
+      else emit({ type: 'failed', error: message });
+    };
+    /** Playback failed past recovering: convert all of it, or report it. */
+    const fail = (failure: Failure) => {
+      if (failedAt === generation) return;
+      if (sessionGone(failure.status)) return expired(failure.detail);
+      const at = position();
+      if (
+        playback &&
+        afterFailure(failure, { forced: force, convertOnDecodeError }) ===
+          'convert-all'
+      ) {
+        force = true;
+        void prepare(at);
+        return;
+      }
+      failedAt = generation;
+      emit({
+        type: 'failed',
+        error: failedMessage(failure.detail),
+        retry: { label: t`Retry`, run: () => void prepare(at) },
+      });
+    };
+    /** What hls.js tries first: reload a stream it couldn't fetch, or recover decoding. */
+    const recover = (failure: Failure) => {
+      const step = hls ? recovery(failure, tries) : 'give-up';
+      if (step === 'reload') {
+        const at = generation;
+        tries.network++;
+        // The newest segments may not be written yet: give them a moment.
+        setTimeout(() => {
+          if (at === generation) hls?.startLoad();
+        }, 2000 * tries.network);
+        return;
+      }
+      if (step === 'recover-media') {
+        tries.media++;
+        hls!.recoverMediaError();
+        return;
+      }
+      fail(failure);
+    };
     const nativeEvent = (event: EngineEvent) => {
       if (event.type === 'failed') {
-        if (!force && playback) {
-          force = true;
-          void prepare(position());
-          return;
-        }
-        return emit({
-          type: 'failed',
-          error: t`Playback failed. Try another quality or ask the host to select another source.`,
-        });
+        // The element's own error says why; the raw engine's text doesn't.
+        const failure = elementFailure(video.current?.error);
+        return hls ? recover(failure) : fail(failure);
       }
       if (event.type === 'tracks') return;
       if (event.type === 'position')
@@ -111,23 +180,44 @@ export function guestEngine(
     const raw = videoEngine(video, async (el, url) => {
       hls?.destroy();
       hls = undefined;
+      const native = !!el.canPlayType('application/vnd.apple.mpegurl');
+      const managedMediaSource = 'ManagedMediaSource' in window;
       if (
         !url.includes('.m3u8') ||
-        el.canPlayType('application/vnd.apple.mpegurl')
+        hlsPlayer({ native, managedMediaSource, hlsJs: true }) === 'native'
       ) {
         el.src = url;
         return;
       }
       const at = generation;
+      // Where in the stream playback starts: an unfinished playlist reads as
+      // live, which hls.js would otherwise start at its newest segment.
+      const start = playback
+        ? Math.max(0, target - playback.offsetMs) / 1000
+        : -1;
       try {
         const { default: Hls } = await import('hls.js');
         if (at !== generation) return;
-        if (!Hls.isSupported())
-          throw Error('HLS is not supported in this browser');
-        hls = new Hls({ maxBufferLength: 60, maxMaxBufferLength: 120 });
+        const player = hlsPlayer({
+          native,
+          managedMediaSource,
+          hlsJs: Hls.isSupported(),
+        });
+        if (player === 'native') {
+          el.src = url;
+          return;
+        }
+        if (!player) throw Error('HLS is not supported in this browser');
+        hls = new Hls({
+          maxBufferLength: 60,
+          maxMaxBufferLength: 120,
+          startPosition: start,
+        });
         hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (data.fatal && at === generation)
-            nativeEvent({ type: 'failed', error: t`HLS playback failed` });
+          if (data.fatal && at === generation) recover(hlsFailure(data));
+        });
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          tries = { network: 0, media: 0 };
         });
         hls.loadSource(url);
         hls.attachMedia(el);
@@ -141,6 +231,7 @@ export function guestEngine(
       const at = ++generation;
       controller?.abort();
       controller = new AbortController();
+      tries = { network: 0, media: 0 };
       preparing = true;
       target = positionMs;
       emit({ type: 'state', state: { waiting: true, loaded: false } });
@@ -183,7 +274,10 @@ export function guestEngine(
         if (result.subtitleUrl) raw.setSubtitle(String(subtitle));
         listTracks();
       } catch (error) {
-        if (at === generation && !controller.signal.aborted)
+        if (at !== generation || controller.signal.aborted) return;
+        const { status, message } = error as Error & { status?: number };
+        if (sessionGone(status)) expired(message);
+        else
           emit({
             type: 'failed',
             error: (error as Error).message,
@@ -207,9 +301,11 @@ export function guestEngine(
               positionMs: position(),
               lease: playback.lease,
             })
-            .catch((error) =>
-              emit({ type: 'failed', error: (error as Error).message })
-            );
+            // A blip misses one heartbeat, which the next makes up for;
+            // only a playback the server has dropped stops here.
+            .catch((error: Error & { status?: number }) => {
+              if (sessionGone(error.status)) expired(error.message);
+            });
       }, 10000);
     };
     return {

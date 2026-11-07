@@ -74,9 +74,11 @@ class OwnApi extends GuestApi {
  * item and version it names, so switching version or episode converts the new
  * one; a version the browser can play whole is served as it is.
  *
- * A file still downloading is waited for. If conversion can't start, at open
- * or while preparing the stream, the file plays directly (silent at worst,
- * rather than not at all), and that item and version keep playing directly.
+ * A file still downloading is waited for. If conversion fails, at open, while
+ * preparing the stream or while it plays, the file plays directly from the same
+ * spot (silent at worst, rather than not at all), and that item and version
+ * keep playing directly. Nothing here converts the video: a stream the browser
+ * can't decode plays directly too.
  */
 export function convertingEngine(
   video: React.RefObject<HTMLVideoElement | null>,
@@ -86,14 +88,19 @@ export function convertingEngine(
   const api = new OwnApi(root);
   let info: GuestCurrent | null = null;
   let opened = '';
-  // Only party sync asks again and again for a spot not converted yet.
+  /** The player's handler for a playback the server has dropped. */
+  let onExpired = (_message: string) => {};
   const inner = guestEngine(
     video,
     api,
     () => info!,
     () => {},
     {
+      // Only party sync asks again and again for a spot not converted yet.
       holdUnwritten: () => !!party.state(),
+      convertOnDecodeError: false,
+      failedMessage: (detail) => detail,
+      onExpired: (message) => onExpired(message),
     }
   );
   /** Item and version keys that couldn't convert: they play directly. */
@@ -104,19 +111,45 @@ export function convertingEngine(
     let directEngine: PlayerEngine | null = null;
     let active: PlayerEngine;
     let loading = 0;
-    /** The load converting now, until it has loaded: a failure falls back. */
-    let starting: EngineFile | null = null;
+    /** The file converting now, and where and how it was playing last. */
+    let playing: EngineFile | null = null;
+    let positionMs = 0;
+    let paused = true;
+    const here = (next: EngineFile): EngineFile => ({
+      ...next,
+      startMs: positionMs,
+      paused,
+    });
     const converting = inner.factory((event) => {
-      if (active === converting && starting) {
+      if (active === converting && playing) {
         if (event.type === 'failed') {
-          const next = starting;
-          starting = null;
+          const next = here(playing);
+          playing = null;
           return playDirect(next, event.error);
         }
-        if (event.type === 'loaded') starting = null;
+        if (event.type === 'position' && event.positionMs != null)
+          positionMs = event.positionMs;
+        if (event.type === 'state' && event.state.paused != null)
+          paused = event.state.paused;
+        if (event.type === 'loaded') reopened = false;
       }
       emit(event);
     }, opts);
+    /** Opened again since it last loaded: a second loss plays it directly. */
+    let reopened = false;
+    // Opened again, from where it was, once the server has forgotten it.
+    onExpired = (message) => {
+      if (active !== converting || !playing) return;
+      if (reopened) {
+        const next = here(playing);
+        playing = null;
+        return playDirect(next, message);
+      }
+      reopened = true;
+      opened = '';
+      info = null;
+      load(here(playing));
+    };
     active = converting;
     const use = (engine: PlayerEngine) => {
       if (active !== engine) active.close();
@@ -183,17 +216,19 @@ export function convertingEngine(
         }
       }
     };
-    const load = (next: EngineFile) => {
+    function load(next: EngineFile) {
       const at = ++loading;
-      starting = null;
+      playing = null;
       if (direct.has(keyOf(next))) return loadDirect(next);
       void open(next, at).then((ready) => {
         if (!ready || at !== loading) return;
         use(converting);
-        starting = next;
+        playing = next;
+        positionMs = next.startMs;
+        paused = next.paused ?? true;
         converting.load(next);
       });
-    };
+    }
     // Everything but load goes to whichever engine is playing.
     return new Proxy(converting, {
       get: (_target, prop) =>
@@ -202,7 +237,7 @@ export function convertingEngine(
           : prop === 'close'
             ? () => {
                 loading++;
-                starting = null;
+                playing = null;
                 active.close();
               }
             : Reflect.get(active, prop),

@@ -1122,6 +1122,12 @@ router.get('/subtitle/:index', async (req, res) => {
     .type('text/vtt')
     .send(offsetWebVtt(await upstream.text(), session.offsetMs ?? 0));
 });
+/**
+ * How long the transcoder may take to start answering for converted media.
+ * Only the wait is timed: a segment then streams as fast as the viewer reads
+ * it, which for a copied 4K video can take a while.
+ */
+export const MEDIA_TIMEOUT = { headersMs: 30_000 };
 router.get('/media/:job/:file', async (req, res) => {
   const { session, source } = await streaming(req);
   if (
@@ -1133,10 +1139,27 @@ router.get('/media/:job/:file', async (req, res) => {
   const file = String(req.params.file);
   if (!/^(index\.m3u8|init\.mp4|segment-\d+\.m4s)$/.test(file))
     fail(404, 'Media not found');
-  const upstream = await fetch(transcoder(`/jobs/${session.job}/${file}`), {
-    headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
-    signal: AbortSignal.timeout(30000),
-  });
+  // A viewer that goes away stops the transcoder's answer too.
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.on('close', abort);
+  const timer = setTimeout(abort, MEDIA_TIMEOUT.headersMs);
+  let upstream: globalThis.Response;
+  try {
+    upstream = await fetch(transcoder(`/jobs/${session.job}/${file}`), {
+      headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (res.destroyed) return;
+    logger.warn(
+      { file, cause: errorCause(error) },
+      'transcoder did not answer'
+    );
+    fail(504, 'Conversion did not answer');
+  } finally {
+    clearTimeout(timer);
+  }
   if (!upstream.ok) {
     logger.warn(
       { status: upstream.status, file },
@@ -1168,15 +1191,14 @@ router.get('/media/:job/:file', async (req, res) => {
       upstream.body as import('node:stream/web').ReadableStream
     );
     const revoke = guestSessions.onRevoke(session.token, () => res.destroy());
-    const close = () => stream.destroy();
-    res.on('close', close);
     try {
       await pipeline(stream, res);
     } finally {
       revoke();
-      res.off('close', close);
+      res.off('close', abort);
     }
   }
+  res.off('close', abort);
 });
 router.all('/media/original', async (req, res) => {
   const { session, source } = await streaming(req);

@@ -1847,10 +1847,6 @@ msgstr "Hide episodes"
 msgid "Hide QR code"
 msgstr "Hide QR code"
 
-#: src/lib/guest/engine.ts
-msgid "HLS playback failed"
-msgstr "HLS playback failed"
-
 #. Holding the next key down, as in Hold + Enter
 #: src/lib/input/keys.ts
 msgid "Hold"
@@ -3208,8 +3204,8 @@ msgid "Playback failed: {failure}"
 msgstr "Playback failed: {failure}"
 
 #: src/lib/guest/engine.ts
-msgid "Playback failed. Try another quality or ask the host to select another source."
-msgstr "Playback failed. Try another quality or ask the host to select another source."
+msgid "Playback failed ({detail}). Try another quality or ask the host to select another source."
+msgstr "Playback failed ({detail}). Try another quality or ask the host to select another source."
 
 #: src/pages/history.tsx
 msgid "Played here"

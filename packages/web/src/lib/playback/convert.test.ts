@@ -3,13 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const engines = vi.hoisted(() => ({
   made: [] as FakeEngine[],
-  guestOptions: undefined as { holdUnwritten?: () => boolean } | undefined,
+  guestOptions: undefined as
+    | {
+        holdUnwritten?: () => boolean;
+        convertOnDecodeError?: boolean;
+        onExpired?: (message: string) => void;
+      }
+    | undefined,
   inParty: false,
 }));
 interface FakeEngine {
   name: string;
   emit: (event: unknown) => void;
-  loads: { subtitles?: unknown }[];
+  loads: { subtitles?: unknown; startMs?: number; paused?: boolean }[];
   closes: number;
   seek: ReturnType<typeof vi.fn>;
   ownSubtitles?: boolean;
@@ -25,7 +31,7 @@ function fake(name: string, emit: (event: unknown) => void): FakeEngine {
     seek: vi.fn(),
     ownSubtitles: name === 'converting' ? true : undefined,
     load(file) {
-      engine.loads.push(file as { subtitles?: unknown });
+      engine.loads.push(file as FakeEngine['loads'][number]);
     },
     close() {
       engine.closes++;
@@ -44,7 +50,7 @@ vi.mock('../guest/engine', () => ({
     _api: unknown,
     _current: unknown,
     _onMode: unknown,
-    options: { holdUnwritten?: () => boolean }
+    options: NonNullable<typeof engines.guestOptions>
   ) => {
     engines.guestOptions = options;
     return {
@@ -181,14 +187,63 @@ describe('convertingEngine', () => {
     expect(events.some((e) => e.type === 'failed')).toBe(false);
   });
 
-  it('shows a failure once playing as a failure, without switching', async () => {
+  it('plays directly from the same spot when the stream fails while playing', async () => {
     const { engine, events, converting, direct } = engineUnderTest();
     engine.load(file());
     await settle();
     converting.emit({ type: 'loaded' });
-    converting.emit({ type: 'failed', error: 'HLS playback failed' });
+    converting.emit({ type: 'state', state: { paused: false } });
+    converting.emit({ type: 'position', positionMs: 754_000 });
+    converting.emit({ type: 'failed', error: 'bufferAppendError' });
+    expect(direct()!.loads).toEqual([
+      expect.objectContaining({ startMs: 754_000, paused: false }),
+    ]);
+    expect(converting.closes).toBe(1);
+    expect(toast.warning).toHaveBeenCalledWith(expect.any(String), {
+      description: 'bufferAppendError',
+    });
+    expect(events.some((e) => e.type === 'failed')).toBe(false);
+    // Its calls now go to the direct engine.
+    engine.seek(800_000);
+    expect(direct()!.seek).toHaveBeenCalledWith(800_000);
+  });
+
+  it('never converts the video for its own playback', () => {
+    engineUnderTest();
+    expect(engines.guestOptions?.convertOnDecodeError).toBe(false);
+  });
+
+  it('opens a dropped playback again from where it was, once', async () => {
+    const { engine, converting, direct } = engineUnderTest();
+    engine.load(file());
+    await settle();
+    converting.emit({ type: 'loaded' });
+    converting.emit({ type: 'position', positionMs: 60_000 });
+    engines.guestOptions!.onExpired!('This playback has expired');
+    await settle();
+    expect(opens).toHaveLength(2);
+    expect(converting.loads.map((l) => l.startMs)).toEqual([0, 60_000]);
     expect(direct()).toBeUndefined();
-    expect(events.map((e) => e.type)).toEqual(['loaded', 'failed']);
+    // Lost again before it loaded: it plays directly instead of looping.
+    engines.guestOptions!.onExpired!('This playback has expired');
+    await settle();
+    expect(opens).toHaveLength(2);
+    expect(direct()!.loads).toEqual([
+      expect.objectContaining({ startMs: 60_000 }),
+    ]);
+  });
+
+  it('opens it again after a later loss, once it has played', async () => {
+    const { engine, converting, direct } = engineUnderTest();
+    engine.load(file());
+    await settle();
+    engines.guestOptions!.onExpired!('gone');
+    await settle();
+    converting.emit({ type: 'loaded' });
+    engines.guestOptions!.onExpired!('gone');
+    await settle();
+    expect(opens).toHaveLength(3);
+    expect(direct()).toBeUndefined();
   });
 
   it('remembers a version that had to play directly', async () => {

@@ -33,6 +33,10 @@ const fixture = vi.hoisted(() => ({
   probeError: 'Source probe failed: Invalid data found when processing input',
   scopes: [] as (string | undefined)[],
   chain: { hits: 0, expireA: false, thenTo: '/media/B' },
+  // What the transcoder prepares, and how it sends a segment.
+  prepared: { mode: 'direct' } as { mode: string; id?: string },
+  segment: 'slow' as 'slow' | 'silent',
+  segmentAborts: 0,
 }));
 vi.mock('@aiostreams/core', () => ({
   createLogger: () =>
@@ -114,7 +118,7 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
     }
   ),
 }));
-import guestRouter from './routes.js';
+import guestRouter, { MEDIA_TIMEOUT } from './routes.js';
 import { guestSessions } from './sessions.js';
 const originalFetch = globalThis.fetch;
 let server: Server, base: string;
@@ -251,7 +255,34 @@ function spyFetch() {
         await new Promise<void>((resolve) =>
           fixture.prepares.push({ resolve })
         );
-      return Response.json({ mode: 'direct', meta: media });
+      return Response.json({ ...fixture.prepared, meta: media });
+    }
+    if (/\/jobs\/[^/]+\/segment-\d+\.m4s$/.test(url)) {
+      const signal = init?.signal;
+      // Like a real fetch, an abort ends the answer, or the body mid-way.
+      if (fixture.segment === 'silent')
+        return new Promise<never>((_resolve, reject) =>
+          signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          )
+        );
+      let sent = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal?.addEventListener('abort', () => {
+            fixture.segmentAborts++;
+            controller.error(new DOMException('aborted', 'AbortError'));
+          });
+        },
+        async pull(controller) {
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          if (sent++ === 5) return controller.close();
+          controller.enqueue(new Uint8Array(1000).fill(sent));
+        },
+      });
+      return new Response(body, {
+        headers: { 'Content-Type': 'video/mp4', 'Content-Length': '5000' },
+      });
     }
     return Response.json({ ok: true });
   });
@@ -282,6 +313,10 @@ beforeEach(() => {
     'Source probe failed: Invalid data found when processing input';
   fixture.scopes = [];
   fixture.chain = { hits: 0, expireA: false, thenTo: '/media/B' };
+  fixture.prepared = { mode: 'direct' };
+  fixture.segment = 'slow';
+  fixture.segmentAborts = 0;
+  MEDIA_TIMEOUT.headersMs = 30_000;
   vi.restoreAllMocks();
   spyFetch();
 });
@@ -709,6 +744,63 @@ describe('guest playback authorization', () => {
       join(token);
       await api('/current', token);
       expect(fixture.scopes).toEqual(['owner-scope', 'guest:owner-scope']);
+    });
+  });
+});
+describe('converted media', () => {
+  async function ownSegment() {
+    fixture.prepared = { mode: 'audio', id: 'job-1' };
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const prepared = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: false, container: true, hdr: false },
+    });
+    const { url } = (await prepared.json()) as { url: string };
+    expect(url).toContain('/media/job-1/index.m3u8');
+    return new URL(url.replace('index.m3u8', 'segment-0.m4s'), base);
+  }
+  it('streams a segment that takes longer than the answer timeout', async () => {
+    const url = await ownSegment();
+    MEDIA_TIMEOUT.headersMs = 100;
+    const response = await originalFetch(url);
+    expect(response.status).toBe(200);
+    // The whole body arrives, though it takes three times the timeout.
+    const body = new Uint8Array(await response.arrayBuffer());
+    expect(body.length).toBe(5000);
+    expect(body[4999]).toBe(5);
+  });
+  it('answers 504 when the transcoder never answers', async () => {
+    const url = await ownSegment();
+    MEDIA_TIMEOUT.headersMs = 100;
+    fixture.segment = 'silent';
+    const started = Date.now();
+    const response = await originalFetch(url);
+    expect(response.status).toBe(504);
+    expect(await errorOf(response)).toBe('Conversion did not answer');
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(
+      fixture.logs.some((l) => l.message === 'transcoder did not answer')
+    ).toBe(true);
+  });
+  it('stops reading from the transcoder when the viewer goes away', async () => {
+    const url = await ownSegment();
+    const controller = new AbortController();
+    const response = await originalFetch(url, { signal: controller.signal });
+    const reader = response.body!.getReader();
+    await reader.read();
+    controller.abort();
+    // The server notices the closed socket and aborts its own request.
+    await vi.waitFor(() => expect(fixture.segmentAborts).toBeGreaterThan(0), {
+      timeout: 2000,
     });
   });
 });
