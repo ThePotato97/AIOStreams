@@ -29,6 +29,10 @@ import {
 } from '../lib/playback/fullscreen';
 import { usePlayer } from '../lib/playback/use-player';
 import { videoEngine } from '../lib/playback/video';
+import {
+  audioNeedsConversion,
+  convertingEngine,
+} from '../lib/playback/convert';
 import { useNowPlaying } from '../lib/playback/now-playing';
 import {
   useShowPicks,
@@ -651,7 +655,20 @@ function Player({
     },
     [local]
   );
-  const own = usePlayer(hostPlayer ?? videoEngine(video), {
+  // A browser that can't decode the audio would play it silently; such a
+  // source plays through the server's transcoder (audio converted, video
+  // copied) instead. Apps with their own player (desktop, Android) don't.
+  const [convert] = React.useState(
+    () =>
+      !hostPlayer && !local?.local && !youTube && audioNeedsConversion(source)
+  );
+  // Made once, like the player that owns it.
+  const [engine] = React.useState(
+    () =>
+      hostPlayer ??
+      (convert ? convertingEngine(video, client) : videoEngine(video))
+  );
+  const own = usePlayer(engine, {
     client,
     item,
     url: local?.local

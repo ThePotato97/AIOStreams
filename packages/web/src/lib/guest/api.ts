@@ -13,7 +13,8 @@ export interface GuestCurrent {
 export class GuestApi {
   constructor(
     readonly base: string,
-    readonly token: string
+    // Set later for a user's own playback, once the server opens it.
+    public token: string
   ) {}
   async request<T>(
     path: string,

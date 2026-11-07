@@ -15,7 +15,9 @@ import {
 import {
   userForToken,
   contextFromCredentials,
+  type TokenUser,
 } from '../routes/jellyfin/context.js';
+import { jellyfinCors } from '../routes/jellyfin/cors.js';
 import { locate, ensureMemo } from '../routes/jellyfin/playback.js';
 import { guestPartyState } from '../party/relay.js';
 import { ticketExpiry } from '../party/ticket.js';
@@ -83,17 +85,41 @@ function errorCause(error: unknown): string {
 const FAILURE_BACKOFF_MS = 30000;
 const OWNER_CHECK_MS = 30000;
 const bindings = new Map<string, Binding>();
+/** Marks a source opened by a signed-in user for their own playback. */
+const OWN = 'own';
+const OWN_TTL_MS = 6 * 60 * 60 * 1000;
+const OWN_PER_USER = 4;
+/**
+ * A signed-in user's own converted playback: the web app uses it when the
+ * browser can't decode a source's audio. Shaped like a guest session so the
+ * media routes serve both.
+ */
+interface OwnSession {
+  token: string;
+  uuid: string;
+  expiresAt: number;
+  stream: Source;
+  media: GuestMedia;
+  revision: string;
+  source: string;
+  job?: string;
+  lease?: string;
+  offsetMs?: number;
+  generation?: number;
+}
+const owns = new Map<string, OwnSession>();
 const sources = new Map<string, Source>();
 const requests = new Map<string, number>();
 const digest = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const bearer = (req: Request) =>
   req.get('authorization')?.replace(/^Bearer /i, '') ?? '';
-const enabled = () =>
-  config.party.guestStreaming &&
+/** A transcoder is configured: what both guest and own playback need. */
+const transcoderReady = () =>
   !!config.party.transcoderUrl &&
   (config.party.transcoderSecret?.length ?? 0) >= 32 &&
   !!config.party.internalUrl;
+const enabled = () => config.party.guestStreaming && transcoderReady();
 function fail(status: number, message: string): never {
   throw Object.assign(new Error(message), { status });
 }
@@ -196,6 +222,64 @@ async function active(req: Request, requireMember = true) {
     fail(403, 'Join the party before playing');
   return { session, binding, party };
 }
+/**
+ * The source a configuration plays for an item: the selected one by id or
+ * filename, else one of the same release group, else the first playable.
+ * Fetched by this server, not from the viewer's public IP.
+ */
+async function lookupRecord(
+  req: Request,
+  user: TokenUser,
+  entry: { itemId: string; sourceId?: string; filename?: string },
+  bingeGroup?: string
+): Promise<MediaSourceRecord> {
+  // Sources are fetched by this server, not from the guest's public IP.
+  const guestIp = req.userIp;
+  let ctx;
+  try {
+    req.userIp = undefined;
+    ctx = await contextFromCredentials(
+      req,
+      user.uuid,
+      user.payload.p,
+      user.persona?.id
+    );
+  } finally {
+    req.userIp = guestIp;
+  }
+
+  if (!ctx) fail(410, 'The host configuration is unavailable');
+  const ownerScope = ctx.scope();
+  ctx.scope = () => `guest:${ownerScope}`;
+  const old = req.jf;
+  req.jf = ctx;
+  let loc;
+  try {
+    loc = await locate(req, entry.itemId);
+  } finally {
+    req.jf = old;
+  }
+  const memo = loc && (await ensureMemo(loc, { current: true }));
+  const playable = memo?.sources.filter(
+    (s) => !s.notice && s.needs !== 'youtube'
+  );
+  const record =
+    playable?.find((s) => s.msid === entry.sourceId) ??
+    playable?.find((s) => entry.filename && s.filename === entry.filename) ??
+    playable?.find(
+      (s) => bingeGroup && s.extension.bingeGroup === bingeGroup
+    ) ??
+    playable?.[0];
+  if (!record) fail(404, 'No playable source for this episode');
+  // An explicit host selection must never silently select another file.
+  if (
+    entry.sourceId &&
+    record.msid !== entry.sourceId &&
+    (!entry.filename || record.filename !== entry.filename)
+  )
+    fail(409, 'The selected source expired; ask the host to select it again');
+  return record;
+}
 async function current(req: Request) {
   const state = await active(req);
   const playing = state.party.playing;
@@ -238,58 +322,12 @@ async function current(req: Request) {
     pending = (async () => {
       const user = await userForToken(state.binding.ownerToken);
       if (!user) fail(410, 'The host session has expired');
-      // Sources are fetched by this server, not from the guest's public IP.
-      const guestIp = req.userIp;
-      let ctx;
-      try {
-        req.userIp = undefined;
-        ctx = await contextFromCredentials(
-          req,
-          user.uuid,
-          user.payload.p,
-          user.persona?.id
-        );
-      } finally {
-        req.userIp = guestIp;
-      }
-
-      if (!ctx) fail(410, 'The host configuration is unavailable');
-      const ownerScope = ctx.scope();
-      ctx.scope = () => `guest:${ownerScope}`;
-      const old = req.jf;
-      req.jf = ctx;
-      let loc;
-      try {
-        loc = await locate(req, entry.itemId);
-      } finally {
-        req.jf = old;
-      }
-      const memo = loc && (await ensureMemo(loc, { current: true }));
-      const playable = memo?.sources.filter(
-        (s) => !s.notice && s.needs !== 'youtube'
+      const record = await lookupRecord(
+        req,
+        user,
+        entry,
+        state.binding.bingeGroup
       );
-      const record =
-        playable?.find((s) => s.msid === entry.sourceId) ??
-        playable?.find(
-          (s) => entry.filename && s.filename === entry.filename
-        ) ??
-        playable?.find(
-          (s) =>
-            state.binding.bingeGroup &&
-            s.extension.bingeGroup === state.binding.bingeGroup
-        ) ??
-        playable?.[0];
-      if (!record) fail(404, 'No playable source for this episode');
-      // An explicit host selection must never silently select another file.
-      if (
-        entry.sourceId &&
-        record.msid !== entry.sourceId &&
-        (!entry.filename || record.filename !== entry.filename)
-      )
-        fail(
-          409,
-          'The selected source expired; ask the host to select it again'
-        );
       state.binding.bingeGroup = record.extension.bingeGroup;
       const source: Source = {
         handle: randomSecret(),
@@ -325,6 +363,28 @@ async function current(req: Request) {
   }
   return { ...state, source, media };
 }
+function ownSession(token: string): OwnSession {
+  const session = owns.get(digest(token));
+  if (!session || session.expiresAt <= Date.now() || !transcoderReady())
+    fail(401, 'This playback has expired; start it again');
+  session.expiresAt = Date.now() + OWN_TTL_MS;
+  return session;
+}
+function dropOwn(key: string, session: OwnSession) {
+  owns.delete(key);
+  sources.delete(session.stream.handle);
+  void release(session);
+}
+/** The playback a media URL belongs to: a guest's party, or a user's own. */
+async function streaming(req: Request) {
+  const token =
+    typeof req.query.token === 'string' ? req.query.token : bearer(req);
+  if (token.startsWith('own.')) {
+    const own = ownSession(token);
+    return { session: own, source: own.stream, media: own.media };
+  }
+  return current(req);
+}
 const capabilitySchema = z.object({
   video: z.boolean(),
   audio: z.boolean(),
@@ -340,7 +400,7 @@ const playbackSchema = z.object({
   positionMs: z.number().finite().min(0).max(1e9),
   force: z.boolean().optional(),
 });
-async function release(session: GuestSession) {
+async function release(session: { job?: string; lease?: string }) {
   const job = session.job;
   session.job = undefined;
   if (job)
@@ -354,7 +414,23 @@ router.use((_req, res, next) => {
   res.set('Referrer-Policy', 'no-referrer');
   next();
 });
-router.get('/available', (_req, res) => res.json({ enabled: enabled() }));
+// Apps that load the web app from elsewhere (TVs, the standalone build) call
+// these from another origin; the guest page itself is same-origin.
+router.use(
+  [
+    '/available',
+    '/host',
+    '/publish',
+    '/disable',
+    '/own',
+    '/media',
+    '/subtitle',
+  ],
+  jellyfinCors
+);
+router.get('/available', (_req, res) =>
+  res.json({ enabled: enabled(), conversion: transcoderReady() })
+);
 router.post('/host', async (req, res) => {
   if (!enabled())
     fail(503, 'Configure and enable the transcoder companion first');
@@ -472,7 +548,20 @@ router.post('/prepare', async (req, res) => {
   session.offsetMs = result.offsetMs ?? 0;
   session.source = source.handle;
   session.revision = source.revision;
-  const query = `?token=${encodeURIComponent(session.token)}&lease=${lease}`;
+  res.json(
+    playbackResponse(req, session.token, lease, source, media, body, result)
+  );
+});
+function playbackResponse(
+  req: Request,
+  token: string,
+  lease: string,
+  source: Source,
+  media: GuestMedia,
+  body: z.infer<typeof playbackSchema>,
+  result: { id?: string; mode: GuestPlayback['mode']; offsetMs?: number }
+): GuestPlayback {
+  const query = `?token=${encodeURIComponent(token)}&lease=${lease}`;
   const base = `${req.baseUrl}/media/`;
   const response: GuestPlayback = {
     lease,
@@ -495,10 +584,100 @@ router.post('/prepare', async (req, res) => {
     )
   )
     response.subtitleUrl = `${req.baseUrl}/subtitle/${body.subtitle}${query}`;
-  res.json(response);
+  return response;
+}
+const ownOpenSchema = z.object({
+  itemId: z.string().regex(/^[0-9a-f]{32}$/),
+  sourceId: z.string().max(100).optional(),
+  filename: z.string().max(1000).optional(),
 });
-router.post('/touch', async (req, res) => {
-  const { session } = await active(req);
+// The web app converts its own playback when the browser can't decode a
+// source's audio. Signed in with the app's own token; no party needed.
+router.post('/own/open', async (req, res) => {
+  if (!transcoderReady()) fail(503, 'Conversion is not set up on this server');
+  const user = await userForToken(bearer(req));
+  if (!user) fail(401, 'Sign in to play this');
+  const body = ownOpenSchema.parse(req.body);
+  const record = await lookupRecord(req, user, body);
+  const revision = digest([OWN, user.uuid, body.itemId, record.msid]);
+  const stream: Source = {
+    handle: randomSecret(),
+    party: OWN,
+    revision,
+    playlistItemId: '',
+    itemId: body.itemId,
+    title: '',
+    record,
+  };
+  sources.set(stream.handle, stream);
+  let media: GuestMedia;
+  try {
+    media = await worker('/probe', { input: input(stream) });
+  } catch (error) {
+    sources.delete(stream.handle);
+    throw error;
+  }
+  // A user keeps a few at once (tabs, versions); the oldest go first.
+  const mine = [...owns].filter(([, o]) => o.uuid === user.uuid);
+  for (const [key, old] of mine.slice(
+    0,
+    Math.max(0, mine.length - OWN_PER_USER + 1)
+  ))
+    dropOwn(key, old);
+  const token = `own.${randomSecret()}`;
+  owns.set(digest(token), {
+    token,
+    uuid: user.uuid,
+    expiresAt: Date.now() + OWN_TTL_MS,
+    stream,
+    media,
+    revision,
+    source: stream.handle,
+  });
+  res.json({ token, revision, media });
+});
+router.post('/own/prepare', async (req, res) => {
+  const session = ownSession(bearer(req));
+  const body = playbackSchema.parse(req.body);
+  if (body.revision !== session.revision) fail(409, 'Playback changed');
+  const generation = (session.generation ?? 0) + 1;
+  session.generation = generation;
+  const lease = randomSecret();
+  await release(session);
+  const result = await worker('/prepare', {
+    input: input(session.stream),
+    viewer: lease,
+    request: body,
+  });
+  // A later seek can finish first; this one is then out of date.
+  if (session.generation !== generation || !owns.has(digest(session.token))) {
+    if (result.id)
+      await worker(`/jobs/${result.id}/touch`, {
+        viewer: lease,
+        release: true,
+      }).catch(() => {});
+    fail(409, 'Playback changed');
+  }
+  session.job = result.id;
+  session.lease = lease;
+  session.offsetMs = result.offsetMs ?? 0;
+  res.json(
+    playbackResponse(
+      req,
+      session.token,
+      lease,
+      session.stream,
+      session.media,
+      body,
+      result
+    )
+  );
+});
+router.post(['/touch', '/own/touch'], async (req, res) => {
+  const token = bearer(req);
+  const { session } = token.startsWith('own.')
+    ? { session: ownSession(token) }
+    : await active(req);
   const body = z
     .object({
       positionMs: z.number().finite().min(0).max(1e9),
@@ -586,18 +765,19 @@ async function forward(source: Source, req: Request, res: Response) {
 // Opaque input handles are known only to this server and its private companion.
 router.all('/source/:handle', async (req, res) => {
   const source = sources.get(String(req.params.handle));
-  if (
-    !enabled() ||
-    !source ||
-    !bindings.has(source.party) ||
-    !(await guestPartyState(source.party))
-  )
-    fail(404, 'Source expired');
+  if (!source) fail(404, 'Source expired');
+  const alive =
+    source.party === OWN
+      ? transcoderReady()
+      : enabled() &&
+        bindings.has(source.party) &&
+        !!(await guestPartyState(source.party));
+  if (!alive) fail(404, 'Source expired');
   if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Method not allowed');
   await forward(source, req, res);
 });
 router.get('/subtitle/:index', async (req, res) => {
-  const { source, session, media } = await current(req);
+  const { source, session, media } = await streaming(req);
   if (
     session.revision !== source.revision ||
     session.source !== source.handle ||
@@ -635,7 +815,7 @@ router.get('/subtitle/:index', async (req, res) => {
     .send(offsetWebVtt(await upstream.text(), session.offsetMs ?? 0));
 });
 router.get('/media/:job/:file', async (req, res) => {
-  const { session, source } = await current(req);
+  const { session, source } = await streaming(req);
   if (
     session.revision !== source.revision ||
     session.job !== req.params.job ||
@@ -691,7 +871,7 @@ router.get('/media/:job/:file', async (req, res) => {
   }
 });
 router.all('/media/original', async (req, res) => {
-  const { session, source } = await current(req);
+  const { session, source } = await streaming(req);
   if (
     session.revision !== source.revision ||
     session.source !== source.handle ||
@@ -703,7 +883,7 @@ router.all('/media/original', async (req, res) => {
   const timer = setInterval(() => {
     if (checking) return;
     checking = true;
-    void current(req)
+    void streaming(req)
       .then((now) => {
         if (
           now.source.revision !== source.revision ||
@@ -746,6 +926,8 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
 });
 const sweep = setInterval(() => {
   guestSessions.sweep();
+  for (const [key, own] of owns)
+    if (own.expiresAt <= Date.now()) dropOwn(key, own);
   for (const [id, b] of bindings)
     void guestPartyState(id)
       .then((p) => {

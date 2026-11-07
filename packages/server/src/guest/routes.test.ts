@@ -336,4 +336,82 @@ describe('guest playback authorization', () => {
     });
     expect(JSON.stringify(fixture.logs)).not.toContain(token);
   });
+  it("converts a signed-in user's own playback without a party", async () => {
+    expect(
+      (await api('/own/open', '', { itemId: 'c'.repeat(32) })).status
+    ).toBe(401);
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    expect(opened.status).toBe(200);
+    const {
+      token,
+      revision,
+      media: probed,
+    } = (await opened.json()) as {
+      token: string;
+      revision: string;
+      media: { tracks: unknown[] };
+    };
+    expect(token).toMatch(/^own\./);
+    expect(probed.tracks).toHaveLength(1);
+    const prepared = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: false, container: false, hdr: false },
+    });
+    expect(prepared.status).toBe(200);
+    const playback = (await prepared.json()) as { url: string; lease: string };
+    expect(playback.url).toContain('/media/original');
+    expect(playback.url).toContain(encodeURIComponent(token));
+    expect(playback.url).not.toContain('provider');
+    // A heartbeat for its own lease is accepted.
+    const touched = await api('/own/touch', token, {
+      positionMs: 1000,
+      lease: playback.lease,
+    });
+    expect(touched.status).toBe(200);
+    // The wrong revision is refused, and a made-up session is unknown.
+    expect(
+      (
+        await api('/own/prepare', token, {
+          revision: 'f'.repeat(64),
+          quality: 'original',
+          positionMs: 0,
+          capabilities: {
+            video: true,
+            audio: true,
+            container: true,
+            hdr: false,
+          },
+        })
+      ).status
+    ).toBe(409);
+    expect(
+      (
+        await api('/own/prepare', `own.${'x'.repeat(43)}`, {
+          revision,
+          quality: 'original',
+          positionMs: 0,
+          capabilities: {
+            video: true,
+            audio: true,
+            container: true,
+            hdr: false,
+          },
+        })
+      ).status
+    ).toBe(401);
+  });
+  it('allows app requests from another origin', async () => {
+    const response = await originalFetch(`${base}/available`, {
+      headers: { Origin: 'http://tv.example' },
+    });
+    expect(response.headers.get('access-control-allow-origin')).toBe(
+      'http://tv.example'
+    );
+    expect(await response.json()).toEqual({ enabled: true, conversion: true });
+  });
 });
