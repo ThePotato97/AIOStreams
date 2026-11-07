@@ -259,6 +259,16 @@ export function ffmpegArgs(
     '-sn',
     '-map_metadata',
     '-1',
+    // Timestamps as in the source (from its start), as Jellyfin does: copied
+    // video starts at the keyframe before the seek, the converted audio at the
+    // seek itself, and only real timestamps keep the two in step in browsers.
+    '-copyts',
+    '-avoid_negative_ts',
+    'disabled',
+    '-start_at_zero',
+    // Video read before the audio's first packet waits here.
+    '-max_muxing_queue_size',
+    '2048',
     '-f',
     'hls',
     '-hls_time',
@@ -267,6 +277,11 @@ export function ffmpegArgs(
     'event',
     '-hls_segment_type',
     'fmp4',
+    // The audio's later start goes in each fragment's timestamps (tfdt), not
+    // an edit list, which hls.js and MSE don't apply; no sidx, which makes
+    // FFmpeg rewrite timestamps at open-GOP boundaries.
+    '-hls_segment_options',
+    'movflags=+frag_discont+skip_sidx',
     '-hls_fmp4_init_filename',
     'init.mp4',
     '-hls_segment_filename',
@@ -281,4 +296,65 @@ export function ffmpegArgs(
         : 'cpu'
       : null;
   return { args, offsetMs: offset * 1000, policy, tonemap };
+}
+
+/** The boxes in an ISO BMFF byte range: [type, start of content, end]. */
+function* boxes(data, from = 0, to = data.length) {
+  let at = from;
+  while (at + 8 <= to) {
+    let size = data.readUInt32BE(at);
+    const type = data.toString('latin1', at + 4, at + 8);
+    let header = 8;
+    if (size === 1) {
+      size = Number(data.readBigUInt64BE(at + 8));
+      header = 16;
+    } else if (size === 0) size = to - at;
+    if (size < header || at + size > to) return;
+    yield [type, at + header, at + size];
+    at += size;
+  }
+}
+const child = (data, from, to, type) => {
+  for (const box of boxes(data, from, to)) if (box[0] === type) return box;
+  return null;
+};
+/**
+ * Where a converted stream starts, in seconds of the source: its first
+ * fragment's earliest decode time (tfdt), which is where hls.js puts the
+ * player's 0. Null if the segment can't be read.
+ */
+export function streamStart(init, segment) {
+  const timescales = new Map();
+  const moov = child(init, 0, init.length, 'moov');
+  if (!moov) return null;
+  for (const [type, from, to] of boxes(init, moov[1], moov[2])) {
+    if (type !== 'trak') continue;
+    const tkhd = child(init, from, to, 'tkhd');
+    const mdia = child(init, from, to, 'mdia');
+    const mdhd = mdia && child(init, mdia[1], mdia[2], 'mdhd');
+    if (!tkhd || !mdhd) continue;
+    const id = init.readUInt32BE(tkhd[1] + (init[tkhd[1]] === 1 ? 20 : 12));
+    timescales.set(
+      id,
+      init.readUInt32BE(mdhd[1] + (init[mdhd[1]] === 1 ? 20 : 12))
+    );
+  }
+  const moof = child(segment, 0, segment.length, 'moof');
+  if (!moof) return null;
+  let start = Infinity;
+  for (const [type, from, to] of boxes(segment, moof[1], moof[2])) {
+    if (type !== 'traf') continue;
+    const tfhd = child(segment, from, to, 'tfhd');
+    const tfdt = child(segment, from, to, 'tfdt');
+    if (!tfhd || !tfdt) continue;
+    const scale = timescales.get(segment.readUInt32BE(tfhd[1] + 4));
+    if (!scale) continue;
+    const time =
+      segment[tfdt[1]] === 1
+        ? Number(segment.readBigInt64BE(tfdt[1] + 4))
+        : segment.readUInt32BE(tfdt[1] + 4);
+    // AAC's priming before 0 is negative, which hls.js ignores too.
+    if (time >= 0) start = Math.min(start, time / scale);
+  }
+  return Number.isFinite(start) ? start : null;
 }

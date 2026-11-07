@@ -4,7 +4,13 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
-import { metadata, select, ffmpegArgs, duration } from './media.mjs';
+import {
+  metadata,
+  select,
+  ffmpegArgs,
+  duration,
+  streamStart,
+} from './media.mjs';
 const exec = promisify(execFile);
 let dir, media;
 before(async () => {
@@ -69,7 +75,114 @@ before(async () => {
     `${dir}/source.mkv`,
   ]);
   media = metadata(JSON.parse(stdout));
+  // Keyframes only every 10 s, as in many real releases, with one white
+  // frame and one beep together at 13 s and 17 s.
+  await exec('ffmpeg', [
+    '-v',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    "color=black:size=320x180:rate=24,drawbox=c=white:t=fill:enable='between(t,13,13.04)+between(t,17,17.04)'",
+    '-f',
+    'lavfi',
+    '-i',
+    "sine=frequency=1000:sample_rate=48000,volume='if(between(t,13,13.05)+between(t,17,17.05),1,0)':eval=frame",
+    '-t',
+    '24',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-bf',
+    '3',
+    '-g',
+    '240',
+    '-keyint_min',
+    '240',
+    '-sc_threshold',
+    '0',
+    '-c:a',
+    'eac3',
+    `${dir}/longgop.mkv`,
+  ]);
 });
+/** When the white frames and the beeps play, by the output's own timestamps. */
+async function markers(file) {
+  const video = await exec('ffmpeg', [
+    '-copyts',
+    '-i',
+    file,
+    '-vf',
+    'signalstats,metadata=print:key=lavfi.signalstats.YAVG',
+    '-an',
+    '-f',
+    'null',
+    '-',
+  ]);
+  const flashes = [];
+  let time = 0;
+  for (const line of video.stderr.split('\n')) {
+    const at = /pts_time:([\d.]+)/.exec(line);
+    if (at) time = Number(at[1]);
+    const luma = /YAVG=([\d.]+)/.exec(line);
+    if (luma && Number(luma[1]) > 100) flashes.push(time);
+  }
+  const audio = await exec('ffmpeg', [
+    '-copyts',
+    '-i',
+    file,
+    '-af',
+    'silencedetect=n=-30dB:d=0.3',
+    '-vn',
+    '-f',
+    'null',
+    '-',
+  ]);
+  const beeps = [...audio.stderr.matchAll(/silence_end: ([\d.]+)/g)]
+    .map((m) => Number(m[1]))
+    // The end of the file reads as the end of a silence too.
+    .filter((t) => t < 23);
+  return { flashes, beeps };
+}
+async function convertLongGop(positionMs) {
+  const input = `${dir}/longgop.mkv`,
+    output = `${dir}/longgop-${positionMs}`;
+  const { stdout } = await exec('ffprobe', [
+    '-v',
+    'error',
+    '-show_format',
+    '-show_streams',
+    '-of',
+    'json',
+    input,
+  ]);
+  const command = ffmpegArgs(
+    input,
+    metadata(JSON.parse(stdout)),
+    request({
+      positionMs,
+      capabilities: { video: true, audio: false, container: false, hdr: false },
+    }),
+    output
+  );
+  await mkdir(output);
+  await exec('ffmpeg', command.args, { timeout: 60000 });
+  const init = await readFile(`${output}/init.mp4`);
+  const segments = (await readFile(`${output}/index.m3u8`, 'utf8'))
+    .split('\n')
+    .filter((l) => l.endsWith('.m4s'));
+  const first = await readFile(`${output}/${segments[0]}`);
+  const all = `${output}/all.mp4`;
+  await writeFile(
+    all,
+    Buffer.concat([
+      init,
+      ...(await Promise.all(segments.map((s) => readFile(`${output}/${s}`)))),
+    ])
+  );
+  return { command, init, first, all };
+}
 after(async () => {
   await rm(dir, { recursive: true, force: true });
 });
@@ -376,6 +489,53 @@ test('real FFmpeg: HDR to SDR', async () => {
   assert.equal(JSON.parse(result.stdout).streams[0].codec_name, 'h264');
 });
 
+test('real FFmpeg: copied video and converted audio stay in step after a seek', async () => {
+  // 15 s is 5 s past the keyframe at 10 s: the video starts there, the
+  // converted audio at the seek (12 s, floored to 4 s).
+  const { command, init, first, all } = await convertLongGop(15000);
+  assert.equal(command.policy.mode, 'audio');
+  // Browsers (MSE) apply a single edit at most. The audio's later start must
+  // be in its timestamps, not an empty edit, which they skip and which
+  // played the audio up to a keyframe interval early.
+  const trace = await exec('ffprobe', [
+    '-v',
+    'trace',
+    '-i',
+    `${dir}/longgop-15000/init.mp4`,
+  ]);
+  assert.doesNotMatch(trace.stderr, /time=-1 rate/);
+  // The stream starts at the keyframe, not where the seek was asked for.
+  const start = streamStart(init, first);
+  assert.ok(Math.abs(start - 10) < 0.1, `stream starts at ${start}`);
+  // White frames and beeps, at their source times and together.
+  const { flashes, beeps } = await markers(all);
+  assert.equal(beeps.length, 2, `beeps ${beeps}`);
+  for (const [i, at] of [13, 17].entries()) {
+    const flash = flashes.find((t) => t >= at - 0.1 && t <= at + 0.2);
+    assert.ok(flash != null, `no white frame near ${at}: ${flashes}`);
+    assert.ok(Math.abs(beeps[i] - at) < 0.05, `beep at ${beeps[i]}`);
+    assert.ok(
+      Math.abs(beeps[i] - flash) < 0.06,
+      `flash ${flash}, beep ${beeps[i]}`
+    );
+  }
+});
+
+test('real FFmpeg: a stream from the start reports its start, past AAC priming', async () => {
+  const { init, first } = await convertLongGop(0);
+  // The audio's priming is written before 0, which is skipped.
+  const start = streamStart(init, first);
+  assert.ok(start >= 0 && start < 0.1, `stream starts at ${start}`);
+});
+
+test('streamStart reads nothing from data that is not a stream', () => {
+  assert.equal(streamStart(Buffer.alloc(0), Buffer.alloc(0)), null);
+  assert.equal(
+    streamStart(Buffer.from('not media at all'), Buffer.alloc(16)),
+    null
+  );
+});
+
 test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and GPU fallback', async () => {
   const { createServer: createHttpServer } = await import('node:http');
   const { createReadStream } = await import('node:fs');
@@ -383,7 +543,9 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
   const source = createHttpServer(async (req, res) => {
     const file = req.url.includes('styled')
       ? `${dir}/styled.mkv`
-      : `${dir}/source.mkv`;
+      : req.url.includes('longgop')
+        ? `${dir}/longgop.mkv`
+        : `${dir}/source.mkv`;
     const size = (await stat(file)).size;
     const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? '');
     const start = range ? Number(range[1]) : 0,
@@ -451,6 +613,28 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
       await (await call(`/jobs/${job.id}/index.m3u8`)).text(),
       /#EXT-X-MAP/
     );
+    // A seek between keyframes reports where the stream really starts: the
+    // keyframe, not the floored seek, which put positions seconds off.
+    const longInput = `${origin}/party/guest/source/longgop${'b'.repeat(36)}`;
+    const long = await call('/prepare', {
+      input: longInput,
+      viewer: 'long'.repeat(5),
+      request: request({
+        positionMs: 15000,
+        capabilities: { video: true, audio: false, container: false },
+      }),
+    });
+    assert.equal(long.status, 200);
+    const longJob = await long.json();
+    assert.equal(longJob.mode, 'audio');
+    assert.ok(
+      Math.abs(longJob.offsetMs - 10000) < 100,
+      `offset ${longJob.offsetMs}`
+    );
+    await call(`/jobs/${longJob.id}/touch`, {
+      viewer: 'long'.repeat(5),
+      release: true,
+    });
     const subtitle = await call('/subtitle', { input, index: 2 });
     assert.equal(subtitle.status, 200);
     assert.match(await subtitle.text(), /WEBVTT/);

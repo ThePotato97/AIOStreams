@@ -6,7 +6,7 @@ import { mkdir, rm, readFile, stat, readdir } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
-import { metadata, ffmpegArgs, select } from './media.mjs';
+import { metadata, ffmpegArgs, select, streamStart } from './media.mjs';
 
 const exec = promisify(execFile);
 const secret = process.env.TRANSCODER_SECRET ?? '';
@@ -209,6 +209,21 @@ function start(job, encoder, tonemap = 'gpu') {
     else job.finished = true;
   });
 }
+/**
+ * Sets where the stream really starts. Copied video starts at the keyframe
+ * before the seek, up to a few seconds early, and the player's position,
+ * subtitles and party sync are counted from this.
+ */
+async function measureStart(job, playlist) {
+  const first = playlist.split('\n').find((line) => line.endsWith('.m4s'));
+  if (!first) return;
+  const [init, segment] = await Promise.all([
+    readFile(`${job.dir}/init.mp4`).catch(() => null),
+    readFile(`${job.dir}/${first}`).catch(() => null),
+  ]);
+  const start = init && segment && streamStart(init, segment);
+  if (start != null && start >= 0) job.offsetMs = Math.round(start * 1000);
+}
 async function prepare(body) {
   const input = inputUrl(body.input);
   const meta = await probe(input);
@@ -243,7 +258,8 @@ async function prepare(body) {
     (j) =>
       j.key === key &&
       !j.error &&
-      positionMs >= j.offsetMs &&
+      // Its real start can be a frame past the position asked for.
+      positionMs >= j.offsetMs - 1000 &&
       positionMs <= (j.producedMs ?? j.offsetMs) + 8000
   );
   if (!job) {
@@ -295,6 +311,7 @@ async function prepare(body) {
       () => ''
     );
     if (playlist.includes('.m4s') && playlist.includes('#EXTINF:')) {
+      if (!job.ready) await measureStart(job, playlist);
       job.ready = true;
       break;
     }
