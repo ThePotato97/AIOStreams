@@ -429,6 +429,7 @@ const capabilitySchema = z.object({
   container: z.boolean(),
   hdr: z.boolean(),
   surround: z.boolean().optional(),
+  lossless: z.boolean().optional(),
   subtitles: z
     .array(z.enum(['ass', 'pgs']))
     .max(2)

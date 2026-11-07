@@ -7,6 +7,7 @@ import type {
   EngineEvent,
 } from '../playback/engine';
 import { videoEngine } from '../playback/video';
+import { watchHeadphones } from '../playback/headphone-setting';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
 import { sleep, whenReady } from './ready';
@@ -374,7 +375,8 @@ export function guestEngine(
       stopRenderer();
       const info = current();
       try {
-        const probed = await browserCapabilities(info.media, audio);
+        askedHeadphones = headphones;
+        const probed = await browserCapabilities(info.media, audio, headphones);
         const capabilities = {
           ...probed,
           subtitles: (probed.subtitles ?? []).filter((f) => !unrendered.has(f)),
@@ -442,6 +444,26 @@ export function guestEngine(
       void prepare(position());
     };
     let heartbeat: ReturnType<typeof setInterval> | undefined;
+    // Converted surround is kept for headphones, and downmixed without them:
+    // a change prepares again, as does the setting read only after a prepare.
+    let headphones = false;
+    /** What the last prepare asked for. */
+    let askedHeadphones: boolean | null = null;
+    let unwatch: (() => void) | null = null;
+    const watch = () => {
+      unwatch ??= watchHeadphones((now) => {
+        headphones = now;
+        if (askedHeadphones === null || askedHeadphones === now) return;
+        const channels = current().media.tracks.find(
+          (t) => t.type === 'audio' && t.index === audio
+        )?.channels;
+        const converted = preparing
+          ? true
+          : playback?.mode === 'audio' || playback?.mode === 'video';
+        if (converted && (channels ?? 2) > 2)
+          void prepare(preparing ? target : position());
+      });
+    };
     const startHeartbeat = () => {
       clearInterval(heartbeat);
       heartbeat = setInterval(() => {
@@ -466,6 +488,7 @@ export function guestEngine(
       picksTracks: true,
       load(next) {
         startHeartbeat();
+        watch();
         playback = null;
         file = next;
         force = false;
@@ -551,6 +574,8 @@ export function guestEngine(
         stopRenderer();
         raw.close();
         clearInterval(heartbeat);
+        unwatch?.();
+        unwatch = null;
         // Nothing to release before a playback was ever prepared.
         if (playback?.lease)
           void api

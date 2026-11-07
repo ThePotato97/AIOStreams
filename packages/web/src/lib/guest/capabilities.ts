@@ -66,7 +66,9 @@ export function codec(track: GuestTrack): string | null {
 }
 export async function browserCapabilities(
   media: GuestMedia,
-  audioIndex?: number
+  audioIndex?: number,
+  /** Surround is rendered for headphones in the page. */
+  headphones = false
 ): Promise<GuestCapabilities> {
   const el = document.createElement('video');
   const video = media.tracks.find((t) => t.type === 'video');
@@ -156,25 +158,40 @@ export async function browserCapabilities(
     void context.close().catch(() => {});
     return channels >= 6;
   };
-  // Whether converted surround can stay surround: 5.1 AAC, asked directly.
-  let surround = false;
-  if ((audio?.channels ?? 2) > 2 && navigator.mediaCapabilities) {
+  const plays = async (
+    contentType: string,
+    channels: number,
+    bitrate: number
+  ) => {
     try {
       const result = await navigator.mediaCapabilities.decodingInfo({
         type: 'media-source',
         audio: {
-          contentType: 'audio/mp4; codecs="mp4a.40.2"',
-          channels: '6',
-          bitrate: 384000,
+          contentType,
+          channels: String(channels),
+          bitrate,
           samplerate: 48000,
         },
       });
-      // On a stereo output the transcoder's own downmix (normalised, no
-      // clipping) is better than the browser's: keep surround for speakers.
-      surround = result.supported && surroundOutput();
+      return result.supported;
     } catch {
-      /* Stereo, as before. */
+      return false;
     }
+  };
+  // Whether converted surround can stay surround, and as what: FLAC at the
+  // source's layout up to 7.1, else 5.1 AAC, asked directly.
+  let surround = false,
+    lossless = false;
+  if ((audio?.channels ?? 2) > 2 && navigator.mediaCapabilities) {
+    const [flac, aac] = await Promise.all([
+      plays('audio/mp4; codecs="flac"', 8, 6912000),
+      plays('audio/mp4; codecs="mp4a.40.2"', 6, 384000),
+    ]);
+    // On a stereo output the transcoder's own downmix (normalised, no
+    // clipping) beats the browser's: surround is kept for speakers, and for
+    // headphones where it's rendered here with an HRTF.
+    surround = (flac || aac) && (headphones || surroundOutput());
+    lossless = surround && flac;
   }
   const codecs = [vc, ac].filter(Boolean).join(',');
   // ASS and PGS are drawn here, not burned in, where the renderers run.
@@ -186,6 +203,7 @@ export async function browserCapabilities(
       !!mime && !!vc && !!el.canPlayType(`${mime}; codecs="${codecs}"`),
     hdr,
     surround,
+    lossless,
     subtitles,
   };
 }

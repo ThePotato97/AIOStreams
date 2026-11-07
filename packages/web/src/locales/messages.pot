@@ -1802,6 +1802,10 @@ msgstr ""
 msgid "Has a PIN"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Headphones"
+msgstr ""
+
 #: src/components/player/subtitle-sync.tsx
 msgid "Heard"
 msgstr ""
@@ -1907,6 +1911,14 @@ msgstr ""
 
 #: src/pages/settings/about.tsx
 msgid "How to use the app and what each setting does."
+msgstr ""
+
+#: src/components/player/options.tsx
+msgid "HRIR: {custom}"
+msgstr ""
+
+#: src/components/player/options.tsx
+msgid "HRIR: Dolby Atmos for Headphones (HeSuVi)"
 msgstr ""
 
 #: src/lib/subtitles/style.ts
@@ -2178,6 +2190,10 @@ msgstr ""
 
 #: src/pages/search.tsx
 msgid "Listening…"
+msgstr ""
+
+#: src/components/player/options.tsx
+msgid "Load your own HRIR…"
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
@@ -2706,6 +2722,10 @@ msgstr ""
 
 #: src/pages/settings/cache.tsx
 msgid "Older ones wait for the server instead. Without a connection, everything saved is shown."
+msgstr ""
+
+#: src/components/player/options.tsx
+msgid "On"
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
@@ -4468,6 +4488,10 @@ msgstr ""
 msgid "That is not a valid regular expression."
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "That isn't a HeSuVi HRIR file: it needs 14 channels, in HeSuVi's order."
+msgstr ""
+
 #: src/lib/party/party.ts
 msgid "That party has ended."
 msgstr ""
@@ -4779,6 +4803,10 @@ msgstr ""
 msgid "This show has no episodes to pick from yet."
 msgstr ""
 
+#: src/lib/playback/video.ts
+msgid "This stream can't play through virtual surround, so it's silent until the page is reloaded."
+msgstr ""
+
 #: src/pages/trailer.tsx
 msgid "This trailer can't play in the app."
 msgstr ""
@@ -5019,6 +5047,10 @@ msgstr ""
 msgid "Use Quick Connect, or the configuration’s password."
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Use the bundled HRIR"
+msgstr ""
+
 #: src/pages/sign-in.tsx
 msgid "Use the configuration’s password."
 msgstr ""
@@ -5119,6 +5151,10 @@ msgstr ""
 
 #: src/components/licenses.tsx
 msgid "View"
+msgstr ""
+
+#: src/components/player/options.tsx
+msgid "Virtual surround"
 msgstr ""
 
 #: src/components/licenses.tsx

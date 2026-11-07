@@ -114,3 +114,82 @@ describe('HDR video', () => {
     expect(asked.some((c) => JSON.stringify(c).includes('pq'))).toBe(false);
   });
 });
+
+describe('surround', () => {
+  const media = (channels: number) =>
+    ({
+      durationMs: 1000,
+      container: 'matroska,webm',
+      bitrate: 1,
+      chapters: [],
+      tracks: [
+        { index: 0, type: 'video', codec: 'h264', profile: 'High', title: '' },
+        { index: 1, type: 'audio', codec: 'truehd', channels, title: '' },
+      ],
+    }) as unknown as Parameters<typeof browserCapabilities>[0];
+  /** A browser: what it decodes, how many channels it outputs, headphones on. */
+  const browser = (o: {
+    flac: boolean;
+    aac: boolean;
+    outputs: number;
+    headphones?: boolean;
+  }) => {
+    vi.stubGlobal('document', {
+      createElement: () => ({ canPlayType: () => '' }),
+    });
+    vi.stubGlobal('navigator', {
+      mediaCapabilities: {
+        decodingInfo: async (config: { audio?: { contentType: string } }) => ({
+          supported: config.audio?.contentType.includes('flac')
+            ? o.flac
+            : config.audio?.contentType.includes('mp4a')
+              ? o.aac
+              : true,
+        }),
+      },
+    });
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        destination = { maxChannelCount: o.outputs };
+        close = async () => {};
+      }
+    );
+    headphones = !!o.headphones;
+  };
+  let headphones = false;
+  afterEach(() => vi.unstubAllGlobals());
+  const pick = async (channels = 8) => {
+    const { surround, lossless } = await browserCapabilities(
+      media(channels),
+      undefined,
+      headphones
+    );
+    return { surround, lossless };
+  };
+
+  it('is lossless where FLAC plays, on a surround output', async () => {
+    browser({ flac: true, aac: true, outputs: 8 });
+    expect(await pick()).toEqual({ surround: true, lossless: true });
+  });
+  it('is 5.1 AAC where FLAC does not play', async () => {
+    browser({ flac: false, aac: true, outputs: 6 });
+    expect(await pick()).toEqual({ surround: true, lossless: false });
+  });
+  it('is downmixed by the server for a stereo output', async () => {
+    browser({ flac: true, aac: true, outputs: 2 });
+    expect(await pick()).toEqual({ surround: false, lossless: false });
+  });
+  it('stays surround on a stereo output for headphones, rendered here', async () => {
+    browser({ flac: true, aac: true, outputs: 2, headphones: true });
+    expect(await pick()).toEqual({ surround: true, lossless: true });
+    browser({ flac: false, aac: true, outputs: 2, headphones: true });
+    expect(await pick()).toEqual({ surround: true, lossless: false });
+  });
+  it('is stereo where neither plays, or the source is stereo', async () => {
+    browser({ flac: false, aac: false, outputs: 8, headphones: true });
+    expect(await pick()).toEqual({ surround: false, lossless: false });
+    browser({ flac: true, aac: true, outputs: 8, headphones: true });
+    expect(await pick(2)).toEqual({ surround: false, lossless: false });
+  });
+});

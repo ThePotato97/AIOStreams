@@ -62,8 +62,28 @@ const fakes = vi.hoisted(() => {
 vi.mock('@lingui/core/macro', () => ({
   t: (s: TemplateStringsArray, ...v: unknown[]) => String.raw({ raw: s }, ...v),
 }));
+const asked = vi.hoisted(() => ({ headphones: [] as boolean[] }));
 vi.mock('./capabilities', () => ({
-  browserCapabilities: async () => ({ subtitles: ['ass', 'pgs'] }),
+  browserCapabilities: async (
+    _media: unknown,
+    _audio: unknown,
+    headphones: boolean
+  ) => {
+    asked.headphones.push(headphones);
+    return { subtitles: ['ass', 'pgs'] };
+  },
+}));
+/** The headphones setting: its listener, called as the setting would be. */
+const headphones = vi.hoisted(() => ({
+  listener: null as ((on: boolean) => void) | null,
+}));
+vi.mock('../playback/headphone-setting', () => ({
+  watchHeadphones: (listener: (on: boolean) => void) => {
+    headphones.listener = listener;
+    return () => {
+      headphones.listener = null;
+    };
+  },
 }));
 const renderers = vi.hoisted(() => ({
   ass: [] as { content: string; fonts: string[]; destroyed: boolean }[],
@@ -127,7 +147,15 @@ const media = {
   bitrate: 1,
   tracks: [
     { index: 0, type: 'video', codec: 'h264', title: 'Video' },
-    { index: 1, type: 'audio', codec: 'eac3', title: 'English', default: true },
+    {
+      index: 1,
+      type: 'audio',
+      codec: 'eac3',
+      title: 'English',
+      default: true,
+      channels: 6,
+    },
+    { index: 2, type: 'audio', codec: 'aac', title: 'Commentary', channels: 2 },
   ],
   chapters: [],
 } as unknown as GuestCurrent['media'];
@@ -710,5 +738,51 @@ describe('preparing', () => {
     await start(engine);
     expect(failures()).toHaveLength(1);
     expect(failures()[0].retry).toBeDefined();
+  });
+});
+
+describe('headphones', () => {
+  beforeEach(() => {
+    asked.headphones = [];
+  });
+  it('prepares again with surround when headphones turn on, and off', async () => {
+    const { engine } = setup();
+    await start(engine, 60_000);
+    expect(asked.headphones).toEqual([false]);
+    // Also how a setting read only after the first prepare arrives.
+    headphones.listener!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(asked.headphones).toEqual([false, true]);
+    // The same value again changes nothing.
+    headphones.listener!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(2);
+    headphones.listener!(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(asked.headphones).toEqual([false, true, false]);
+    expect(prepares).toHaveLength(3);
+  });
+  it('leaves stereo, and audio that is not converted, alone', async () => {
+    const { engine } = setup();
+    await start(engine);
+    engine.setAudio!('2');
+    await vi.advanceTimersByTimeAsync(0);
+    const before = prepares.length;
+    headphones.listener!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(before);
+    mode = 'remux';
+    const remux = setup();
+    await start(remux.engine);
+    const remuxed = prepares.length;
+    headphones.listener!(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(remuxed);
+  });
+  it('stops listening when closed', async () => {
+    const { engine } = setup();
+    await start(engine);
+    engine.close();
+    expect(headphones.listener).toBeNull();
   });
 });

@@ -1118,3 +1118,114 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     await new Promise((resolve) => source.close(resolve));
   }
 });
+
+test('real FFmpeg: surround stays at its layout as FLAC, up to 7.1, in order', async () => {
+  // Each channel its own level, so a channel moved or mixed shows.
+  const levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+  const tone = (n) =>
+    levels
+      .slice(0, n)
+      .map((l) => `${l}*sin(2*PI*440*t)`)
+      .join('|');
+  const convert = async (name, layout, n, capabilities) => {
+    const input = `${dir}/${name}.mkv`,
+      output = `${dir}/${name}-out`;
+    await exec('ffmpeg', [
+      '-v',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=160x90:rate=24',
+      '-f',
+      'lavfi',
+      '-i',
+      `aevalsrc=${tone(n)}:c=${layout}:s=48000`,
+      '-t',
+      '3',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-c:a',
+      'pcm_s24le',
+      input,
+    ]);
+    const { stdout } = await exec('ffprobe', [
+      '-v',
+      'error',
+      '-show_format',
+      '-show_streams',
+      '-of',
+      'json',
+      input,
+    ]);
+    await mkdir(output);
+    const command = ffmpegArgs(
+      input,
+      metadata(JSON.parse(stdout)),
+      request({
+        capabilities: {
+          video: true,
+          audio: false,
+          container: false,
+          hdr: false,
+          ...capabilities,
+        },
+      }),
+      output
+    );
+    await exec('ffmpeg', command.args, { timeout: 60000 });
+    const { streams, mpd } = await dashOutput(output);
+    const probe = JSON.parse(
+      (
+        await exec('ffprobe', [
+          '-v',
+          'error',
+          '-show_streams',
+          '-of',
+          'json',
+          streams[1],
+        ])
+      ).stdout
+    ).streams[0];
+    const { stderr } = await exec('ffmpeg', [
+      '-i',
+      streams[1],
+      '-af',
+      'astats=measure_overall=none:measure_perchannel=Peak_level',
+      '-f',
+      'null',
+      '-',
+    ]);
+    const peaks = [...stderr.matchAll(/Peak level dB: (-?[\d.]+)/g)].map((m) =>
+      Number(m[1])
+    );
+    return { probe, mpd, peaks };
+  };
+  const db = (l) => 20 * Math.log10(l);
+  const lossless = { surround: true, lossless: true };
+
+  const wide = await convert('flac71', '7.1', 8, lossless);
+  assert.equal(wide.probe.codec_name, 'flac');
+  assert.equal(wide.probe.channels, 8);
+  assert.equal(wide.probe.channel_layout, '7.1');
+  assert.match(wide.mpd, /codecs="flac"/);
+  assert.equal(wide.peaks.length, 8);
+  wide.peaks.forEach((peak, i) =>
+    assert.ok(Math.abs(peak - db(levels[i])) < 0.1, `channel ${i}: ${peak}`)
+  );
+
+  // 5.1 isn't widened to 7.1.
+  const five = await convert('flac51', '5.1', 6, lossless);
+  assert.equal(five.probe.codec_name, 'flac');
+  assert.equal(five.probe.channels, 6);
+  five.peaks.forEach((peak, i) =>
+    assert.ok(Math.abs(peak - db(levels[i])) < 0.1, `channel ${i}: ${peak}`)
+  );
+
+  // Without FLAC: 5.1 AAC, a 7.1 source folded into it.
+  const aac = await convert('aac71', '7.1', 8, { surround: true });
+  assert.equal(aac.probe.codec_name, 'aac');
+  assert.equal(aac.probe.channels, 6);
+});

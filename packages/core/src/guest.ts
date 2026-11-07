@@ -32,6 +32,8 @@ export interface GuestCapabilities {
   hdr: boolean;
   /** Plays 5.1 AAC: converted surround stays surround. */
   surround?: boolean;
+  /** Plays FLAC up to 7.1: converted surround is lossless, at its own layout. */
+  lossless?: boolean;
   /** Subtitle formats the browser draws itself, rather than burned in. */
   subtitles?: ('ass' | 'pgs')[];
 }

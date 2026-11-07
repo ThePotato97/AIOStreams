@@ -986,6 +986,8 @@ export const settings = {
       (v) => Math.abs(v) <= AUDIO_DELAY_LIMIT_MS,
       ['aiostreams-app-audio-delay']
     ),
+    /** Surround played in the browser is rendered for headphones (HRTF). */
+    headphones: device<boolean>('aiostreams-web-audio-headphones', false),
     ac3Encode: device<boolean>(
       'aiostreams-web-audio-ac3-encode',
       false,

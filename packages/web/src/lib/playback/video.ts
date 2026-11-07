@@ -1,7 +1,9 @@
 import { t } from '@lingui/core/macro';
 import type React from 'react';
 import { checkSubtitleFile, readSubtitleFile } from '../subtitles/files';
+import { toast } from 'sonner';
 import { subtitleLine } from '../subtitles/style';
+import { corsFor, virtualSurround } from './headphones';
 import { ownTrackLabel } from './controller';
 import type {
   EngineFactory,
@@ -53,6 +55,7 @@ export function videoEngine(
     let delayMs = 0;
     let line = subtitleLine();
     let detach = () => {};
+    let surround: (() => void) | null = null;
     // A text track's cues load late, so each one remembers the shift it has.
     const shifted = new WeakMap<TextTrack, number>();
     // Browsers disagree on where a cue the file leaves unplaced goes.
@@ -147,6 +150,7 @@ export function videoEngine(
     };
 
     return {
+      virtualSurround: typeof AudioContext !== 'undefined',
       load(next) {
         const el = video.current;
         if (!el) return;
@@ -167,8 +171,12 @@ export function videoEngine(
             endMs: ranges.end(i) * 1000,
           }));
         };
+        // Tried with CORS for a player rendering for headphones: refused, it
+        // plays without, and without sound until the page loads again.
+        let cors = corsFor(el, next.url);
         const handlers: Record<string, () => void> = {
           loadedmetadata: () => {
+            cors = false;
             if (next.startMs) el.currentTime = next.startMs / 1000;
             set({ durationMs: el.duration * 1000 || 0 });
             listTracks();
@@ -190,7 +198,16 @@ export function videoEngine(
           volumechange: () => set({ volume: el.volume, muted: el.muted }),
           ratechange: () => set({ rate: el.playbackRate }),
           ended: () => emit({ type: 'ended' }),
-          error: () =>
+          error: () => {
+            if (cors) {
+              cors = false;
+              toast.warning(
+                t`This stream can't play through virtual surround, so it's silent until the page is reloaded.`
+              );
+              el.removeAttribute('crossorigin');
+              el.src = next.url;
+              return;
+            }
             emit({
               type: 'failed',
               error: t({
@@ -198,7 +215,8 @@ export function videoEngine(
                 message:
                   'this browser cannot play this version. Nothing is converted on the server, so try another version, an external player or the desktop app.',
               }),
-            }),
+            });
+          },
         };
         for (const [event, handler] of Object.entries(handlers))
           el.addEventListener(event, handler);
@@ -220,6 +238,7 @@ export function videoEngine(
         onFullscreen();
         el.autoplay = !next.paused;
         if (next.paused) set({ paused: true });
+        surround ??= virtualSurround(el);
         if (attach) attach(el, next.url);
         else el.src = next.url;
       },
@@ -227,6 +246,8 @@ export function videoEngine(
       close() {
         detach();
         detach = () => {};
+        surround?.();
+        surround = null;
         removeElements();
         const el = video.current;
         if (!el) return;

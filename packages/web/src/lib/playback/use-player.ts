@@ -621,6 +621,7 @@ export function usePlayer(
     close: engine.closeWindow && (() => engine.closeWindow!()),
     queueNext: engine.queueNext && ((next) => engine.queueNext!(next)),
     sound: engine.sound,
+    virtualSurround: engine.virtualSurround,
     fit: engine.fits,
     retry,
   };

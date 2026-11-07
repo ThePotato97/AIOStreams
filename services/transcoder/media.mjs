@@ -302,21 +302,30 @@ export function ffmpegArgs(
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
   if (policy.audio && !policy.copyAudio) {
-    // Surround stays surround, as 5.1 AAC: browsers play it and downmix to
-    // the speakers there are. AAC's own 7.1 places its extra pair as front
-    // wides, which players map differently, so 7.1 becomes 5.1.
-    const surround =
-      request.capabilities?.surround === true &&
-      (policy.audio.channels ?? 2) > 2;
+    // Surround stays surround where wanted (a surround output, or the
+    // player's virtual surround for headphones): lossless FLAC at the
+    // source's layout, up to 7.1, where the browser plays it, else 5.1 AAC
+    // (AAC's own 7.1 places its extra pair as front wides). The browser
+    // downmixes to the speakers there are.
+    const channels = policy.audio.channels ?? 2;
+    const surround = request.capabilities?.surround === true && channels > 2;
+    const lossless = surround && request.capabilities?.lossless === true;
+    const layout = !surround
+      ? 'stereo'
+      : lossless && channels > 6
+        ? '7.1'
+        : '5.1';
     args.push(
       '-af',
       // Continuous where the source's audio has gaps, and downmixed without
       // clipping, as Plex does: a plain -ac 2 peaks over 0 dBFS.
-      `aresample=async=1:ochl=${surround ? '5.1' : 'stereo'}:rematrix_maxval=1`,
+      `aresample=async=1:ochl=${layout}:rematrix_maxval=1`,
       '-ac',
-      surround ? '6' : '2',
-      '-b:a',
-      surround ? '384k' : '192k'
+      String({ stereo: 2, 5.1: 6, 7.1: 8 }[layout]),
+      ...(lossless
+        ? // 24-bit, as TrueHD and DTS-HD MA decode to.
+          ['-c:a', 'flac', '-sample_fmt', 's32']
+        : ['-b:a', surround ? '384k' : '192k'])
     );
   }
   args.push(

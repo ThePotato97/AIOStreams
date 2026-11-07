@@ -167,6 +167,8 @@ export interface PlayerEngine {
   fits?: boolean;
   /** The app's sound settings apply. */
   sound?: boolean;
+  /** Surround can be rendered for headphones, in the page. */
+  virtualSurround?: boolean;
   /** The player in its own window it drives. */
   external?: string;
   closeWindow?(): void;
