@@ -659,6 +659,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.3.0
         version: 19.3.0(@types/react@19.3.0)
+      '@webgpu/types':
+        specifier: ^0.1.74
+        version: 0.1.74
       autoprefixer:
         specifier: ^10.6.2
         version: 10.6.2(postcss@8.5.32)
@@ -3554,6 +3557,9 @@ packages:
 
   '@vitest/spy@5.0.5':
     resolution: {integrity: sha512-lwJRExuH417257Q5wv9QYugN9IMJkoxcrKrYxGPQkBzl7wlNpTUxD/5yNX4ESKVUIShKPgkGchYPFMWOOk0wzw==}
+
+  '@webgpu/types@0.1.74':
+    resolution: {integrity: sha512-lgiI4hbuLcI9unnm2cL/tvCaQU45dp0xcLWJh5uB/9MBGvIA4F8XIk7nSiBeg+K4xWGYwgZKn80LmERI5CxoTA==}
 
   '@webos-tools/cli@3.2.6':
     resolution: {integrity: sha512-VkCV8oBycgd0UTT3n8xOCUKjzIFaJM5MzJWr9BqmHfplUemtMsTBx+1GNOyxio6Ky1mj/iyqAUx4VcUy2nQu3Q==}
@@ -10894,6 +10900,8 @@ snapshots:
       vite: 8.3.5(@types/node@25.9.9)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.48.0)(tsx@4.23.15)(yaml@2.9.1)
 
   '@vitest/spy@5.0.5': {}
+
+  '@webgpu/types@0.1.74': {}
 
   '@webos-tools/cli@3.2.6(@types/node@25.9.9)':
     dependencies:

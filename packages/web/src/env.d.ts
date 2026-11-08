@@ -1,3 +1,4 @@
+/// <reference types="@webgpu/types" />
 /// <reference types="@rsbuild/core/types" />
 
 /** True in the standalone build, which picks its server instead of being served by one. */
