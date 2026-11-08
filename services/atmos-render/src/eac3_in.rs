@@ -386,6 +386,14 @@ impl Feed for Eac3 {
         }
     }
 
+    fn elements(&self) -> Vec<crate::input::Element> {
+        if self.atmos == Some(true) {
+            self.scene.elements()
+        } else {
+            self.core_beds.iter().map(|&s| channels::element(s)).collect()
+        }
+    }
+
     fn sources(&mut self, sample: u64) -> Vec<Source> {
         if self.atmos == Some(true) {
             self.scene.advance(sample);

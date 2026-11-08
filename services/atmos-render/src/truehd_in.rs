@@ -183,6 +183,14 @@ impl Feed for TrueHd {
         }
     }
 
+    fn elements(&self) -> Vec<crate::input::Element> {
+        if self.atmos == Some(true) {
+            self.scene.elements()
+        } else {
+            self.channel_beds.iter().map(|&s| channels::element(s)).collect()
+        }
+    }
+
     fn sources(&mut self, sample: u64) -> Vec<Source> {
         if self.atmos == Some(true) {
             self.scene.advance(sample);

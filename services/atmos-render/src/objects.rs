@@ -233,6 +233,20 @@ impl Scene {
         self.pending.sort_by_key(|u| u.at);
     }
 
+    /// What each input is, in `sources` order.
+    pub fn elements(&self) -> Vec<crate::input::Element> {
+        use crate::input::Element;
+        self.inputs
+            .iter()
+            .map(|i| match i.kind {
+                Kind::Bed(id) => Element::Bed(id),
+                Kind::Lfe => Element::Lfe,
+                Kind::Object => Element::Object,
+                Kind::Isf => Element::Isf,
+            })
+            .collect()
+    }
+
     /// The renderer's sources for the current block (after `advance`).
     pub fn sources(&self) -> Vec<crate::render::Source> {
         use crate::render::Source;

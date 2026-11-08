@@ -73,6 +73,16 @@ pub fn retyped(statics: Vec<Static>, modes: Modes) -> Vec<Static> {
 
 /// The renderer source of a static at unity gain. Windows renders every static Near; the stream
 /// carries no headphone element for channel-based audio, so stream mode renders it Mid.
+/// What a static input is, for the debug view.
+pub fn element(s: Static) -> crate::input::Element {
+    use crate::input::Element;
+    match s {
+        Static::Bed(id) => Element::Bed(id),
+        Static::Lfe => Element::Lfe,
+        Static::At(_) => Element::Object,
+    }
+}
+
 pub fn source(s: Static, modes: Modes) -> Source {
     let mode = match modes {
         Modes::Windows => Mode::Near,

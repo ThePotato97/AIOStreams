@@ -42,7 +42,11 @@ self.onmessage = async (event: MessageEvent<Request>) => {
     const bytes = new Uint8Array(message.data);
     const out =
       message.type === 'init' ? conv.init(bytes) : conv.segment(bytes);
-    self.postMessage({ id: message.id, data: out.buffer }, [out.buffer]);
+    // the scene as rendered, for the player's debug view
+    const snapshots = conv.takeSnapshots();
+    self.postMessage({ id: message.id, data: out.buffer, snapshots }, [
+      out.buffer,
+    ]);
   } catch (error) {
     self.postMessage({ id: message.id, error: (error as Error).message });
   }

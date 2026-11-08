@@ -226,6 +226,43 @@ describe.skipIf(!ffmpeg || !haveWasm)(
       expect(max).toBeLessThan(1 / 2 ** 21);
     });
 
+    it("keeps the renderer's scene, at the stream's time, for the debug view", async () => {
+      const { init, chunks } = segments();
+      const conv = new BinauralConverter(await renderer());
+      conv.init(init);
+      conv.segment(chunks[0]);
+      const first = conv.takeSnapshots();
+      // about 47 a second over the first 4 s, from the start
+      expect(first.length).toBeGreaterThan(180);
+      expect(first[0].time).toBe(0);
+      expect(first[1].time).toBeCloseTo(1024 / 48000, 9);
+      // 5.1 without Atmos: its channels as beds and the LFE
+      const last = first.at(-1)!;
+      expect(last.elements.map((e) => e.kind).sort()).toEqual([
+        'bed',
+        'bed',
+        'bed',
+        'bed',
+        'bed',
+        'lfe',
+      ]);
+      const left = last.elements.find((e) => e.bed === 1)!;
+      expect(left.pos).toEqual([0, 0, 0]);
+      expect(left.active).toBe(true);
+      // a 0.3 sine, after the renderer's input headroom (-3 dB): one block holds about a cycle of
+      // it, so its power is averaged over the segment
+      const power =
+        first.reduce(
+          (n, snap) => n + snap.elements.find((e) => e.bed === 1)!.level ** 2,
+          0
+        ) / first.length;
+      expect(Math.sqrt(power)).toBeCloseTo((0.3 / Math.SQRT2) * 0.70794576, 3);
+      expect(last.elements.find((e) => e.kind === 'lfe')!.pos).toBeNull();
+      // after a seek, the new session's time
+      conv.segment(chunks[2]);
+      expect(conv.takeSnapshots()[0].time).toBeCloseTo(8, 3);
+    });
+
     it('starts again where a segment that does not follow the last one starts', async () => {
       const { init, chunks } = segments();
       const conv = new BinauralConverter(await renderer());
@@ -255,7 +292,12 @@ const libav = async (): Promise<LibAVSync> => {
 };
 
 /** Renders an E-AC-3 stream through DASH in the browser's way, and natively, and compares. */
-async function compareEac3(source: string, name: string, tolerance: number) {
+async function compareEac3(
+  source: string,
+  name: string,
+  tolerance: number,
+  atmos = false
+) {
   const out = join(dir, name);
   execFileSync('mkdir', ['-p', out]);
   execFileSync('ffmpeg', [
@@ -296,7 +338,25 @@ async function compareEac3(source: string, name: string, tolerance: number) {
     file,
     Buffer.concat([conv.init(init), ...chunks.map((c) => conv.segment(c))])
   );
+  const scene = conv.takeSnapshots();
   conv.close();
+  // the debug view's scene: with Atmos, objects JOC rebuilt, placed and moving
+  const objects = scene.flatMap((snap) =>
+    snap.elements.filter((e) => e.kind === 'object')
+  );
+  if (atmos) {
+    expect(objects.length).toBeGreaterThan(0);
+    expect(new Set(objects.map((o) => o.pos!.join())).size).toBeGreaterThan(1);
+    if (process.env.SHOW_DIFF)
+      console.log(
+        name,
+        'elements',
+        scene
+          .at(-1)!
+          .elements.map((e) => e.kind)
+          .join(' ')
+      );
+  } else expect(objects).toHaveLength(0);
   expect(probe(file).streams[0].codec_name).toBe('flac');
   const got = decode(file);
   const raw = join(out, 'src.ec3');
@@ -370,7 +430,7 @@ describe.skipIf(!ffmpeg || !haveWasm || !haveLibav || !existsSync(nativePath))(
     it.skipIf(!atmosEac3 || !existsSync(atmosEac3))(
       'renders E-AC-3 with Atmos (JOC) as the native renderer does',
       async () => {
-        await compareEac3(atmosEac3!, 'eac3-joc', 1 / 2 ** 20);
+        await compareEac3(atmosEac3!, 'eac3-joc', 1 / 2 ** 20, true);
       },
       900_000
     );

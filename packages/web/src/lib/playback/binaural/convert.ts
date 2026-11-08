@@ -12,6 +12,7 @@
 import { FLAC_BLOCK, FLAC_MIN_BLOCK, FLAC_RATE, flacFrame } from './flac';
 import { flacFragment, flacInit, initTimescale, readFragments } from './fmp4';
 import type { CoreDecoder } from './eac3-core';
+import { readSnapshots, type SceneSnapshot } from './objects';
 
 /** The renderer's exports (src/wasm.rs). */
 export interface RendererExports {
@@ -30,6 +31,9 @@ export interface RendererExports {
     mask: number
   ): number;
   ar_output(session: number): number;
+  ar_debug(session: number, on: number): void;
+  ar_debug_len(session: number): number;
+  ar_debug_data(session: number): number;
 }
 
 export class BinauralConverter {
@@ -42,6 +46,10 @@ export class BinauralConverter {
   /** Output under one FLAC frame's minimum, carried to the next segment. */
   private carry = new Float32Array(0);
   private sequence = 1;
+  /** Stream time of the session's first sample (48 kHz). */
+  private sessionStart = 0;
+  /** The renderer's scene snapshots since `takeSnapshots` (the debug view). */
+  private snapshots: SceneSnapshot[] = [];
   private decoder: CoreDecoder | null = null;
 
   /** `core`: E-AC-3, with a new core decoder for each session; without, TrueHD. */
@@ -65,6 +73,8 @@ export class BinauralConverter {
     this.decoder?.close();
     this.decoder = this.core?.() ?? null;
     this.outPos = at;
+    this.sessionStart = at;
+    this.r.ar_debug(this.session, 1);
     this.carry = new Float32Array(0);
   }
 
@@ -127,6 +137,19 @@ export class BinauralConverter {
 
   /** Keeps the `frames` stereo frames the last renderer call left. */
   private output(frames: number, rendered: Float32Array[]) {
+    const len = this.r.ar_debug_len(this.session);
+    if (len)
+      this.snapshots.push(
+        ...readSnapshots(
+          new Float64Array(
+            this.r.memory.buffer,
+            this.r.ar_debug_data(this.session),
+            len
+          ),
+          this.sessionStart / FLAC_RATE,
+          FLAC_RATE
+        )
+      );
     if (frames > 0)
       rendered.push(
         new Float32Array(
@@ -157,6 +180,13 @@ export class BinauralConverter {
     );
     this.r.ar_free(raw, bytes);
     this.output(frames, rendered);
+  }
+
+  /** The scene snapshots taken since the last call. */
+  takeSnapshots(): SceneSnapshot[] {
+    const out = this.snapshots;
+    this.snapshots = [];
+    return out;
   }
 
   close() {

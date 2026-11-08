@@ -626,6 +626,10 @@ msgstr ""
 msgid "Audio languages"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Audio objects"
+msgstr ""
+
 #: src/pages/settings/audio.tsx
 msgid "Audio types"
 msgstr ""
@@ -686,6 +690,10 @@ msgstr ""
 
 #: src/pages/settings/interface.tsx
 msgid "Bar"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Bed {bed}"
 msgstr ""
 
 #: src/pages/settings/playback.tsx
@@ -821,6 +829,10 @@ msgstr ""
 
 #: src/pages/discover.tsx
 msgid "Catalog"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "ceiling to floor"
 msgstr ""
 
 #: src/pages/settings/downloads.tsx
@@ -1007,6 +1019,10 @@ msgstr ""
 
 #: src/pages/settings/playback.tsx
 msgid "Controls"
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "conversion is unavailable on this server"
 msgstr ""
 
 #: src/components/version-settings.tsx
@@ -1612,6 +1628,10 @@ msgstr ""
 msgid "Failed"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Far"
+msgstr ""
+
 #: src/components/remote-sheet.tsx
 #: src/lib/input/keys.ts
 msgid "Fast forward"
@@ -1737,8 +1757,20 @@ msgstr ""
 msgid "Frame timings"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "From above"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "From the side"
+msgstr ""
+
 #: src/components/version-picker.tsx
 msgid "From the start"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "front to back"
 msgstr ""
 
 #: src/pages/settings/interface.tsx
@@ -1752,6 +1784,10 @@ msgstr ""
 #: src/components/player/options.tsx
 #: src/lib/input/actions.ts
 msgid "Full screen"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Gain dB"
 msgstr ""
 
 #: src/lib/input/actions.ts
@@ -1840,6 +1876,10 @@ msgstr ""
 
 #: src/components/player/next-episode.tsx
 msgid "Hide"
+msgstr ""
+
+#: src/components/player/options.tsx
+msgid "Hide audio objects"
 msgstr ""
 
 #: src/pages/history.tsx
@@ -1959,6 +1999,18 @@ msgstr ""
 msgid "In this collection"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "inactive"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Input"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Input {input}"
+msgstr ""
+
 #: src/lib/hosts/shell/index.ts
 msgid "Install"
 msgstr ""
@@ -1991,6 +2043,10 @@ msgstr ""
 msgid "Invite link copied"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "ISF {n}"
+msgstr ""
+
 #: src/components/licenses.tsx
 msgid "It came with no licence text."
 msgstr ""
@@ -2001,6 +2057,10 @@ msgstr ""
 
 #: src/components/send-report.tsx
 msgid "It didn't reach the developer, only this server: {forwardError}"
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "It isn't reachable right now; playback starts when it is."
 msgstr ""
 
 #: src/pages/settings/theme.tsx
@@ -2148,6 +2208,10 @@ msgstr ""
 msgid "Left empty, posters stand alone. A poster without artwork still shows its title."
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "left to right"
+msgstr ""
+
 #: src/components/player/options.tsx
 msgid "Less dialogue boost"
 msgstr ""
@@ -2166,6 +2230,14 @@ msgstr ""
 
 #: src/pages/settings/playback.tsx
 msgid "Lets the TV's decoder keep picture and sound in step itself, which plays 4K and HDR more smoothly on some TVs. Turn it off if video stutters or stays black."
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Level dB"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "LFE"
 msgstr ""
 
 #: src/components/licenses.tsx
@@ -2222,6 +2294,10 @@ msgstr ""
 
 #: src/components/party/party-sheet.tsx
 msgid "Lost the connection to {relay}. Reconnecting… Your player carries on, and gets back in step once it's back."
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "Lost the converted stream; reconnecting…"
 msgstr ""
 
 #: src/components/player/options.tsx
@@ -2300,6 +2376,10 @@ msgstr ""
 msgid "Messages"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Mid"
+msgstr ""
+
 #: src/pages/settings/theme.tsx
 msgid "Midnight"
 msgstr ""
@@ -2314,6 +2394,10 @@ msgstr ""
 
 #: src/lib/format.ts
 msgid "Missing"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Mode"
 msgstr ""
 
 #: src/pages/settings/subtitles.tsx
@@ -2420,6 +2504,10 @@ msgstr ""
 
 #: src/pages/settings/interface.tsx
 msgid "Navigation"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Near"
 msgstr ""
 
 #: src/pages/sign-in.tsx
@@ -2700,11 +2788,16 @@ msgstr ""
 msgid "Now: {shown}"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Object {n}"
+msgstr ""
+
 #: src/pages/settings/theme.tsx
 msgid "Ocean"
 msgstr ""
 
 #: src/components/player/options.tsx
+#: src/components/player/scene-overlay.tsx
 #: src/components/remote-sheet.tsx
 #: src/lib/playback/sound.ts
 #: src/pages/settings/audio.tsx
@@ -3218,12 +3311,12 @@ msgstr ""
 msgid "Playback failed"
 msgstr ""
 
-#: src/pages/player.tsx
-msgid "Playback failed: {failure}"
-msgstr ""
-
 #: src/lib/guest/engine.ts
 msgid "Playback failed ({detail}). Try another quality or ask the host to select another source."
+msgstr ""
+
+#: src/pages/player.tsx
+msgid "Playback failed: {failure}"
 msgstr ""
 
 #: src/pages/history.tsx
@@ -3914,6 +4007,10 @@ msgstr ""
 msgid "Show a skip button"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Show audio objects"
+msgstr ""
+
 #: src/pages/history.tsx
 msgid "Show episodes"
 msgstr ""
@@ -4242,6 +4339,10 @@ msgstr ""
 
 #: src/pages/settings/audio.tsx
 msgid "Stereo"
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "Still downloading; it starts when it's ready."
 msgstr ""
 
 #: src/components/remote-sheet.tsx
@@ -4742,6 +4843,10 @@ msgstr ""
 msgid "This app decodes Dolby and DTS audio itself, which loses Atmos."
 msgstr ""
 
+#: src/lib/playback/convert.ts
+msgid "This browser can't play this file's audio, and it couldn't be converted: {why}"
+msgstr ""
+
 #. Follows "Playback failed:"
 #: src/lib/playback/video.ts
 msgid "this browser cannot play this version. Nothing is converted on the server, so try another version, an external player or the desktop app."
@@ -4921,6 +5026,7 @@ msgstr ""
 #: src/components/party/party-sheet.tsx
 #: src/components/random-pick.tsx
 #: src/components/version-picker.tsx
+#: src/lib/playback/convert.ts
 #: src/pages/downloads.tsx
 #: src/pages/sign-in.tsx
 msgid "Try again"
@@ -5215,6 +5321,14 @@ msgstr ""
 msgid "Waiting for the host to choose a title…"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Waiting for the renderer…"
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "Waiting for the transcoder to come back…"
+msgstr ""
+
 #: src/components/party/party-sheet.tsx
 msgid "Watch along"
 msgstr ""
@@ -5502,16 +5616,4 @@ msgstr ""
 
 #: src/pages/settings/cache.tsx
 msgid "Your watch history and totals."
-msgstr ""
-
-#: src/lib/playback/convert.ts
-msgid "Conversion is unavailable on this server."
-msgstr ""
-
-#: src/lib/playback/convert.ts
-msgid "Couldn't convert the audio for this browser, so it may play without sound."
-msgstr ""
-
-#: src/lib/playback/convert.ts
-msgid "Still downloading; it starts when it's ready."
 msgstr ""

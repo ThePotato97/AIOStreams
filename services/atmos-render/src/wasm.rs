@@ -89,6 +89,9 @@ fn interleave(out: &mut Vec<f32>) -> impl FnMut(&[f32], &[f32]) + '_ {
 fn collect(session: &mut Session, run: impl FnOnce(&mut Input, &mut Vec<Block>)) -> usize {
     let Session { input, pipeline, out } = session;
     out.clear();
+    if let Some(s) = pipeline.snapshots.as_mut() {
+        s.data.clear();
+    }
     let mut blocks = Vec::new();
     run(input, &mut blocks);
     for b in blocks {
@@ -128,6 +131,27 @@ pub extern "C" fn ar_finish(session: *mut Session) -> usize {
     let Session { input, pipeline, out } = session;
     pipeline.finish(input.feed(), &mut interleave(out));
     out.len() / 2
+}
+
+/// Keeps snapshots of the scene as rendered, for a debug view: each push or finish call then
+/// leaves those taken in it at `ar_debug_data` (`input::Snapshots` has the layout).
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_debug(session: *mut Session, on: bool) {
+    // SAFETY: a live session.
+    unsafe { (*session).pipeline.debug(on) }
+}
+
+/// How many f64 `ar_debug_data` holds.
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_debug_len(session: *mut Session) -> usize {
+    // SAFETY: a live session.
+    unsafe { (*session).pipeline.snapshots.as_ref().map_or(0, |s| s.data.len()) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_debug_data(session: *mut Session) -> *const f64 {
+    // SAFETY: a live session.
+    unsafe { (*session).pipeline.snapshots.as_ref().map_or(std::ptr::null(), |s| s.data.as_ptr()) }
 }
 
 /// The last call's output: interleaved stereo f32.

@@ -5,6 +5,7 @@
  * it returns, so buffering, seeking and A/V sync stay Shaka's.
  */
 import { wasmUrl } from 'atmos-render-wasm-url';
+import { sceneStore, type SceneSnapshot } from './objects';
 
 /** What the browser plays instead. */
 export const BINAURAL_OUTPUT = 'audio/mp4; codecs="flac"';
@@ -44,6 +45,12 @@ export function clientBinauralCodecs(): Codec[] {
   return codecs;
 }
 
+/** The worker's answer: converted bytes, and the scene snapshots taken converting them. */
+interface Reply {
+  data?: ArrayBuffer;
+  snapshots?: SceneSnapshot[];
+}
+
 /** Makes the error Shaka reports for a segment that couldn't be converted. */
 type Failure = (message: string) => Error;
 
@@ -54,14 +61,14 @@ class BinauralTransmuxer {
   private next = 1;
   private waiting = new Map<
     number,
-    { resolve(data: ArrayBuffer | undefined): void; reject(e: Error): void }
+    {
+      resolve(reply: Reply): void;
+      reject(e: Error): void;
+    }
   >();
   private original = '';
 
-  private call(
-    message: object,
-    transfer: Transferable[] = []
-  ): Promise<ArrayBuffer | undefined> {
+  private call(message: object, transfer: Transferable[] = []): Promise<Reply> {
     const id = this.next++;
     return new Promise((resolve, reject) => {
       this.waiting.set(id, { resolve, reject });
@@ -71,15 +78,16 @@ class BinauralTransmuxer {
 
   private start(codec: Codec): Promise<void> {
     if (this.loaded) return this.loaded;
+    sceneStore.started();
     this.worker = new Worker(new URL('./worker.ts', import.meta.url));
     this.worker.onmessage = (
-      event: MessageEvent<{ id: number; data?: ArrayBuffer; error?: string }>
+      event: MessageEvent<Reply & { id: number; error?: string }>
     ) => {
-      const { id, data, error } = event.data;
+      const { id, error, ...reply } = event.data;
       const waiting = this.waiting.get(id);
       this.waiting.delete(id);
       if (error) waiting?.reject(new Error(error));
-      else waiting?.resolve(data);
+      else waiting?.resolve(reply);
     };
     this.worker.onerror = (event) => {
       for (const w of this.waiting.values())
@@ -127,7 +135,8 @@ class BinauralTransmuxer {
         { type: reference ? 'segment' : 'init', data: copy },
         [copy]
       );
-      return new Uint8Array(out ?? new ArrayBuffer(0));
+      if (out.snapshots) sceneStore.add(out.snapshots);
+      return new Uint8Array(out.data ?? new ArrayBuffer(0));
     } catch (error) {
       // Shaka's TRANSMUXING_FAILED, which the guest engine answers with server rendering.
       throw this.failure((error as Error).message);
@@ -135,6 +144,7 @@ class BinauralTransmuxer {
   }
 
   destroy() {
+    if (this.worker) sceneStore.stopped();
     this.worker?.terminate();
     this.worker = null;
     for (const w of this.waiting.values())

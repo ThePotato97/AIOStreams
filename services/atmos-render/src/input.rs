@@ -9,6 +9,17 @@ pub struct Block {
     pub samples: Vec<Vec<f32>>,
 }
 
+/// What an input is, for the browser's debug view of the scene.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Element {
+    Object,
+    /// A bed channel, by its ID (`direct::bed_position`).
+    Bed(u32),
+    Lfe,
+    /// An intermediate spatial format element.
+    Isf,
+}
+
 pub trait Feed {
     /// Push bitstream bytes; decoded audio comes out through `out`.
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block));
@@ -16,6 +27,60 @@ pub trait Feed {
     fn sources(&mut self, sample: u64) -> Vec<Source>;
     /// The input has ended: emit what's still buffered.
     fn end(&mut self, _out: &mut dyn FnMut(Block)) {}
+    /// What each input is, in `sources` order (for the debug view; nothing without one).
+    fn elements(&self) -> Vec<Element> {
+        Vec::new()
+    }
+}
+
+/// Snapshots of the scene as rendered, for the browser's debug view: every `EVERY` blocks, each
+/// input's kind, what the renderer was given for it, and its input level over that block.
+pub struct Snapshots {
+    /// Closed snapshots, flat: sample (from the first one taken), element count, then per element
+    /// `SNAPSHOT_FIELDS` values (see `close`).
+    pub data: Vec<f64>,
+    open: Option<Open>,
+}
+
+struct Open {
+    sample: u64,
+    sources: Vec<Source>,
+    elements: Vec<Element>,
+    sums: Vec<f64>,
+    count: usize,
+}
+
+/// Blocks between snapshots: 1024 samples, about 47 a second.
+const EVERY: u64 = 4;
+pub const SNAPSHOT_FIELDS: usize = 9;
+
+impl Snapshots {
+    fn close(&mut self) {
+        let Some(o) = self.open.take() else { return };
+        if o.count == 0 {
+            return;
+        }
+        self.data.push(o.sample as f64);
+        self.data.push(o.sources.len() as f64);
+        for (i, s) in o.sources.iter().enumerate() {
+            // kind (0 object, 1 bed, 2 LFE, 3 ISF, -1 unknown), bed ID, render mode (Off 0,
+            // Near 1, Far 2, Mid 3; -1 none), active, x, y, z (NaN: none), metadata gain, RMS level
+            let (kind, bed) = match o.elements.get(i) {
+                Some(Element::Object) => (0.0, 0.0),
+                Some(Element::Bed(id)) => (1.0, *id as f64),
+                Some(Element::Lfe) => (2.0, 0.0),
+                Some(Element::Isf) => (3.0, 0.0),
+                None => (-1.0, 0.0),
+            };
+            let level = (o.sums.get(i).copied().unwrap_or(0.0) / o.count as f64).sqrt();
+            let (mode, active, pos, gain) = match *s {
+                Source::Positioned { pos, mode, gain, active } => (mode as i32 as f64, active as u8 as f64, pos.map(f64::from), gain as f64),
+                Source::Lfe { gain } => (-1.0, 1.0, [f64::NAN; 3], gain as f64),
+                Source::Silent => (-1.0, 0.0, [f64::NAN; 3], 0.0),
+            };
+            self.data.extend_from_slice(&[kind, bed, mode, active, pos[0], pos[1], pos[2], gain, level]);
+        }
+    }
 }
 
 /// Buffers decoded audio into 64-sample slots and renders them; gains change once per
@@ -30,11 +95,18 @@ pub struct Pipeline {
     taken: u64,
     rendered: u64,
     emitted: u64,
+    /// Kept only for the debug view (`debug`).
+    pub snapshots: Option<Snapshots>,
 }
 
 impl Pipeline {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(Self { renderer: Renderer::new()?, pending: Vec::new(), at: 0, origin: None, taken: 0, rendered: 0, emitted: 0 })
+        Ok(Self { renderer: Renderer::new()?, pending: Vec::new(), at: 0, origin: None, taken: 0, rendered: 0, emitted: 0, snapshots: None })
+    }
+
+    /// Keeps snapshots of the scene for the debug view, or stops.
+    pub fn debug(&mut self, on: bool) {
+        self.snapshots = on.then(|| Snapshots { data: Vec::new(), open: None });
     }
 
     pub fn take(&mut self, feed: &mut dyn Feed, block: Block, emit: &mut dyn FnMut(&[f32], &[f32])) {
@@ -67,8 +139,21 @@ impl Pipeline {
             if (sample - origin) % BLOCK as u64 == 0 {
                 let sources = feed.sources(sample);
                 self.renderer.set_block(&sources);
+                if let Some(snap) = self.snapshots.as_mut() {
+                    snap.close();
+                    if ((sample - origin) / BLOCK as u64) % EVERY == 0 {
+                        let n = self.pending.len();
+                        snap.open = Some(Open { sample: sample - origin, elements: feed.elements(), sources, sums: vec![0.0; n], count: 0 });
+                    }
+                }
             }
             let refs: Vec<&[f32]> = self.pending.iter().map(|p| &p[offset..offset + SLOT]).collect();
+            if let Some(o) = self.snapshots.as_mut().and_then(|s| s.open.as_mut()) {
+                for (sum, r) in o.sums.iter_mut().zip(&refs) {
+                    *sum += r.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>();
+                }
+                o.count += SLOT;
+            }
             self.renderer.slot(&refs, &mut l, &mut r);
             // output sample k of this slot is input sample (rendered + k - latency)
             for k in 0..SLOT {
@@ -97,5 +182,48 @@ impl Pipeline {
             p.extend(std::iter::repeat_n(0.0, pad));
         }
         self.render(feed, emit);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::direct::Mode;
+
+    /// An object at the front left at half level, and an LFE at a quarter.
+    struct Two;
+    impl Feed for Two {
+        fn push(&mut self, _: &[u8], _: &mut dyn FnMut(Block)) {}
+        fn sources(&mut self, _: u64) -> Vec<Source> {
+            vec![Source::Positioned { pos: [0.0, 0.0, 0.0], mode: Mode::Near, gain: 1.0, active: true }, Source::Lfe { gain: 1.0 }]
+        }
+        fn elements(&self) -> Vec<Element> {
+            vec![Element::Object, Element::Lfe]
+        }
+    }
+
+    #[test]
+    fn snapshots_say_what_was_rendered_and_how_loud() {
+        let mut p = Pipeline::new().unwrap();
+        p.debug(true);
+        let n = 48_000;
+        let block = Block { start: 0, samples: vec![vec![0.5; n], vec![-0.25; n]] };
+        p.take(&mut Two, block, &mut |_, _| {});
+        let d = &p.snapshots.as_ref().unwrap().data;
+        let size = 2 + 2 * SNAPSHOT_FIELDS;
+        // one opened every 1024 samples, closed after its 256-sample block: 0, 1024 .. 47104
+        assert_eq!(d.len() / size, 47);
+        assert_eq!(d.len() % size, 0);
+        let second = &d[size..2 * size];
+        assert_eq!(second[0], 1024.0);
+        assert_eq!(second[1], 2.0);
+        let (object, lfe) = (&second[2..11], &second[11..20]);
+        // object, Near, active, at (0, 0, 0); its level after the input headroom
+        assert_eq!(&object[..8], &[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        assert!((object[8] - 0.5 * crate::tuning::INPUT_HEADROOM as f64).abs() < 1e-6);
+        assert_eq!(lfe[0], 2.0);
+        assert_eq!(lfe[2], -1.0);
+        assert!(lfe[4].is_nan());
+        assert!((lfe[8] - 0.25 * crate::tuning::INPUT_HEADROOM as f64).abs() < 1e-6);
     }
 }

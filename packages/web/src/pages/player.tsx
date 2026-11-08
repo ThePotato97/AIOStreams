@@ -23,6 +23,7 @@ import {
 import { PlaybackReporter } from '../lib/playback/reporter';
 import { currentHost } from '../lib/hosts';
 import { useFeature } from '../lib/server-info';
+import { SceneOverlay } from '../components/player/scene-overlay';
 import {
   leaveFullscreen,
   usePlayerFullscreen,
@@ -809,6 +810,7 @@ function Player({
               lift={player.subtitleLift}
             />
           )}
+          {!hostPlayer && <SceneOverlay video={video} />}
           {player.stats?.text && (
             <pre
               data-ui="player-stats"

@@ -4,6 +4,7 @@ import React from 'react';
 import { toast } from 'sonner';
 import {
   LuActivity,
+  LuOrbit,
   LuAudioLines,
   LuCaptions,
   LuCaptionsOff,
@@ -67,6 +68,7 @@ import {
 import { splitByLanguage } from '../../lib/subtitles/tracks';
 import { subtitleLanguages, usePlaybackPrefs } from '../../lib/user-config';
 import { ControlButton } from './buttons';
+import { useSceneView } from './scene-overlay';
 import { useParty } from '../../lib/party/party';
 import { RATES, rateLabel } from './keys';
 import { useLatest } from '../../lib/use-latest';
@@ -650,6 +652,7 @@ export function OptionButtons({
         );
   const tv = !!currentHost().tv;
   const unread = useParty()?.unread ?? 0;
+  const scene = useSceneView();
   const hidden = subtitles.hidden.length;
   // One at a time: a menu opened over another leaves the first open.
   const [openMenu, setOpenMenu] = React.useState<string | null>(null);
@@ -830,6 +833,16 @@ export function OptionButtons({
               {unread > 9 ? '9+' : unread}
             </span>
           )}
+        </ControlButton>
+      )}
+      {scene.live && (
+        <ControlButton
+          name="audio-objects"
+          label={scene.shown ? t`Hide audio objects` : t`Show audio objects`}
+          aria-pressed={scene.shown}
+          onClick={scene.toggle}
+        >
+          <LuOrbit />
         </ControlButton>
       )}
       {player.stats && (
