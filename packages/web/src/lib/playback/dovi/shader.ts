@@ -18,7 +18,7 @@ export const DOVI_SHADER = /* wgsl */ `
 @group(0) @binding(3) var<storage, read> P: array<f32>;
 @group(0) @binding(4) var<uniform> view: vec4f; // frame width, height, then canvas width, height
 // 0: I420P10 (Cb and Cr planes, 10-bit values); 1: P010 (interleaved CbCr in cbTex, 16-bit values)
-@group(0) @binding(5) var<uniform> layout: vec4u;
+@group(0) @binding(5) var<uniform> planes: vec4u;
 
 const HEAD = ${HEAD_FLOATS}u;
 const COMP = ${COMP_FLOATS}u;
@@ -112,7 +112,7 @@ fn reshape(sig0: vec3f) -> vec3f {
   let pos = (frag.xy) * view.xy / view.zw - vec2f(0.5);
   let cpos = vec2f(pos.x * 0.5, (pos.y + 0.5) * 0.5 - 0.5);
   var ycc: vec3f;
-  if (layout.x == 1u) {
+  if (planes.x == 1u) {
     // P010: the 10-bit value in the top bits
     ycc = vec3f(plane(lumaTex, pos), planeAt(cbTex, cpos, 0u), planeAt(cbTex, cpos, 1u)) / 64.0;
   } else {

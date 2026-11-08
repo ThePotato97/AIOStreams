@@ -333,6 +333,7 @@ function startMain(job, encoder, gpu, extra) {
   job.offsetMs = command.offsetMs;
   job.mode = command.policy.mode;
   job.clientBinaural = command.policy.clientBinaural;
+  job.dovi = command.policy.dovi;
   job.audioCodec = audioCodec(command.policy);
   job.reasons = {
     video: command.policy.videoReason,
@@ -489,6 +490,7 @@ async function prepare(body) {
     policy.burn,
     policy.binaural,
     policy.clientBinaural,
+    policy.dovi,
   ]);
   const positionMs = request.positionMs;
   let job = [...jobs.values()].find(
@@ -581,6 +583,8 @@ async function prepare(body) {
     binaural: !!job.binaural,
     // The audio is copied for the player to render itself.
     clientBinaural: !!job.clientBinaural,
+    // Dolby Vision copied with its RPUs for the player to draw.
+    dovi: !!job.dovi,
     meta,
   };
 }
@@ -613,6 +617,7 @@ export function createServer() {
             decode: j.decode,
             binaural: !!j.binaural,
             clientBinaural: !!j.clientBinaural,
+            dovi: !!j.dovi,
             viewers: j.viewers.size,
             producedMs: j.producedMs,
             speed: j.speed,

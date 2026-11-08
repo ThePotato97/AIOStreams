@@ -44,6 +44,11 @@ export interface GuestCapabilities {
    * track in one of these is copied as it is, and the server doesn't render it.
    */
   clientBinaural?: ('truehd' | 'eac3')[];
+  /**
+   * The player draws Dolby Vision itself from each frame's metadata (WebGPU on an HDR canvas):
+   * Dolby Vision video is copied with its metadata, profile 5 included, rather than converted.
+   */
+  dovi?: boolean;
   /** Subtitle formats the browser draws itself, rather than burned in. */
   subtitles?: ('ass' | 'pgs')[];
 }
@@ -73,6 +78,8 @@ export interface GuestPlayback {
   binaural?: boolean;
   /** The audio is copied for the player to render to binaural itself. */
   clientBinaural?: boolean;
+  /** The video is Dolby Vision copied with its metadata for the player to draw. */
+  dovi?: boolean;
   /** Fonts attached to the file, for an ASS subtitle. */
   fontUrls?: string[];
 }

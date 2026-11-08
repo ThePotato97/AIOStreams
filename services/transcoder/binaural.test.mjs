@@ -127,6 +127,44 @@ test('client binaural: copied Dolby Vision loses its metadata where TrueHD needs
   assert.ok(!off.includes('-bsf:v'));
 });
 
+test('Dolby Vision the player draws is copied with its RPUs, profile 5 included', () => {
+  const dv = (dovi, audio = 'truehd') => ({
+    durationMs: 6000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'hevc', hdr: true, dovi },
+      { index: 1, type: 'audio', codec: audio, channels: 8, sampleRate: 48000, default: true },
+    ],
+  });
+  const caps = { video: true, audio: true, container: true, hdr: true };
+  const draws = request({ ...caps, dovi: true }, { audio: 1 });
+  const plain = request(caps, { audio: 1 });
+  // profile 5: converted unless the player draws it
+  assert.equal(select(dv({ profile: 5, compatibility: 0 }), plain).copyVideo, false);
+  const p5 = select(dv({ profile: 5, compatibility: 0 }), draws);
+  assert.equal(p5.copyVideo, true);
+  assert.equal(p5.dovi, true);
+  // the player reads the DASH stream, never the file directly
+  assert.notEqual(p5.mode, 'direct');
+  // profile 8 copied either way; flagged (and so not played directly) only where the player draws it
+  const p8 = select(dv({ profile: 8, compatibility: 1 }, 'aac'), plain);
+  assert.equal(p8.dovi, false);
+  assert.equal(p8.mode, 'direct');
+  const p8draws = select(dv({ profile: 8, compatibility: 1 }, 'aac'), draws);
+  assert.equal(p8draws.dovi, true);
+  assert.notEqual(p8draws.mode, 'direct');
+  // no Dolby Vision: nothing to draw
+  assert.equal(select(dv(undefined), draws).dovi, false);
+  // with headphones (TrueHD copied, experimental flag): the RPUs stay
+  const both = request(
+    { ...caps, dovi: true, binaural: true, clientBinaural: ['truehd'] },
+    { audio: 1 }
+  );
+  const { args } = ffmpegArgs('in', dv({ profile: 7, compatibility: 6 }), both, 'out');
+  assert.equal(args[args.indexOf('-c:v') + 1], 'copy');
+  assert.equal(args[args.indexOf('-strict') + 1], 'experimental');
+  assert.ok(!args.includes('-bsf:v'));
+});
+
 test('client binaural: E-AC-3 the player renders is copied, with the codec FFmpeg writes', () => {
   const asked = request({ binaural: true, clientBinaural: ['truehd', 'eac3'] });
   const policy = select(meta('eac3'), asked);

@@ -221,9 +221,11 @@ export function select(meta, request) {
     !request.force &&
     caps.video === true &&
     (!video.hdr || caps.hdr === true) &&
-    // No browser capability for Dolby Vision is reported: profile 5 shown
-    // as HDR10 has the wrong colours, so it is always converted.
-    video.dovi?.profile !== 5;
+    // Profile 5 shown as HDR10 has the wrong colours, so it's converted unless the player draws
+    // Dolby Vision itself (from the RPUs).
+    (video.dovi?.profile !== 5 || caps.dovi === true);
+  // Dolby Vision copied with its RPUs for the player to draw
+  const dovi = copyVideo && !!video.dovi && caps.dovi === true;
   // Rendered to binaural here (atmos-render, Dolby Atmos for Headphones' renderer) where the
   // player asks for it and the track is one the renderer reads: TrueHD or E-AC-3 at 48 kHz.
   const renderable =
@@ -245,8 +247,9 @@ export function select(meta, request) {
   const direct =
     original &&
     !request.force &&
-    // The player's own rendering reads the DASH stream.
+    // The player's own rendering (binaural audio, Dolby Vision) reads the DASH stream.
     !clientBinaural &&
+    !dovi &&
     caps.container === true &&
     copyVideo &&
     (!audio || copyAudio) &&
@@ -296,6 +299,7 @@ export function select(meta, request) {
     copyAudio,
     binaural,
     clientBinaural,
+    dovi,
   };
 }
 /*
@@ -522,7 +526,8 @@ export function ffmpegArgs(
     // unless it's encrypted ("MSE playback of DolbyVision is only supported via platform
     // decryptor"). Without the Dolby Vision metadata it's the HDR10 stream that plays without
     // the flag.
-    if (policy.copyVideo && policy.video?.dovi)
+    // Where the player draws Dolby Vision it needs the RPUs, and it drops the box itself.
+    if (policy.copyVideo && policy.video?.dovi && !policy.dovi)
       args.push('-bsf:v', 'dovi_rpu=strip=1');
   }
   if (policy.binaural) {

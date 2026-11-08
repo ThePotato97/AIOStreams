@@ -6,6 +6,7 @@ import type {
 } from '@aiostreams/core';
 import { canRender } from './subtitle-renderer';
 import { clientBinauralCodecs } from '../playback/binaural/transmuxer';
+import { doviSupported } from '../playback/dovi/view';
 /** ffprobe reports -99 (or nothing) when a stream doesn't declare its level. */
 const knownLevel = (level: number | undefined, fallback: number) =>
   level != null && Number.isInteger(level) && level > 0 ? level : fallback;
@@ -212,6 +213,8 @@ export async function browserCapabilities(
     ...(headphones && clientBinauralCodecs().length
       ? { clientBinaural: clientBinauralCodecs() }
       : {}),
+    // Dolby Vision drawn here from its metadata, where the page can show HDR itself
+    ...(hdr && (await doviSupported()) ? { dovi: true } : {}),
     subtitles,
   };
 }

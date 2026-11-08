@@ -448,6 +448,7 @@ const capabilitySchema = z.object({
     .array(z.enum(['truehd', 'eac3']))
     .max(2)
     .optional(),
+  dovi: z.boolean().optional(),
   subtitles: z
     .array(z.enum(['ass', 'pgs']))
     .max(2)
@@ -627,6 +628,7 @@ function playbackResponse(
     offsetMs?: number;
     binaural?: boolean;
     clientBinaural?: boolean;
+    dovi?: boolean;
   }
 ): GuestPlayback {
   const query = `?token=${encodeURIComponent(token)}&lease=${lease}`;
@@ -644,6 +646,7 @@ function playbackResponse(
   };
   if (result.binaural) response.binaural = true;
   if (result.clientBinaural) response.clientBinaural = true;
+  if (result.dovi) response.dovi = true;
   const track =
     body.subtitle == null
       ? undefined

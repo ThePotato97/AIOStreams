@@ -14,6 +14,8 @@ import {
   watchBufferErrors,
 } from '../playback/media-errors';
 import { explainFailure } from './explain';
+import { DoviCapture } from '../playback/dovi/capture';
+import { DoviView } from '../playback/dovi/view';
 import {
   registerBinauralTransmuxer,
   TRANSMUXING_FAILED,
@@ -46,6 +48,9 @@ interface ShakaPlayer extends EventTarget {
   destroy(): Promise<void>;
   getManifest(): {
     presentationTimeline?: { getMaxSegmentEndTime(): number | null };
+  } | null;
+  getNetworkingEngine?(): {
+    registerResponseFilter(filter: DoviCapture['filter']): void;
   } | null;
 }
 type Shaka = {
@@ -140,6 +145,9 @@ export function guestEngine(
     let serverBinaural = false;
     /** Binaural audio failed to play: this file plays without it, the browser's virtualiser on. */
     let noBinaural = false;
+    /** Drawing Dolby Vision here failed: the server handles it for the rest of this file. */
+    let noDovi = false;
+    let doviView: DoviView | null = null;
     /** Recoveries tried since a fragment last played. */
     let tries: Tries = { network: 0, media: 0 };
     /** The prepare whose playback has been reported failed, once. */
@@ -277,6 +285,24 @@ export function guestEngine(
       void prepare(position());
       return true;
     };
+    /**
+     * Drawing Dolby Vision here failed. Where the server sent it as it is for this browser to draw
+     * (profile 5, whose picture is wrong without its RPU) it converts it instead, from where
+     * playback was; otherwise the video's own HDR10 picture shows, as before.
+     */
+    const doviFailed = (error: Error) => {
+      doviView = null;
+      if (noDovi) return;
+      noDovi = true;
+      if (!playback?.dovi) return;
+      toast.message(
+        t`Dolby Vision couldn't be shown here, so the server converts it`,
+        {
+          description: error.message,
+        }
+      );
+      void prepare(position());
+    };
     const recover = (failure: Failure) => {
       if (dropBinaural(failure)) return;
       const step = player ? recovery(failure, tries) : 'give-up';
@@ -337,6 +363,8 @@ export function guestEngine(
     const stop = () => {
       const old = player;
       player = undefined;
+      doviView?.destroy();
+      doviView = null;
       return old?.destroy().catch(() => {});
     };
     const raw = videoEngine(video, async (el, url) => {
@@ -366,6 +394,20 @@ export function guestEngine(
         player = next;
         manifest = url;
         next.configure(SHAKA_CONFIG);
+        // Dolby Vision drawn here, from each frame's RPU, where this browser can
+        const capture = new DoviCapture();
+        next.getNetworkingEngine?.()?.registerResponseFilter(capture.filter);
+        capture.onSeen(() => {
+          if (noDovi || at !== generation || player !== next || !video.current)
+            return;
+          void DoviView.start(video.current, capture, (error) =>
+            doviFailed(error)
+          ).then((view) => {
+            if (!view) return;
+            if (at !== generation || player !== next) view.destroy();
+            else doviView = view;
+          });
+        });
         next.addEventListener('error', (event) => {
           const error = (event as CustomEvent<ShakaError>).detail;
           if (at !== generation || player !== next || handled.has(error))
@@ -472,6 +514,7 @@ export function guestEngine(
           clientBinaural:
             serverBinaural || noBinaural ? undefined : probed.clientBinaural,
           ...(noBinaural ? { binaural: false } : {}),
+          dovi: noDovi ? undefined : probed.dovi,
         };
         const result = await api.prepare(
           {
@@ -595,6 +638,7 @@ export function guestEngine(
         force = false;
         serverBinaural = false;
         noBinaural = false;
+        noDovi = false;
         paused = next.paused ?? true;
         const tracks = current().media.tracks;
         audio =
