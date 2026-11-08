@@ -2,6 +2,10 @@
  * Which media buffer the browser rejected. A MediaSource failure reaches the player through Shaka
  * without saying which stream (audio or video) it was, but the SourceBuffer that failed fires its
  * own error event: recorded here with the type it was created for.
+ *
+ * Once one buffer fails the media pipeline stops, and the other buffer's append in progress can
+ * fail after it, so it's the first failure of a burst that says what went wrong (and the one
+ * Shaka reports), not the last.
  */
 
 export interface BufferError {
@@ -11,7 +15,10 @@ export interface BufferError {
   at: number;
 }
 
-let last: BufferError | null = null;
+/** How long after a failure the other buffers' failures count as its consequences. */
+const BURST_MS = 5000;
+
+let first: BufferError | null = null;
 let installed = false;
 
 /** Records the errors of every SourceBuffer created from now on (once per page). */
@@ -32,19 +39,20 @@ export function watchBufferErrors() {
     ) {
       const buffer = add.call(this, mimeType);
       buffer.addEventListener('error', () => {
-        last = { mimeType, at: performance.now() };
+        const now = performance.now();
+        if (!first || now - first.at > BURST_MS) first = { mimeType, at: now };
       });
       return buffer;
     };
   }
 }
 
-/** The SourceBuffer that failed within the last `withinMs`, if one did. */
-export function lastBufferError(withinMs = 5000): BufferError | null {
-  return last && performance.now() - last.at <= withinMs ? last : null;
+/** The SourceBuffer that failed first in the last burst of failures, within `withinMs`. */
+export function lastBufferError(withinMs = BURST_MS): BufferError | null {
+  return first && performance.now() - first.at <= withinMs ? first : null;
 }
 
 /** Forgets the last failure (a new stream starts). */
 export function clearBufferError() {
-  last = null;
+  first = null;
 }
