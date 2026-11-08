@@ -201,7 +201,7 @@ export function guestEngine(
           if (interrupted(error) || handled.has(error)) return;
           handled.add(error);
           if (binauralFailed(error)) return;
-          recover(shakaFailure(error));
+          recover(shakaFailure(error, video.current?.error?.message));
         } else fail({ kind: 'other', detail: (error as Error).message });
       });
     };
@@ -307,7 +307,7 @@ export function guestEngine(
           if (error.severity !== CRITICAL || interrupted(error)) return;
           handled.add(error);
           if (binauralFailed(error)) return;
-          recover(shakaFailure(error));
+          recover(shakaFailure(error, video.current?.error?.message));
         });
         next.addEventListener('buffering', (event) => {
           if (at !== generation || player !== next) return;

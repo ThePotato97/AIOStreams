@@ -37,6 +37,27 @@ describe('failures', () => {
       detail: 'Shaka error 5999',
     });
   });
+  it('says which segment the browser rejected, and why, when a media buffer fails', () => {
+    expect(
+      shakaFailure(
+        {
+          category: 3,
+          code: 3014,
+          severity: 2,
+          data: [
+            3,
+            'https://aio.example/party/guest/media/job/chunk-1-00069.m4s?token=t',
+          ],
+        },
+        'PIPELINE_ERROR_DECODE: audio decode error'
+      )
+    ).toEqual({
+      kind: 'media',
+      status: undefined,
+      detail:
+        'MEDIA_SOURCE_OPERATION_FAILED, MEDIA_ERR_DECODE, chunk-1-00069.m4s, PIPELINE_ERROR_DECODE: audio decode error',
+    });
+  });
   it('treats a manifest the browser can decode nothing of as a decoding failure', () => {
     // The only video is a codec this browser lacks: converting it changes that.
     expect(shakaFailure({ category: 4, code: 4032 }).kind).toBe('media');

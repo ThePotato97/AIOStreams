@@ -15,6 +15,9 @@ const INPUT: Record<Codec, RegExp> = {
   truehd: /codecs="?mlpa/i,
   eac3: /codecs="?ec-3/i,
 };
+/** Each codec as the browser would get it without the transmuxer. */
+const TRUEHD_AS_IS = 'audio/mp4; codecs="mlpa"';
+const EAC3_AS_IS = 'audio/mp4; codecs="ec-3"';
 const codecOf = (mimeType: string) =>
   (Object.keys(INPUT) as Codec[]).find((c) => INPUT[c].test(mimeType));
 
@@ -30,17 +33,16 @@ export function clientBinauralSupported(): boolean {
 }
 
 /**
- * The codecs this browser renders to binaural itself. E-AC-3 needs the core decoder built, and
- * only where the browser doesn't play E-AC-3 itself: there Shaka would play it as it is, and the
- * server renders it instead.
+ * The codecs this browser renders to binaural itself: those it doesn't play itself (E-AC-3 also
+ * needs the core decoder built).
  */
 export function clientBinauralCodecs(): Codec[] {
   if (!clientBinauralSupported()) return [];
-  const codecs: Codec[] = ['truehd'];
-  if (
-    __LIBAV_EAC3__ &&
-    !MediaSource.isTypeSupported('audio/mp4; codecs="ec-3"')
-  )
+  const codecs: Codec[] = [];
+  // Shaka transmuxes only what the browser can't play itself: where it claims to, it would get
+  // the stream as it is, so the server renders that codec instead.
+  if (!MediaSource.isTypeSupported(TRUEHD_AS_IS)) codecs.push('truehd');
+  if (__LIBAV_EAC3__ && !MediaSource.isTypeSupported(EAC3_AS_IS))
     codecs.push('eac3');
   return codecs;
 }

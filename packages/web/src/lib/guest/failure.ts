@@ -51,8 +51,26 @@ export function interrupted(error: ShakaError): boolean {
   );
 }
 
-/** A failure reported by Shaka Player. */
-export function shakaFailure(error: ShakaError): Failure {
+/** The media element's error codes. */
+const MEDIA_ERROR_NAMES: Record<number, string> = {
+  1: 'MEDIA_ERR_ABORTED',
+  2: 'MEDIA_ERR_NETWORK',
+  3: 'MEDIA_ERR_DECODE',
+  4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+};
+
+/** A URL's file name, without its query: which segment, of which stream. */
+const fileName = (uri: unknown) =>
+  typeof uri === 'string' ? (uri.split('?')[0].split('/').pop() ?? '') : '';
+
+/**
+ * A failure reported by Shaka Player. `elementMessage` is the media element's own error message,
+ * where the browser gives one (why it rejected what was appended).
+ */
+export function shakaFailure(
+  error: ShakaError,
+  elementMessage?: string
+): Failure {
   // BAD_HTTP_STATUS carries the URI, then the status.
   const status =
     error.code === 1001 && typeof error.data?.[1] === 'number'
@@ -71,6 +89,11 @@ export function shakaFailure(error: ShakaError): Failure {
     detail: [
       NAMES[error.code] ?? `Shaka error ${error.code}`,
       status && `HTTP ${status}`,
+      // MEDIA_SOURCE_OPERATION_FAILED: the element's error code, and the segment the browser
+      // rejected (its stream: the audio or the video)
+      error.code === 3014 && MEDIA_ERROR_NAMES[error.data?.[0] as number],
+      error.code === 3014 && fileName(error.data?.[1]),
+      error.code === 3014 && elementMessage,
     ]
       .filter(Boolean)
       .join(', '),
