@@ -12,6 +12,14 @@ RUN rustup target add wasm32-unknown-unknown
 COPY services/atmos-render ./
 RUN cargo build --lib --release --locked --target wasm32-unknown-unknown
 
+# FFmpeg's E-AC-3 decoder as libav.js, for the same with E-AC-3 (its core).
+FROM emscripten/emsdk:6.0.5 AS libav-eac3
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-libav-eac3.sh /build-libav-eac3.sh
+RUN sh /build-libav-eac3.sh /out
+
 FROM base AS builder
 
 WORKDIR /build
@@ -56,6 +64,7 @@ COPY scripts ./scripts
 COPY resources ./resources
 COPY --from=atmos-wasm /src/target/wasm32-unknown-unknown/release/atmos_render.wasm \
   ./packages/web/src/lib/playback/binaural/atmos_render.wasm
+COPY --from=libav-eac3 /out ./packages/web/src/lib/playback/binaural/libav
 
 # Build the project.
 RUN pnpm run build

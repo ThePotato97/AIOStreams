@@ -1,7 +1,8 @@
 /*
- * Converts the transcoder's TrueHD DASH audio to binaural FLAC, segment by segment, with the
- * renderer (atmos-render as WebAssembly). Runs in a worker; kept free of worker APIs so it can be
- * tested on its own.
+ * Converts the transcoder's TrueHD or E-AC-3 DASH audio to binaural FLAC, segment by segment,
+ * with the renderer (atmos-render as WebAssembly); for E-AC-3 a core decoder (libav.js,
+ * eac3-core.ts) decodes the core the renderer's JOC rebuilds the objects from. Runs in a worker;
+ * kept free of worker APIs so it can be tested on its own.
  *
  * Timing: the renderer's output lags its input by its latency at the start of a session, and
  * carries on continuously after that, so each output fragment is stamped with the source time
@@ -10,6 +11,7 @@
  */
 import { FLAC_BLOCK, FLAC_MIN_BLOCK, FLAC_RATE, flacFrame } from './flac';
 import { flacFragment, flacInit, initTimescale, readFragments } from './fmp4';
+import type { CoreDecoder } from './eac3-core';
 
 /** The renderer's exports (src/wasm.rs). */
 export interface RendererExports {
@@ -17,8 +19,16 @@ export interface RendererExports {
   ar_alloc(len: number): number;
   ar_free(ptr: number, len: number): void;
   ar_new(windowsModes: number): number;
+  ar_new_eac3(windowsModes: number, windowsLoudness: number): number;
   ar_drop(session: number): void;
   ar_push(session: number, ptr: number, len: number): number;
+  ar_push_pcm(
+    session: number,
+    ptr: number,
+    len: number,
+    channels: number,
+    mask: number
+  ): number;
   ar_output(session: number): number;
 }
 
@@ -32,8 +42,13 @@ export class BinauralConverter {
   /** Output under one FLAC frame's minimum, carried to the next segment. */
   private carry = new Float32Array(0);
   private sequence = 1;
+  private decoder: CoreDecoder | null = null;
 
-  constructor(private readonly r: RendererExports) {}
+  /** `core`: E-AC-3, with a new core decoder for each session; without, TrueHD. */
+  constructor(
+    private readonly r: RendererExports,
+    private readonly core?: () => CoreDecoder
+  ) {}
 
   /** The init segment's replacement. */
   init(data: Uint8Array): Uint8Array {
@@ -43,8 +58,12 @@ export class BinauralConverter {
 
   private restart(at: number) {
     if (this.session) this.r.ar_drop(this.session);
-    this.session = this.r.ar_new(0);
+    // The transcoder's defaults: the stream's render modes, the Reference Player's loudness.
+    this.session = this.core ? this.r.ar_new_eac3(0, 0) : this.r.ar_new(0);
     if (!this.session) throw new Error('The binaural renderer could not start');
+    // A new session starts from a fresh decoder, as the transcoder's renderer starts a new FFmpeg.
+    this.decoder?.close();
+    this.decoder = this.core?.() ?? null;
     this.outPos = at;
     this.carry = new Float32Array(0);
   }
@@ -68,17 +87,10 @@ export class BinauralConverter {
         at += s.data.length;
         duration += s.duration;
       }
-      const frames = this.r.ar_push(this.session, ptr, bytes);
+      this.output(this.r.ar_push(this.session, ptr, bytes), rendered);
       this.r.ar_free(ptr, bytes);
-      if (frames > 0) {
-        rendered.push(
-          new Float32Array(
-            this.r.memory.buffer,
-            this.r.ar_output(this.session),
-            frames * 2
-          ).slice()
-        );
-      }
+      const core = this.decoder?.decode(fragment.samples.map((s) => s.data));
+      if (core) this.pushCore(core.pcm, core.channels, core.mask, rendered);
       this.expected =
         start + Math.round((duration * FLAC_RATE) / this.timescale);
     }
@@ -113,8 +125,44 @@ export class BinauralConverter {
     return flacFragment(this.sequence++, first, frames);
   }
 
+  /** Keeps the `frames` stereo frames the last renderer call left. */
+  private output(frames: number, rendered: Float32Array[]) {
+    if (frames > 0)
+      rendered.push(
+        new Float32Array(
+          this.r.memory.buffer,
+          this.r.ar_output(this.session),
+          frames * 2
+        ).slice()
+      );
+  }
+
+  private pushCore(
+    pcm: Float32Array,
+    channels: number,
+    mask: number,
+    rendered: Float32Array[]
+  ) {
+    // ar_alloc gives bytes: aligned here for f32
+    const bytes = pcm.length * 4 + 4;
+    const raw = this.r.ar_alloc(bytes);
+    const ptr = (raw + 3) & ~3;
+    new Float32Array(this.r.memory.buffer, ptr, pcm.length).set(pcm);
+    const frames = this.r.ar_push_pcm(
+      this.session,
+      ptr,
+      pcm.length,
+      channels,
+      mask >>> 0
+    );
+    this.r.ar_free(raw, bytes);
+    this.output(frames, rendered);
+  }
+
   close() {
     if (this.session) this.r.ar_drop(this.session);
     this.session = 0;
+    this.decoder?.close();
+    this.decoder = null;
   }
 }

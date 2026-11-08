@@ -5,10 +5,7 @@ import type {
   GuestTrack,
 } from '@aiostreams/core';
 import { canRender } from './subtitle-renderer';
-import {
-  CLIENT_BINAURAL_CODECS,
-  clientBinauralSupported,
-} from '../playback/binaural/transmuxer';
+import { clientBinauralCodecs } from '../playback/binaural/transmuxer';
 /** ffprobe reports -99 (or nothing) when a stream doesn't declare its level. */
 const knownLevel = (level: number | undefined, fallback: number) =>
   level != null && Number.isInteger(level) && level > 0 ? level : fallback;
@@ -212,8 +209,8 @@ export async function browserCapabilities(
     // renderer), by the server or, for the codecs below, here; other audio is virtualised here.
     binaural: headphones,
     // Where this browser can run the renderer itself, the transcoder sends TrueHD as it is.
-    ...(headphones && clientBinauralSupported()
-      ? { clientBinaural: [...CLIENT_BINAURAL_CODECS] }
+    ...(headphones && clientBinauralCodecs().length
+      ? { clientBinaural: clientBinauralCodecs() }
       : {}),
     subtitles,
   };

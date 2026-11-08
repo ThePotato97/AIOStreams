@@ -96,6 +96,18 @@ test('client binaural: a track the player renders is copied, never played direct
   assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy');
 });
 
+test('client binaural: E-AC-3 the player renders is copied, with the codec FFmpeg writes', () => {
+  const asked = request({ binaural: true, clientBinaural: ['truehd', 'eac3'] });
+  const policy = select(meta('eac3'), asked);
+  assert.equal(policy.clientBinaural, true);
+  assert.equal(policy.binaural, false);
+  assert.equal(policy.copyAudio, true);
+  // FFmpeg writes "ec-3" itself
+  assert.equal(audioCodec(policy), null);
+  const { args } = ffmpegArgs('in', meta('eac3'), asked, 'out');
+  assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy');
+});
+
 test('client binaural: the empty TrueHD codec string is filled in', () => {
   const mpd =
     '<Representation id="0" mimeType="video/mp4" codecs="avc1.64001f"/>' +
@@ -359,6 +371,30 @@ test(
     const { audio } = await finished(result.id);
     // the audio stream is the source's TrueHD, untouched
     assert.equal(audio.codec_name, 'truehd');
+    assert.equal(audio.channels, 6);
+  }
+);
+
+test(
+  'real chain: E-AC-3 copied for the player to render, with its codec in the manifest',
+  { skip: !haveRenderer && 'atmos-render not installed' },
+  async () => {
+    const result = await call('/prepare', {
+      input: `${process.env.AIOSTREAMS_INTERNAL_URL}/party/guest/source/eac3`,
+      viewer: 'client-viewer-eac3-xxxxxxxx',
+      request: request(
+        { audio: false, binaural: true, clientBinaural: ['truehd', 'eac3'] },
+        { positionMs: 0 }
+      ),
+    });
+    assert.equal(result.clientBinaural, true);
+    assert.equal(result.binaural, false);
+    const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
+      headers,
+    });
+    assert.match(await res.text(), /mimeType="audio\/mp4" codecs="ec-3"/);
+    const { audio } = await finished(result.id);
+    assert.equal(audio.codec_name, 'eac3');
     assert.equal(audio.channels, 6);
   }
 );

@@ -24,3 +24,12 @@ declare module '*.po' {
 declare module 'atmos-render-wasm-url' {
   export const wasmUrl: string | null;
 }
+
+/** Whether the E-AC-3 core decoder's libav.js was built (scripts/build-libav-eac3.sh). */
+declare const __LIBAV_EAC3__: boolean;
+
+/** Loads that libav.js, or null where it wasn't built (an rsbuild alias). */
+declare module 'libav-eac3' {
+  import type { LibAVSync } from './lib/playback/binaural/eac3-core';
+  export const loadLibav: (() => Promise<LibAVSync>) | null;
+}

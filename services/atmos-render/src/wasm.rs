@@ -1,13 +1,30 @@
-//! The renderer as WebAssembly, for playback in the browser: a session takes a TrueHD
+//! The renderer as WebAssembly, for playback in the browser: a session takes a TrueHD or E-AC-3
 //! elementary stream in chunks and gives back binaural stereo (48 kHz, interleaved f32), with
-//! the input's timing. A plain C ABI, so it needs no bindings crate.
+//! the input's timing. For E-AC-3 the caller also decodes the core with FFmpeg's decoder
+//! (libav.js) and pushes its PCM (`ar_push_pcm`). A plain C ABI, so it needs no bindings crate.
 
-use crate::input::{Feed, Pipeline};
+use crate::eac3_in::Eac3;
+use crate::input::{Block, Feed, Pipeline};
+use crate::loudness::Loudness;
 use crate::objects::Modes;
 use crate::truehd_in::TrueHd;
 
+enum Input {
+    TrueHd(TrueHd),
+    Eac3(Eac3),
+}
+
+impl Input {
+    fn feed(&mut self) -> &mut dyn Feed {
+        match self {
+            Input::TrueHd(f) => f,
+            Input::Eac3(f) => f,
+        }
+    }
+}
+
 pub struct Session {
-    feed: TrueHd,
+    input: Input,
     pipeline: Pipeline,
     out: Vec<f32>,
 }
@@ -27,36 +44,55 @@ pub extern "C" fn ar_free(ptr: *mut u8, len: usize) {
     unsafe { drop(Vec::from_raw_parts(ptr, 0, len)) }
 }
 
-/// A session; `windows_modes` renders every element Near, as Windows does.
-#[unsafe(no_mangle)]
-pub extern "C" fn ar_new(windows_modes: bool) -> *mut Session {
-    let modes = if windows_modes { Modes::Windows } else { Modes::Stream };
+fn modes(windows: bool) -> Modes {
+    if windows { Modes::Windows } else { Modes::Stream }
+}
+
+fn session(input: Input) -> *mut Session {
     match Pipeline::new() {
-        Ok(pipeline) => Box::into_raw(Box::new(Session { feed: TrueHd::new(modes), pipeline, out: Vec::new() })),
+        Ok(pipeline) => Box::into_raw(Box::new(Session { input, pipeline, out: Vec::new() })),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// A TrueHD session; `windows_modes` renders every element Near, as Windows does.
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_new(windows_modes: bool) -> *mut Session {
+    session(Input::TrueHd(TrueHd::new(modes(windows_modes))))
+}
+
+/// An E-AC-3 session. `windows_loudness`: Windows' RF mode instead of the Reference Player's LINE
+/// mode, and the core decoder must be set up to match (`loudness::ffmpeg_args`).
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_new_eac3(windows_modes: bool, windows_loudness: bool) -> *mut Session {
+    let loudness = if windows_loudness { Loudness::Windows } else { Loudness::Reference };
+    session(Input::Eac3(Eac3::external(modes(windows_modes), loudness)))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ar_drop(session: *mut Session) {
     if !session.is_null() {
-        // SAFETY: from ar_new, and dropped once.
+        // SAFETY: from ar_new or ar_new_eac3, and dropped once.
         unsafe { drop(Box::from_raw(session)) }
     }
 }
 
-fn collect(session: &mut Session, run: impl FnOnce(&mut TrueHd, &mut Vec<crate::input::Block>)) -> usize {
-    let Session { feed, pipeline, out } = session;
+fn interleave(out: &mut Vec<f32>) -> impl FnMut(&[f32], &[f32]) + '_ {
+    move |l, r| {
+        for (a, b) in l.iter().zip(r) {
+            out.push(*a);
+            out.push(*b);
+        }
+    }
+}
+
+fn collect(session: &mut Session, run: impl FnOnce(&mut Input, &mut Vec<Block>)) -> usize {
+    let Session { input, pipeline, out } = session;
     out.clear();
     let mut blocks = Vec::new();
-    run(feed, &mut blocks);
+    run(input, &mut blocks);
     for b in blocks {
-        pipeline.take(feed, b, &mut |l, r| {
-            for (a, b) in l.iter().zip(r) {
-                out.push(*a);
-                out.push(*b);
-            }
-        });
+        pipeline.take(input.feed(), b, &mut interleave(out));
     }
     out.len() / 2
 }
@@ -66,7 +102,21 @@ fn collect(session: &mut Session, run: impl FnOnce(&mut TrueHd, &mut Vec<crate::
 pub extern "C" fn ar_push(session: *mut Session, ptr: *const u8, len: usize) -> usize {
     // SAFETY: a live session, and len readable bytes at ptr.
     let (session, bytes) = unsafe { (&mut *session, std::slice::from_raw_parts(ptr, len)) };
-    collect(session, |feed, blocks| feed.push(bytes, &mut |b| blocks.push(b)))
+    collect(session, |input, blocks| input.feed().push(bytes, &mut |b| blocks.push(b)))
+}
+
+/// E-AC-3 only: the core decoder's output for the bytes pushed so far, in order — `len` f32 at
+/// `ptr`, interleaved in FFmpeg's (WAV) channel order, `channels` channels with channel mask
+/// `mask`. Returns how many stereo frames `ar_output` now holds (0 for a TrueHD session).
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_push_pcm(session: *mut Session, ptr: *const f32, len: usize, channels: usize, mask: u32) -> usize {
+    // SAFETY: a live session, and len readable f32 at ptr.
+    let (session, samples) = unsafe { (&mut *session, std::slice::from_raw_parts(ptr, len)) };
+    collect(session, |input, blocks| {
+        if let Input::Eac3(f) = input {
+            f.push_pcm(channels, mask, samples, &mut |b| blocks.push(b));
+        }
+    })
 }
 
 /// The end of the stream: flushes what's buffered; returns the frames `ar_output` holds.
@@ -74,15 +124,9 @@ pub extern "C" fn ar_push(session: *mut Session, ptr: *const u8, len: usize) -> 
 pub extern "C" fn ar_finish(session: *mut Session) -> usize {
     // SAFETY: a live session.
     let session = unsafe { &mut *session };
-    let frames = collect(session, |feed, blocks| feed.end(&mut |b| blocks.push(b)));
-    let Session { feed, pipeline, out } = session;
-    pipeline.finish(feed, &mut |l, r| {
-        for (a, b) in l.iter().zip(r) {
-            out.push(*a);
-            out.push(*b);
-        }
-    });
-    let _ = frames;
+    collect(session, |input, blocks| input.feed().end(&mut |b| blocks.push(b)));
+    let Session { input, pipeline, out } = session;
+    pipeline.finish(input.feed(), &mut interleave(out));
     out.len() / 2
 }
 

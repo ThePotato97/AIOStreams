@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { flacFrame } from './flac';
 import { flacFragment, flacInit, initTimescale, readFragments } from './fmp4';
 import { BinauralConverter, type RendererExports } from './convert';
+import { eac3Core, type LibAVSync } from './eac3-core';
 
 const has = (cmd: string) => {
   try {
@@ -33,6 +34,10 @@ const nativePath = join(
   '../../../../../../services/atmos-render/target/release/atmos-render'
 );
 const haveWasm = existsSync(wasmPath);
+const libavDir = join(__dirname, 'libav');
+const haveLibav = existsSync(join(libavDir, 'libav.wasm'));
+/** An E-AC-3 stream with Atmos (JOC), to compare with the native renderer; not in the repository. */
+const atmosEac3 = process.env.EAC3_ATMOS;
 
 let dir = '';
 beforeAll(() => {
@@ -232,5 +237,142 @@ describe.skipIf(!ffmpeg || !haveWasm)(
       writeFileSync(file, Buffer.concat([head, jumped]));
       expect(Number(probe(file).packets[0].pts_time)).toBeCloseTo(8, 3);
     });
+  }
+);
+
+const libav = async (): Promise<LibAVSync> => {
+  const { default: LibAV } = await import(
+    /* @vite-ignore */ join(libavDir, 'libav.mjs')
+  );
+  const { default: factory } = await import(
+    /* @vite-ignore */ join(libavDir, 'libav.factory.mjs')
+  );
+  return LibAV.LibAV({
+    noworker: true,
+    factory,
+    wasmurl: join(libavDir, 'libav.wasm'),
+  });
+};
+
+/** Renders an E-AC-3 stream through DASH in the browser's way, and natively, and compares. */
+async function compareEac3(source: string, name: string, tolerance: number) {
+  const out = join(dir, name);
+  execFileSync('mkdir', ['-p', out]);
+  execFileSync('ffmpeg', [
+    '-v',
+    'error',
+    '-i',
+    source,
+    '-map',
+    '0:a',
+    '-c',
+    'copy',
+    '-f',
+    'dash',
+    '-dash_segment_type',
+    'mp4',
+    '-seg_duration',
+    '4',
+    join(out, 'manifest.mpd'),
+  ]);
+  expect(readFileSync(join(out, 'manifest.mpd'), 'utf8')).toContain(
+    'codecs="ec-3"'
+  );
+  const files = readdirSync(out);
+  const init = readFileSync(
+    join(
+      out,
+      files.find((f) => f.startsWith('init-'))!
+    )
+  );
+  const chunks = files
+    .filter((f) => f.startsWith('chunk-'))
+    .sort()
+    .map((f) => readFileSync(join(out, f)));
+  const lib = await libav();
+  const conv = new BinauralConverter(await renderer(), () => eac3Core(lib));
+  const file = join(out, 'binaural.mp4');
+  writeFileSync(
+    file,
+    Buffer.concat([conv.init(init), ...chunks.map((c) => conv.segment(c))])
+  );
+  conv.close();
+  expect(probe(file).streams[0].codec_name).toBe('flac');
+  const got = decode(file);
+  const raw = join(out, 'src.ec3');
+  execFileSync('ffmpeg', [
+    '-v',
+    'error',
+    '-i',
+    source,
+    '-map',
+    '0:a',
+    '-c',
+    'copy',
+    '-f',
+    'eac3',
+    raw,
+  ]);
+  const native = execFileSync(nativePath, ['--format', 'eac3'], {
+    input: readFileSync(raw),
+    maxBuffer: 1 << 30,
+  });
+  const ref = new Float32Array(
+    native.buffer,
+    native.byteOffset,
+    native.byteLength / 4
+  );
+  // all of it but the renderer's latency at the end (no flush here)
+  expect(ref.length - got.length).toBeGreaterThanOrEqual(0);
+  expect(ref.length - got.length).toBeLessThan(2 * 4096);
+  let max = 0;
+  for (let i = 0; i < got.length; i++)
+    max = Math.max(max, Math.abs(got[i] - ref[i]));
+  if (process.env.SHOW_DIFF)
+    console.log(
+      name,
+      'max diff',
+      max,
+      'frames',
+      got.length / 2,
+      'of',
+      ref.length / 2
+    );
+  expect(max).toBeLessThan(tolerance);
+}
+
+describe.skipIf(!ffmpeg || !haveWasm || !haveLibav || !existsSync(nativePath))(
+  'E-AC-3 with the libav.js core decoder',
+  () => {
+    it('renders 5.1 E-AC-3 as the native renderer does', async () => {
+      const tones = [220, 330, 440, 550, 60, 770]
+        .map((f) => `0.3*sin(2*PI*${f}*t)`)
+        .join('|');
+      const src = join(dir, 'src-eac3.mkv');
+      execFileSync('ffmpeg', [
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        `aevalsrc=${tones}:c=5.1(side):s=48000`,
+        '-t',
+        '12',
+        '-c:a',
+        'eac3',
+        '-b:a',
+        '640k',
+        src,
+      ]);
+      // 24-bit FLAC; the core from FFmpeg 9.0 (libav.js) against this host's FFmpeg
+      await compareEac3(src, 'eac3-51', 1 / 2 ** 20);
+    });
+    it.skipIf(!atmosEac3 || !existsSync(atmosEac3))(
+      'renders E-AC-3 with Atmos (JOC) as the native renderer does',
+      async () => {
+        await compareEac3(atmosEac3!, 'eac3-joc', 1 / 2 ** 20);
+      },
+      900_000
+    );
   }
 );

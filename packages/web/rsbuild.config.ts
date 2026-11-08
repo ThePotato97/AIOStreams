@@ -1,7 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { formatter } from '@lingui/format-po';
-import { defineConfig, loadEnv, type RsbuildConfig } from '@rsbuild/core';
+import {
+  defineConfig,
+  loadEnv,
+  rspack,
+  type RsbuildConfig,
+} from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
 import { LICENSES_FILE, pluginLicenses } from './licenses-plugin';
 
@@ -89,11 +94,18 @@ const BUNDLED_ICONS = [
  * The binaural renderer's WebAssembly (scripts/build-atmos-wasm.sh). Without it, binaural
  * rendering stays on the server.
  */
+const BINAURAL = new URL('./src/lib/playback/binaural/', import.meta.url);
 function atmosWasmUrl(): string {
-  const dir = new URL('./src/lib/playback/binaural/', import.meta.url);
-  const built = existsSync(new URL('atmos_render.wasm', dir));
-  return new URL(built ? 'wasm-url.ts' : 'wasm-url-missing.ts', dir).pathname;
+  const built = existsSync(new URL('atmos_render.wasm', BINAURAL));
+  return new URL(built ? 'wasm-url.ts' : 'wasm-url-missing.ts', BINAURAL)
+    .pathname;
 }
+
+/**
+ * The E-AC-3 core decoder for in-browser binaural rendering, libav.js
+ * (scripts/build-libav-eac3.sh). Without it, E-AC-3 binaural rendering stays on the server.
+ */
+const LIBAV_EAC3 = existsSync(new URL('libav/libav.wasm', BINAURAL));
 
 /**
  * `--env-mode standalone` builds the app on its own, with a server list,
@@ -108,6 +120,7 @@ export default defineConfig(async ({ envMode }) => {
     __APP_COMMIT__: JSON.stringify(buildCommit()),
     __UNFINISHED_LOCALES__: JSON.stringify(await unfinishedLocales()),
     __LICENSES_FILE__: JSON.stringify(LICENSES_FILE),
+    __LIBAV_EAC3__: JSON.stringify(LIBAV_EAC3),
   };
   const source = {
     entry: { index: './src/main.tsx' },
@@ -115,12 +128,32 @@ export default defineConfig(async ({ envMode }) => {
     // Dependencies too, which are otherwise shipped as published: older browsers can't parse some of their syntax.
     include: [/[\\/]node_modules[\\/]/],
   };
-  const resolve = { alias: { 'atmos-render-wasm-url': atmosWasmUrl() } };
+  const resolve = {
+    alias: {
+      'atmos-render-wasm-url': atmosWasmUrl(),
+      'libav-eac3': new URL(
+        LIBAV_EAC3 ? 'libav-eac3.ts' : 'libav-eac3-missing.ts',
+        BINAURAL
+      ).pathname,
+    },
+  };
   // Lingui's macros compile at build time, and each catalog loads compiled.
   const tools: RsbuildConfig['tools'] = {
     swc: { jsc: { experimental: { plugins: [['@lingui/swc-plugin', {}]] } } },
     rspack: {
-      module: { rules: [{ test: /\.po$/, use: '@lingui/loader' }] },
+      // libav.js's factory imports it only when it runs under Node.
+      plugins: [new rspack.IgnorePlugin({ resourceRegExp: /^node:module$/ })],
+      module: {
+        rules: [
+          { test: /\.po$/, use: '@lingui/loader' },
+          // Emscripten's factory for libav.js: its own wasm URL (passed in instead) and its
+          // Node-only imports stay as they are.
+          {
+            test: /[\\/]binaural[\\/]libav[\\/]libav\.factory\.mjs$/,
+            parser: { url: false },
+          },
+        ],
+      },
     },
   };
   if (standalone) {

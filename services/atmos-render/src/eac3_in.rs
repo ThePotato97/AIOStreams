@@ -1,7 +1,8 @@
-//! E-AC-3 input. The core is decoded by an FFmpeg child (its decoder handles AHT); the renderer
-//! feeds it the same bytes it reads and takes its PCM back as WAV, for the channel layout. Each
-//! access unit's EMDF (OAMD and JOC) comes from the bitstream; JOC rebuilds the objects from the
-//! core. Without JOC the core channels render as beds at Dolby's positions.
+//! E-AC-3 input. The core is decoded by FFmpeg's decoder (it handles AHT): natively an FFmpeg
+//! child, fed the same bytes the renderer reads, its PCM taken back as WAV for the channel layout;
+//! in the browser libav.js (the same decoder, with the same options), whose PCM the caller pushes
+//! in (`push_pcm`). Each access unit's EMDF (OAMD and JOC) comes from the bitstream; JOC rebuilds
+//! the objects from the core. Without JOC the core channels render as beds at Dolby's positions.
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -30,11 +31,17 @@ enum Pcm {
     Samples(Vec<f32>),
 }
 
-pub struct Eac3 {
+/// The FFmpeg child decoding the core.
+struct Decoder {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     reader: Option<JoinHandle<()>>,
     pcm: Receiver<Pcm>,
+}
+
+pub struct Eac3 {
+    /// None: the caller decodes the core and pushes its PCM (`push_pcm`).
+    decoder: Option<Decoder>,
     buffer: Vec<u8>,
     units: VecDeque<Unit>,
     current: Option<Unit>,
@@ -135,11 +142,16 @@ impl Eac3 {
         let (tx, rx) = channel();
         let reader = spawn_reader(child.stdout.take().unwrap(), tx);
         let stdin = child.stdin.take();
-        Ok(Self {
-            child: Some(child),
-            stdin,
-            reader: Some(reader),
-            pcm: rx,
+        let mut feed = Self::external(modes, loudness);
+        feed.decoder = Some(Decoder { child: Some(child), stdin, reader: Some(reader), pcm: rx });
+        Ok(feed)
+    }
+
+    /// A feed whose core PCM the caller decodes with FFmpeg's E-AC-3 decoder, set up as
+    /// `loudness::ffmpeg_args(loudness)` says, and pushes in with `push_pcm`.
+    pub fn external(modes: Modes, loudness: Loudness) -> Self {
+        Self {
+            decoder: None,
             buffer: Vec::new(),
             units: VecDeque::new(),
             current: None,
@@ -151,7 +163,22 @@ impl Eac3 {
             atmos: None,
             samples: 0,
             core_beds: Vec::new(),
-        })
+        }
+    }
+
+    fn set_layout(&mut self, channels: usize, mask: u32) {
+        if self.layout != Some((channels, mask)) {
+            self.layout = Some((channels, mask));
+            self.core_beds = channels::retyped(channels::wav_mask(mask), self.scene.modes);
+        }
+    }
+
+    /// The decoder's output for the bytes pushed so far, in order: interleaved f32 in WAV channel
+    /// order (FFmpeg's), `channels` channels with the WAV/FFmpeg channel mask `mask`.
+    pub fn push_pcm(&mut self, channels: usize, mask: u32, samples: &[f32], out: &mut dyn FnMut(Block)) {
+        self.set_layout(channels, mask);
+        self.pcm_buf.extend(samples);
+        self.emit(out);
     }
 
     /// Split the bytes into syncframes; group each independent frame with its dependents.
@@ -223,23 +250,21 @@ impl Eac3 {
     /// false once the decoder's output has closed.
     fn drain_pcm(&mut self, wait: bool) -> bool {
         loop {
+            let Some(decoder) = self.decoder.as_ref() else { return false };
             let msg = if wait {
-                match self.pcm.recv() {
+                match decoder.pcm.recv() {
                     Ok(m) => Some(m),
                     Err(_) => return false,
                 }
             } else {
-                match self.pcm.try_recv() {
+                match decoder.pcm.try_recv() {
                     Ok(m) => Some(m),
                     Err(std::sync::mpsc::TryRecvError::Empty) => return true,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
                 }
             };
             match msg {
-                Some(Pcm::Layout { channels, mask }) => {
-                    self.layout = Some((channels, mask));
-                    self.core_beds = channels::retyped(channels::wav_mask(mask), self.scene.modes);
-                }
+                Some(Pcm::Layout { channels, mask }) => self.set_layout(channels, mask),
                 Some(Pcm::Samples(v)) => {
                     self.pcm_buf.extend(v);
                     if wait {
@@ -320,7 +345,7 @@ impl Eac3 {
 
 impl Feed for Eac3 {
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block)) {
-        if let Some(stdin) = self.stdin.as_mut() {
+        if let Some(stdin) = self.decoder.as_mut().and_then(|d| d.stdin.as_mut()) {
             let _ = stdin.write_all(bytes);
         }
         self.buffer.extend_from_slice(bytes);
@@ -333,8 +358,10 @@ impl Feed for Eac3 {
         if let Some(u) = self.current.take() {
             self.units.push_back(u);
         }
-        drop(self.stdin.take()); // EOF to the decoder
-        while !self.units.is_empty() {
+        if let Some(d) = self.decoder.as_mut() {
+            drop(d.stdin.take()); // EOF to the decoder
+        }
+        while self.decoder.is_some() && !self.units.is_empty() {
             let open = self.drain_pcm(true);
             self.emit(out);
             if !open {
@@ -349,11 +376,13 @@ impl Feed for Eac3 {
                 self.emit(out);
             }
         }
-        if let Some(r) = self.reader.take() {
-            let _ = r.join();
-        }
-        if let Some(mut c) = self.child.take() {
-            let _ = c.wait();
+        if let Some(mut d) = self.decoder.take() {
+            if let Some(r) = d.reader.take() {
+                let _ = r.join();
+            }
+            if let Some(mut c) = d.child.take() {
+                let _ = c.wait();
+            }
         }
     }
 

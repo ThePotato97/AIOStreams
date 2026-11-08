@@ -1,17 +1,23 @@
 /*
- * A Shaka Player transmuxer that renders the transcoder's TrueHD DASH audio (codecs "mlpa") to
- * binaural FLAC in the browser, with atmos-render built as WebAssembly. Shaka hands it each
- * segment and appends what it returns, so buffering, seeking and A/V sync stay Shaka's.
+ * A Shaka Player transmuxer that renders the transcoder's TrueHD or E-AC-3 DASH audio (codecs
+ * "mlpa", "ec-3") to binaural FLAC in the browser, with atmos-render built as WebAssembly (and
+ * for E-AC-3 FFmpeg's core decoder, as libav.js). Shaka hands it each segment and appends what
+ * it returns, so buffering, seeking and A/V sync stay Shaka's.
  */
 import { wasmUrl } from 'atmos-render-wasm-url';
 
 /** What the browser plays instead. */
 export const BINAURAL_OUTPUT = 'audio/mp4; codecs="flac"';
-/** The codecs rendered here: TrueHD (E-AC-3 needs a core decoder, not built yet). */
-export const CLIENT_BINAURAL_CODECS = ['truehd'] as const;
-const INPUT = /codecs="?mlpa/i;
+type Codec = 'truehd' | 'eac3';
+/** Each codec as the transcoder's manifest names it. */
+const INPUT: Record<Codec, RegExp> = {
+  truehd: /codecs="?mlpa/i,
+  eac3: /codecs="?ec-3/i,
+};
+const codecOf = (mimeType: string) =>
+  (Object.keys(INPUT) as Codec[]).find((c) => INPUT[c].test(mimeType));
 
-/** Whether this browser can render binaural audio itself. */
+/** Whether this browser can render binaural audio itself at all. */
 export function clientBinauralSupported(): boolean {
   return (
     !!wasmUrl &&
@@ -20,6 +26,22 @@ export function clientBinauralSupported(): boolean {
     typeof MediaSource !== 'undefined' &&
     MediaSource.isTypeSupported(BINAURAL_OUTPUT)
   );
+}
+
+/**
+ * The codecs this browser renders to binaural itself. E-AC-3 needs the core decoder built, and
+ * only where the browser doesn't play E-AC-3 itself: there Shaka would play it as it is, and the
+ * server renders it instead.
+ */
+export function clientBinauralCodecs(): Codec[] {
+  if (!clientBinauralSupported()) return [];
+  const codecs: Codec[] = ['truehd'];
+  if (
+    __LIBAV_EAC3__ &&
+    !MediaSource.isTypeSupported('audio/mp4; codecs="ec-3"')
+  )
+    codecs.push('eac3');
+  return codecs;
 }
 
 /** Makes the error Shaka reports for a segment that couldn't be converted. */
@@ -47,7 +69,7 @@ class BinauralTransmuxer {
     });
   }
 
-  private start(): Promise<void> {
+  private start(codec: Codec): Promise<void> {
     if (this.loaded) return this.loaded;
     this.worker = new Worker(new URL('./worker.ts', import.meta.url));
     this.worker.onmessage = (
@@ -64,15 +86,16 @@ class BinauralTransmuxer {
         w.reject(new Error(event.message || 'Binaural worker failed'));
       this.waiting.clear();
     };
-    this.loaded = this.call({ type: 'load', wasmUrl }).then(() => {});
+    this.loaded = this.call({ type: 'load', wasmUrl, codec }).then(() => {});
     return this.loaded;
   }
 
   isSupported(mimeType: string, contentType?: string): boolean {
+    const codec = codecOf(mimeType);
     return (
       contentType !== 'video' &&
-      INPUT.test(mimeType) &&
-      clientBinauralSupported()
+      !!codec &&
+      clientBinauralCodecs().includes(codec)
     );
   }
 
@@ -87,7 +110,7 @@ class BinauralTransmuxer {
 
   async transmux(
     data: ArrayBuffer | ArrayBufferView,
-    _stream: unknown,
+    stream: { codecs?: string } | null,
     reference: unknown
   ): Promise<Uint8Array> {
     const view = ArrayBuffer.isView(data)
@@ -95,7 +118,11 @@ class BinauralTransmuxer {
       : new Uint8Array(data);
     const copy = view.slice().buffer;
     try {
-      await this.start();
+      const codec =
+        codecOf(this.original) ?? codecOf(`codecs="${stream?.codecs ?? ''}"`);
+      if (!codec)
+        throw new Error(`Not a stream rendered here: ${this.original}`);
+      await this.start(codec);
       const out = await this.call(
         { type: reference ? 'segment' : 'init', data: copy },
         [copy]
