@@ -444,6 +444,10 @@ const capabilitySchema = z.object({
   surround: z.boolean().optional(),
   lossless: z.boolean().optional(),
   binaural: z.boolean().optional(),
+  clientBinaural: z
+    .array(z.enum(['truehd', 'eac3']))
+    .max(2)
+    .optional(),
   subtitles: z
     .array(z.enum(['ass', 'pgs']))
     .max(2)
@@ -622,6 +626,7 @@ function playbackResponse(
     mode: GuestPlayback['mode'];
     offsetMs?: number;
     binaural?: boolean;
+    clientBinaural?: boolean;
   }
 ): GuestPlayback {
   const query = `?token=${encodeURIComponent(token)}&lease=${lease}`;
@@ -638,6 +643,7 @@ function playbackResponse(
     url: `${base}${result.mode === 'direct' ? 'original' : `${result.id}/manifest.mpd`}${query}`,
   };
   if (result.binaural) response.binaural = true;
+  if (result.clientBinaural) response.clientBinaural = true;
   const track =
     body.subtitle == null
       ? undefined

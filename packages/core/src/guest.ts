@@ -39,6 +39,11 @@ export interface GuestCapabilities {
    * on the server, by Dolby Atmos for Headphones' renderer.
    */
   binaural?: boolean;
+  /**
+   * Audio codecs the player renders to binaural itself (in WebAssembly): with `binaural`, a
+   * track in one of these is copied as it is, and the server doesn't render it.
+   */
+  clientBinaural?: ('truehd' | 'eac3')[];
   /** Subtitle formats the browser draws itself, rather than burned in. */
   subtitles?: ('ass' | 'pgs')[];
 }
@@ -66,6 +71,8 @@ export interface GuestPlayback {
   subtitleFormat?: 'vtt' | 'ass' | 'sup';
   /** The audio was rendered to binaural on the server: the player adds no virtualiser. */
   binaural?: boolean;
+  /** The audio is copied for the player to render to binaural itself. */
+  clientBinaural?: boolean;
   /** Fonts attached to the file, for an ASS subtitle. */
   fontUrls?: string[];
 }

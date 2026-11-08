@@ -226,16 +226,27 @@ export function select(meta, request) {
     video.dovi?.profile !== 5;
   // Rendered to binaural here (atmos-render, Dolby Atmos for Headphones' renderer) where the
   // player asks for it and the track is one the renderer reads: TrueHD or E-AC-3 at 48 kHz.
-  const binaural =
+  const renderable =
     !!audio &&
     caps.binaural === true &&
     BINAURAL_CODECS[audio.codec] !== undefined &&
     (audio.sampleRate ?? 48000) === 48000;
+  // The player renders it itself where it can (in WebAssembly): the track is copied as it is.
+  // Not on a retry after failed playback, which renders it here instead.
+  const clientBinaural =
+    renderable &&
+    !request.force &&
+    (caps.clientBinaural ?? []).includes(audio.codec);
+  const binaural = renderable && !clientBinaural;
   const copyAudio =
-    !!audio && !binaural && original && !request.force && caps.audio === true;
+    !!audio &&
+    !binaural &&
+    (clientBinaural || (original && !request.force && caps.audio === true));
   const direct =
     original &&
     !request.force &&
+    // The player's own rendering reads the DASH stream.
+    !clientBinaural &&
     caps.container === true &&
     copyVideo &&
     (!audio || copyAudio) &&
@@ -284,6 +295,7 @@ export function select(meta, request) {
     copyVideo,
     copyAudio,
     binaural,
+    clientBinaural,
   };
 }
 /*
@@ -502,6 +514,9 @@ export function ffmpegArgs(
     );
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
+  // TrueHD in MP4 (mlpa) is behind FFmpeg's experimental flag.
+  if (policy.copyAudio && policy.audio.codec === 'truehd')
+    args.push('-strict', 'experimental');
   if (policy.binaural) {
     // Already stereo for headphones: FLAC where the browser plays it, else AAC.
     args.push(
@@ -710,6 +725,15 @@ export function manifestStart(mpd) {
   return Number.isFinite(start) ? start : null;
 }
 /** The manifest with the video's full codec string in place of FFmpeg's bare one. */
+/** The manifest's codec string for an audio track copied as it is, where FFmpeg writes none. */
+export function audioCodec(policy) {
+  return policy.copyAudio && policy.audio?.codec === 'truehd' ? 'mlpa' : null;
+}
+/** Fills in an audio representation's empty codec string (FFmpeg writes none for TrueHD). */
+export function withAudioCodec(mpd, codec) {
+  if (!codec) return mpd;
+  return mpd.replace(/(mimeType="audio\/mp4" codecs=")(")/, `$1${codec}$2`);
+}
 export function withVideoCodec(mpd, codec) {
   if (!codec) return mpd;
   // FFmpeg 6.1 writes the bare sample entry (hvc1); 8.1 writes nothing for copied HEVC.

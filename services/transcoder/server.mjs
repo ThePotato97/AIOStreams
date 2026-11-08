@@ -17,6 +17,8 @@ import {
   manifestStart,
   subtitleKind,
   videoCodec,
+  audioCodec,
+  withAudioCodec,
   withFullDuration,
   withVideoCodec,
 } from './media.mjs';
@@ -330,6 +332,8 @@ function startMain(job, encoder, gpu, extra) {
   );
   job.offsetMs = command.offsetMs;
   job.mode = command.policy.mode;
+  job.clientBinaural = command.policy.clientBinaural;
+  job.audioCodec = audioCodec(command.policy);
   job.reasons = {
     video: command.policy.videoReason,
     audio: command.policy.audioReason,
@@ -484,6 +488,7 @@ async function prepare(body) {
     policy.copyAudio,
     policy.burn,
     policy.binaural,
+    policy.clientBinaural,
   ]);
   const positionMs = request.positionMs;
   let job = [...jobs.values()].find(
@@ -574,6 +579,8 @@ async function prepare(body) {
     // Whether the audio was rendered to binaural here: the player's own
     // virtualiser stays off for it.
     binaural: !!job.binaural,
+    // The audio is copied for the player to render itself.
+    clientBinaural: !!job.clientBinaural,
     meta,
   };
 }
@@ -605,6 +612,7 @@ export function createServer() {
             tonemap: j.tonemap,
             decode: j.decode,
             binaural: !!j.binaural,
+            clientBinaural: !!j.clientBinaural,
             viewers: j.viewers.size,
             producedMs: j.producedMs,
             speed: j.speed,
@@ -730,7 +738,10 @@ export function createServer() {
             await readFile(`${job.dir}/init-0.m4s`).catch(() => Buffer.alloc(0))
           );
           const mpd = withFullDuration(
-            withVideoCodec(await readFile(file, 'utf8'), job.videoCodec),
+            withAudioCodec(
+              withVideoCodec(await readFile(file, 'utf8'), job.videoCodec),
+              job.audioCodec
+            ),
             job.meta.durationMs
           );
           res.setHeader('Content-Type', 'application/dash+xml');

@@ -15,6 +15,8 @@ import {
   demuxArgs,
   rendererArgs,
   firstPacketTime,
+  audioCodec,
+  withAudioCodec,
 } from './media.mjs';
 
 const exec = promisify(execFile);
@@ -68,6 +70,41 @@ test('binaural: TrueHD and E-AC-3 at 48 kHz, where the player asks', () => {
     select(meta('truehd', { sampleRate: 96000 }), asked).binaural,
     false
   );
+});
+
+test('client binaural: a track the player renders is copied, never played directly', () => {
+  const asked = request({ binaural: true, clientBinaural: ['truehd'] });
+  const policy = select(meta('truehd'), asked);
+  assert.equal(policy.clientBinaural, true);
+  assert.equal(policy.binaural, false);
+  assert.equal(policy.copyAudio, true);
+  assert.equal(policy.audioReason, null);
+  // video and audio both copied: a remux, not the original file
+  assert.equal(policy.mode, 'remux');
+  assert.equal(audioCodec(policy), 'mlpa');
+  // a codec the player doesn't render itself is rendered here
+  const eac3 = select(meta('eac3'), asked);
+  assert.equal(eac3.clientBinaural, false);
+  assert.equal(eac3.binaural, true);
+  // a retry after failed playback renders it here
+  const retry = select(meta('truehd'), { ...asked, force: true });
+  assert.equal(retry.clientBinaural, false);
+  assert.equal(retry.binaural, true);
+  // FFmpeg's flag for TrueHD in MP4
+  const { args } = ffmpegArgs('in', meta('truehd'), asked, 'out');
+  assert.equal(args[args.indexOf('-strict') + 1], 'experimental');
+  assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy');
+});
+
+test('client binaural: the empty TrueHD codec string is filled in', () => {
+  const mpd =
+    '<Representation id="0" mimeType="video/mp4" codecs="avc1.64001f"/>' +
+    '<Representation id="1" mimeType="audio/mp4" codecs="" bandwidth="2299528"/>';
+  assert.match(
+    withAudioCodec(mpd, 'mlpa'),
+    /mimeType="audio\/mp4" codecs="mlpa"/
+  );
+  assert.equal(withAudioCodec(mpd, null), mpd);
 });
 
 test('binaural: the arguments of the three processes', () => {
@@ -300,6 +337,31 @@ for (const codec of ['truehd', 'eac3'])
       }
     }
   );
+
+test(
+  'real chain: TrueHD copied for the player to render, with its codec in the manifest',
+  { skip: !haveRenderer && 'atmos-render not installed' },
+  async () => {
+    const result = await call('/prepare', {
+      input: `${process.env.AIOSTREAMS_INTERNAL_URL}/party/guest/source/truehd`,
+      viewer: 'client-viewer-xxxxxxxx',
+      request: request(
+        { audio: false, binaural: true, clientBinaural: ['truehd'] },
+        { positionMs: 0 }
+      ),
+    });
+    assert.equal(result.clientBinaural, true);
+    assert.equal(result.binaural, false);
+    const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
+      headers,
+    });
+    assert.match(await res.text(), /mimeType="audio\/mp4" codecs="mlpa"/);
+    const { audio } = await finished(result.id);
+    // the audio stream is the source's TrueHD, untouched
+    assert.equal(audio.codec_name, 'truehd');
+    assert.equal(audio.channels, 6);
+  }
+);
 
 test(
   'real chain: a renderer that dies while playing fails the job, and the track converts without it next time',
