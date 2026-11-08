@@ -58,6 +58,10 @@ msgstr ""
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "{detail}. Try another quality or ask the host to select another source."
+msgstr ""
+
 #: src/pages/downloads.tsx
 msgid "{downloaded} downloaded"
 msgstr ""
@@ -3315,10 +3319,6 @@ msgstr ""
 msgid "Playback failed"
 msgstr ""
 
-#: src/lib/guest/engine.ts
-msgid "Playback failed ({detail}). Try another quality or ask the host to select another source."
-msgstr ""
-
 #: src/pages/player.tsx
 msgid "Playback failed: {failure}"
 msgstr ""
@@ -4773,6 +4773,10 @@ msgstr ""
 msgid "The same for episodes marked as a recap."
 msgstr ""
 
+#: src/lib/guest/explain.ts
+msgid "The stream couldn't be fetched [{detail}]"
+msgstr ""
+
 #. Follows "Playback failed:"
 #: src/lib/playback/use-player.ts
 msgid "the stream ended early"
@@ -5588,6 +5592,26 @@ msgstr ""
 
 #: src/components/version-settings.tsx
 msgid "Your badges"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the audio"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the audio ({codecs})"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the stream"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the video"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the video ({codecs})"
 msgstr ""
 
 #: src/pages/guest.tsx

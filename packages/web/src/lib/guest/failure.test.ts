@@ -37,7 +37,7 @@ describe('failures', () => {
       detail: 'Shaka error 5999',
     });
   });
-  it('says which segment the browser rejected, and why, when a media buffer fails', () => {
+  it('keeps what the browser said about rejected media: which stream, why, which segment', () => {
     expect(
       shakaFailure(
         {
@@ -46,16 +46,58 @@ describe('failures', () => {
           severity: 2,
           data: [
             3,
-            'https://aio.example/party/guest/media/job/chunk-1-00069.m4s?token=t',
+            'https://aio.example/party/guest/media/job/chunk-0-00069.m4s?token=t',
           ],
         },
-        'PIPELINE_ERROR_DECODE: audio decode error'
+        {
+          element: { code: 3, message: 'PIPELINE_ERROR_DECODE: VDA error' },
+          buffer: { mimeType: 'video/mp4; codecs="hvc1.2.4.L153.B0"' },
+        }
       )
     ).toEqual({
       kind: 'media',
       status: undefined,
-      detail:
-        'MEDIA_SOURCE_OPERATION_FAILED, MEDIA_ERR_DECODE, chunk-1-00069.m4s, PIPELINE_ERROR_DECODE: audio decode error',
+      detail: 'MEDIA_SOURCE_OPERATION_FAILED',
+      media: {
+        stream: 'video',
+        codecs: 'hvc1.2.4.L153.B0',
+        element: 'MEDIA_ERR_DECODE',
+        browser: 'PIPELINE_ERROR_DECODE: VDA error',
+        segment: 'chunk-0-00069.m4s',
+      },
+    });
+    // VIDEO_ERROR: Chrome's details; MEDIA_SOURCE_OPERATION_THREW: what was thrown
+    expect(
+      shakaFailure({
+        category: 3,
+        code: 3016,
+        data: [3, '', 'PIPELINE_ERROR_DECODE'],
+      }).media
+    ).toMatchObject({
+      element: 'MEDIA_ERR_DECODE',
+      browser: 'PIPELINE_ERROR_DECODE',
+    });
+    expect(
+      shakaFailure({
+        category: 3,
+        code: 3015,
+        data: [
+          { name: 'QuotaExceededError', message: 'The SourceBuffer is full' },
+        ],
+      }).media
+    ).toMatchObject({
+      element: undefined,
+      browser: 'QuotaExceededError: The SourceBuffer is full',
+    });
+    // An init segment (no URI) before the element has an error: Shaka's code is what's left.
+    expect(
+      shakaFailure({ category: 3, code: 3014, data: [0, null] }, {}).media
+    ).toEqual({
+      stream: undefined,
+      codecs: undefined,
+      element: undefined,
+      browser: undefined,
+      segment: undefined,
     });
   });
   it('treats a manifest the browser can decode nothing of as a decoding failure', () => {

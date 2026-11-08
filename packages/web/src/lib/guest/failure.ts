@@ -10,10 +10,32 @@ export type FailureKind = 'network' | 'media' | 'other';
 
 export interface Failure {
   kind: FailureKind;
-  /** What the browser or Shaka reported, for the error shown. */
+  /** What the browser or Shaka reported (its codes), for the error shown. */
   detail: string;
   /** The server's status, for a request it refused. */
   status?: number;
+  /** What the browser rejected, where it rejected media: for the error shown. */
+  media?: MediaFailure;
+}
+
+/** The facts of a media failure the browser gives. */
+export interface MediaFailure {
+  /** The stream whose buffer failed, and its codecs, where known. */
+  stream?: 'audio' | 'video';
+  codecs?: string;
+  /** The media element's own error: its code's name and the browser's message. */
+  element?: string;
+  browser?: string;
+  /** The segment being appended, where it wasn't an init segment. */
+  segment?: string;
+}
+
+/** What the page knew when Shaka reported a media failure. */
+export interface MediaContext {
+  /** The media element's error, once the browser has set it. */
+  element?: { code: number; message?: string } | null;
+  /** The type of the SourceBuffer that fired an error (media-errors.ts). */
+  buffer?: { mimeType: string } | null;
 }
 
 /** The parts of a Shaka Player error (shaka.util.Error) this reads. */
@@ -63,13 +85,15 @@ const MEDIA_ERROR_NAMES: Record<number, string> = {
 const fileName = (uri: unknown) =>
   typeof uri === 'string' ? (uri.split('?')[0].split('/').pop() ?? '') : '';
 
-/**
- * A failure reported by Shaka Player. `elementMessage` is the media element's own error message,
- * where the browser gives one (why it rejected what was appended).
- */
+/** Shaka's media failures where the browser rejected what was appended. */
+const REJECTED = new Set([3014, 3015, 3016]);
+/** Whether the browser rejected media: its element error, if not set yet, follows shortly. */
+export const rejectedMedia = (error: ShakaError) => REJECTED.has(error.code);
+
+/** A failure reported by Shaka Player; for a media failure, with what the page knew. */
 export function shakaFailure(
   error: ShakaError,
-  elementMessage?: string
+  context: MediaContext = {}
 ): Failure {
   // BAD_HTTP_STATUS carries the URI, then the status.
   const status =
@@ -83,21 +107,52 @@ export function shakaFailure(
           (error.category === MANIFEST && UNDECODABLE.has(error.code))
         ? 'media'
         : 'other';
-  return {
+  const failure: Failure = {
     kind,
     status,
     detail: [
       NAMES[error.code] ?? `Shaka error ${error.code}`,
       status && `HTTP ${status}`,
-      // MEDIA_SOURCE_OPERATION_FAILED: the element's error code, and the segment the browser
-      // rejected (its stream: the audio or the video)
-      error.code === 3014 && MEDIA_ERROR_NAMES[error.data?.[0] as number],
-      error.code === 3014 && fileName(error.data?.[1]),
-      error.code === 3014 && elementMessage,
     ]
       .filter(Boolean)
       .join(', '),
   };
+  if (REJECTED.has(error.code)) {
+    const mime = context.buffer?.mimeType ?? '';
+    const element = context.element;
+    const data = error.data ?? [];
+    // MEDIA_SOURCE_OPERATION_FAILED and VIDEO_ERROR carry the element's code first;
+    // VIDEO_ERROR then Edge's extended code and Chrome's details.
+    const code =
+      element?.code ??
+      (error.code !== 3015 && typeof data[0] === 'number'
+        ? data[0]
+        : undefined);
+    // MEDIA_SOURCE_OPERATION_THREW carries what the browser threw.
+    const thrown = data[0] as { name?: string; message?: string } | undefined;
+    const browser =
+      element?.message ||
+      (error.code === 3016 &&
+        [data[2], data[1]]
+          .filter((v) => typeof v === 'string' && v)
+          .join(', ')) ||
+      (error.code === 3015 &&
+        thrown &&
+        [thrown.name, thrown.message].filter(Boolean).join(': ')) ||
+      undefined;
+    failure.media = {
+      stream: mime.startsWith('video/')
+        ? 'video'
+        : mime.startsWith('audio/')
+          ? 'audio'
+          : undefined,
+      codecs: /codecs="?([^";]+)/.exec(mime)?.[1],
+      element: code ? MEDIA_ERROR_NAMES[code] : undefined,
+      browser,
+      segment: (error.code === 3014 && fileName(error.data?.[1])) || undefined,
+    };
+  }
+  return failure;
 }
 
 const ELEMENT_ERRORS: Record<number, [FailureKind, string]> = {

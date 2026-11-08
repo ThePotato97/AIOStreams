@@ -519,7 +519,9 @@ describe('a stream the browser cannot decode', () => {
     for (let i = 0; i < 3; i++) player().fire('error', videoError());
     expect(prepares).toHaveLength(1);
     expect(failures()).toEqual([
-      expect.objectContaining({ error: 'VIDEO_ERROR' }),
+      expect.objectContaining({
+        error: "Your browser couldn't decode the stream [VIDEO_ERROR]",
+      }),
     ]);
   });
   it("leaves the element's own errors to Shaka while it plays", async () => {

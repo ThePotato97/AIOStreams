@@ -59,6 +59,10 @@ msgstr "{count, plural, one {Download added} other {# downloads added}}"
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr "{count, plural, one {Trailer} other {Trailers}}"
 
+#: src/lib/guest/engine.ts
+msgid "{detail}. Try another quality or ask the host to select another source."
+msgstr "{detail}. Try another quality or ask the host to select another source."
+
 #: src/pages/downloads.tsx
 msgid "{downloaded} downloaded"
 msgstr "{downloaded} downloaded"
@@ -3316,10 +3320,6 @@ msgstr "Playback"
 msgid "Playback failed"
 msgstr "Playback failed"
 
-#: src/lib/guest/engine.ts
-msgid "Playback failed ({detail}). Try another quality or ask the host to select another source."
-msgstr "Playback failed ({detail}). Try another quality or ask the host to select another source."
-
 #: src/pages/player.tsx
 msgid "Playback failed: {failure}"
 msgstr "Playback failed: {failure}"
@@ -4774,6 +4774,10 @@ msgstr "The rest wait their turn."
 msgid "The same for episodes marked as a recap."
 msgstr "The same for episodes marked as a recap."
 
+#: src/lib/guest/explain.ts
+msgid "The stream couldn't be fetched [{detail}]"
+msgstr "The stream couldn't be fetched [{detail}]"
+
 #. Follows "Playback failed:"
 #: src/lib/playback/use-player.ts
 msgid "the stream ended early"
@@ -5590,6 +5594,26 @@ msgstr "Your {name}"
 #: src/components/version-settings.tsx
 msgid "Your badges"
 msgstr "Your badges"
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the audio"
+msgstr "Your browser couldn't decode the audio"
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the audio ({codecs})"
+msgstr "Your browser couldn't decode the audio ({codecs})"
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the stream"
+msgstr "Your browser couldn't decode the stream"
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the video"
+msgstr "Your browser couldn't decode the video"
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the video ({codecs})"
+msgstr "Your browser couldn't decode the video ({codecs})"
 
 #: src/pages/guest.tsx
 msgid "Your name"

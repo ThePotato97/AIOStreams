@@ -123,7 +123,7 @@ export function convertingEngine(
         if (event.type === 'failed') {
           const next = here(playing);
           playing = null;
-          return failAudio(next, event.error, event.transcoder);
+          return failAudio(next, event.error, event.transcoder, 'play');
         }
         if (event.type === 'position' && event.positionMs != null)
           positionMs = event.positionMs;
@@ -153,7 +153,9 @@ export function convertingEngine(
     const failAudio = (
       next: EngineFile,
       reason?: string,
-      transcoder?: boolean
+      transcoder?: boolean,
+      /** The converted stream failed playing (the reason says why), or couldn't be made. */
+      stage: 'play' | 'convert' = 'convert'
     ) => {
       const reopen = () => {
         opened = '';
@@ -171,7 +173,10 @@ export function convertingEngine(
       const why = reason ?? t`conversion is unavailable on this server`;
       emit({
         type: 'failed',
-        error: t`This browser can't play this file's audio, and it couldn't be converted: ${why}`,
+        error:
+          stage === 'play' && reason
+            ? reason
+            : t`This browser can't play this file's audio, and it couldn't be converted: ${why}`,
         retry: { label: t`Try again`, run: reopen },
         transcoder,
       });

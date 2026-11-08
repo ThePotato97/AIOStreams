@@ -8,6 +8,12 @@ import type {
 } from '../playback/engine';
 import { videoEngine } from '../playback/video';
 import {
+  clearBufferError,
+  lastBufferError,
+  watchBufferErrors,
+} from '../playback/media-errors';
+import { explainFailure } from './explain';
+import {
   registerBinauralTransmuxer,
   TRANSMUXING_FAILED,
 } from '../playback/binaural/transmuxer';
@@ -24,6 +30,7 @@ import {
   recovery,
   sessionGone,
   shakaFailure,
+  rejectedMedia,
   type Failure,
   type ShakaError,
   type Tries,
@@ -47,6 +54,8 @@ type Shaka = {
 const isShakaError = (error: unknown): error is ShakaError =>
   typeof (error as ShakaError)?.category === 'number' &&
   typeof (error as ShakaError)?.code === 'number';
+/** How long a media failure waits for the element's own error (the browser's reason). */
+const ELEMENT_ERROR_WAIT_MS = 1000;
 /** Retries for one manifest or segment request, before the player reports it. */
 const RETRY = {
   maxAttempts: 4,
@@ -111,7 +120,7 @@ export function guestEngine(
   const failedMessage =
     options.failedMessage ??
     ((detail: string) =>
-      t`Playback failed (${detail}). Try another quality or ask the host to select another source.`);
+      t`${detail}. Try another quality or ask the host to select another source.`);
   let changeQuality: (
     quality: 'original' | '1080p' | '720p'
   ) => void = () => {};
@@ -183,7 +192,7 @@ export function guestEngine(
       failedAt = generation;
       emit({
         type: 'failed',
-        error: failedMessage(failure.detail),
+        error: failedMessage(explainFailure(failure)),
         retry: { label: t`Retry`, run: () => void prepare(at) },
         // The converted stream couldn't be fetched: the server or transcoder failed.
         transcoder:
@@ -201,9 +210,38 @@ export function guestEngine(
           if (interrupted(error) || handled.has(error)) return;
           handled.add(error);
           if (binauralFailed(error)) return;
-          recover(shakaFailure(error, video.current?.error?.message));
+          report(error, () => at === generation && current === player);
         } else fail({ kind: 'other', detail: (error as Error).message });
       });
+    };
+    /**
+     * A Shaka error to recovery, with what the browser says about it: where it rejected media, its
+     * element error (the browser's reason) usually comes just after Shaka's, so it's waited for
+     * briefly.
+     */
+    const report = (error: ShakaError, live: () => boolean) => {
+      const now = () =>
+        recover(
+          shakaFailure(error, {
+            element: video.current?.error,
+            buffer: lastBufferError(),
+          })
+        );
+      const el = video.current;
+      if (
+        !rejectedMedia(error) ||
+        !el ||
+        el.error ||
+        typeof el.addEventListener !== 'function'
+      )
+        return now();
+      const done = () => {
+        el.removeEventListener('error', done);
+        clearTimeout(timer);
+        if (live()) now();
+      };
+      const timer = setTimeout(done, ELEMENT_ERROR_WAIT_MS);
+      el.addEventListener('error', done);
     };
     /** What the player tries first: fetch the stream again, or reload it where it was. */
     /** The browser couldn't render the audio to binaural: the server does it instead, from here. */
@@ -291,6 +329,9 @@ export function guestEngine(
           };
         if (at !== generation) return;
         shaka.polyfill.installAll();
+        // Which media buffer the browser rejects, for the error shown.
+        watchBufferErrors();
+        clearBufferError();
         // TrueHD the transcoder left for this browser to render to binaural.
         registerBinauralTransmuxer(shaka);
         if (!shaka.Player.isBrowserSupported())
@@ -307,7 +348,7 @@ export function guestEngine(
           if (error.severity !== CRITICAL || interrupted(error)) return;
           handled.add(error);
           if (binauralFailed(error)) return;
-          recover(shakaFailure(error, video.current?.error?.message));
+          report(error, () => at === generation && player === next);
         });
         next.addEventListener('buffering', (event) => {
           if (at !== generation || player !== next) return;
