@@ -4,7 +4,7 @@
  */
 import { FLAC_BITS, FLAC_RATE, streamInfo } from './flac';
 
-interface Box {
+export interface Box {
   type: string;
   /** Where its content starts and ends in the buffer. */
   start: number;
@@ -13,7 +13,11 @@ interface Box {
   at: number;
 }
 
-function* boxes(data: Uint8Array, from = 0, to = data.length): Generator<Box> {
+export function* boxes(
+  data: Uint8Array,
+  from = 0,
+  to = data.length
+): Generator<Box> {
   const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let at = from;
   while (at + 8 <= to) {
@@ -30,14 +34,18 @@ function* boxes(data: Uint8Array, from = 0, to = data.length): Generator<Box> {
   }
 }
 
-function child(data: Uint8Array, parent: Box | null, type: string): Box | null {
+export function child(
+  data: Uint8Array,
+  parent: Box | null,
+  type: string
+): Box | null {
   if (!parent) return null;
   for (const b of boxes(data, parent.start, parent.end))
     if (b.type === type) return b;
   return null;
 }
 
-function top(data: Uint8Array, type: string): Box | null {
+export function top(data: Uint8Array, type: string): Box | null {
   for (const b of boxes(data)) if (b.type === type) return b;
   return null;
 }
@@ -59,7 +67,8 @@ export interface Fragment {
   /** baseMediaDecodeTime, in the track's timescale. */
   start: number;
   /** Each sample's bytes and duration. */
-  samples: { data: Uint8Array; duration: number }[];
+  /** Each sample's bytes, duration, and composition offset (presentation minus decode time). */
+  samples: { data: Uint8Array; duration: number; offset: number }[];
 }
 
 /** Every fragment (moof + mdat) in a media segment. */
@@ -98,6 +107,7 @@ export function readFragments(data: Uint8Array): Fragment[] {
     const samples: Fragment['samples'] = [];
     for (const trun of boxes(data, traf.start, traf.end)) {
       if (trun.type !== 'trun') continue;
+      const trunVersion = data[trun.start];
       const flags = v.getUint32(trun.start) & 0xffffff;
       const count = v.getUint32(trun.start + 4);
       let q = trun.start + 8;
@@ -120,8 +130,16 @@ export function readFragments(data: Uint8Array): Fragment[] {
           q += 4;
         }
         if (flags & 0x400) q += 4;
-        if (flags & 0x800) q += 4;
-        samples.push({ data: data.subarray(at, at + size), duration });
+        let cto = 0;
+        if (flags & 0x800) {
+          cto = trunVersion === 1 ? v.getInt32(q) : v.getUint32(q);
+          q += 4;
+        }
+        samples.push({
+          data: data.subarray(at, at + size),
+          duration,
+          offset: cto,
+        });
         at += size;
       }
     }
