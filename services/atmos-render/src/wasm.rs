@@ -117,6 +117,7 @@ pub extern "C" fn ar_render_for_speakers(session: *mut Session) -> bool {
     match Pipeline::with_output(Output::Speakers) {
         Ok(p) => {
             session.pipeline = p;
+            session.input.feed().set_speakers(true);
             true
         }
         Err(_) => false,

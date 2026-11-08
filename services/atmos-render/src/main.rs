@@ -50,6 +50,7 @@ fn main() -> Result<()> {
         Some("speakers") => Output::Speakers,
         Some(other) => bail!("unsupported --output {other} (binaural or speakers)"),
     };
+    feed.set_speakers(output == Output::Speakers);
     let mut pipeline = Pipeline::with_output(output)?;
     let stdin = std::io::stdin();
     let mut input = stdin.lock();

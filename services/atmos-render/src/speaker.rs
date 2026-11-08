@@ -87,21 +87,41 @@ fn layer(speakers: &[(usize, [f32; 3])], x: f32, y: f32, gains: &mut [f32; CHANN
     }
 }
 
+/// Whether a zone constraint allows a 5.1.2 speaker (`zone_masks.csv`, R `sub_1800415E0` = A
+/// `sub_18005C230`). Zones 2, 3 and 5 depend on three flags whose meaning isn't traced, so they
+/// aren't applied (every speaker allowed); zones 1, 4 and 6 don't.
+fn zone_allows(zone: u8, ch: usize) -> bool {
+    match zone {
+        // tops, fronts and sides: everything 5.1.2 has
+        1 => true,
+        // tops and fronts: no Ls/Rs
+        4 => !matches!(ch, LS | RS),
+        // fronts, wides and the front tops (13-16): L, R and C of 5.1.2
+        6 => matches!(ch, L | R | C),
+        _ => true,
+    }
+}
+
 /// The 5.1.2 gains of an object or bed at Dolby x/y/z (z already 0 where its elevation flag is
-/// off), before its metadata gain: the panner's output (power sum 1) times the automatic trim.
-pub fn pan(pos: [f32; 3]) -> [f32; CHANNELS] {
+/// off) under a zone constraint (0: none), before its metadata gain: the panner's output (power
+/// sum 1) times the automatic trim.
+pub fn pan(pos: [f32; 3], zone: u8) -> [f32; CHANNELS] {
     let [x, y, z0] = pos;
-    // bottoms land on the floor
-    let z = z0.max(0.0);
-    let floor: Vec<(usize, [f32; 3])> =
-        SPEAKERS.iter().copied().filter(|s| s.1[2] > -0.1 && s.1[2] <= 0.5).collect();
-    let ceiling: Vec<(usize, [f32; 3])> =
-        SPEAKERS.iter().copied().filter(|s| s.1[2] > 0.5 && s.1[2] <= 1.0).collect();
+    let allowed: Vec<(usize, [f32; 3])> = SPEAKERS.iter().copied().filter(|s| zone_allows(zone, s.0)).collect();
+    let floor: Vec<(usize, [f32; 3])> = allowed.iter().copied().filter(|s| s.1[2] > -0.1 && s.1[2] <= 0.5).collect();
+    let ceiling: Vec<(usize, [f32; 3])> = allowed.iter().copied().filter(|s| s.1[2] > 0.5 && s.1[2] <= 1.0).collect();
+    // bottoms land on the floor; with no ceiling speakers allowed, everything does
+    // (`speaker_pan.py`'s reading for a layout without a ceiling layer, [I] there)
+    let z = if ceiling.is_empty() { 0.0 } else { z0.max(0.0) };
     let mut fl = [0.0; CHANNELS];
     let mut ce = [0.0; CHANNELS];
     // the floor's y warp (a 5.1-type floor, Windows' warp mode 1); the ceiling's isn't warped
-    layer(&floor, x, (2.0 * y).min(1.0), &mut fl);
-    layer(&ceiling, x, y, &mut ce);
+    if !floor.is_empty() {
+        layer(&floor, x, (2.0 * y).min(1.0), &mut fl);
+    }
+    if !ceiling.is_empty() {
+        layer(&ceiling, x, y, &mut ce);
+    }
     let theta = z * std::f32::consts::FRAC_PI_2;
     // at the top (floor(z 32768) >= 0x7FFF) only the ceiling
     let (wf, wc) = if (z * 32768.0).floor() >= 32767.0 { (0.0, 1.0) } else { (theta.cos(), theta.sin()) };
@@ -138,15 +158,15 @@ mod tests {
 
     #[test]
     fn the_traced_worked_objects() {
-        close(pan([0.5, 0.0, 0.0]), &[(C, 1.0)]);
-        close(pan([0.0, 0.0, 1.0]), &[(LTM, 0.7718)]);
-        close(pan([0.25, 0.5, 0.0]), &[(LS, 0.7445), (RS, 0.3084)]);
-        close(pan([0.5, 0.5, 0.5]), &[(LS, 0.3859), (RS, 0.3859), (LTM, 0.3859), (RTM, 0.3859)]);
+        close(pan([0.5, 0.0, 0.0], 0), &[(C, 1.0)]);
+        close(pan([0.0, 0.0, 1.0], 0), &[(LTM, 0.7718)]);
+        close(pan([0.25, 0.5, 0.0], 0), &[(LS, 0.7445), (RS, 0.3084)]);
+        close(pan([0.5, 0.5, 0.5], 0), &[(LS, 0.3859), (RS, 0.3859), (LTM, 0.3859), (RTM, 0.3859)]);
     }
 
     #[test]
     fn the_traced_beds_and_statics() {
-        let bed = |id| pan(bed_position(id).unwrap());
+        let bed = |id| pan(bed_position(id).unwrap(), 0);
         close(bed(1), &[(L, 1.0)]);
         close(bed(2), &[(R, 1.0)]);
         close(bed(3), &[(C, 1.0)]);
@@ -161,15 +181,27 @@ mod tests {
         close(bed(10), &[(RTM, 0.7718)]);
         close(bed(14), &[(RTM, 0.7718)]);
         // statics: bottom front onto L, bottom back onto Ls, back centre on both surrounds
-        close(pan([0.0, 0.0, -0.70711]), &[(L, 1.0)]);
-        close(pan([0.0, 1.0, -0.70711]), &[(LS, 0.7718)]);
-        close(pan([0.5, 1.0, 0.0]), &[(LS, 0.5457), (RS, 0.5458)]);
+        close(pan([0.0, 0.0, -0.70711], 0), &[(L, 1.0)]);
+        close(pan([0.0, 1.0, -0.70711], 0), &[(LS, 0.7718)]);
+        close(pan([0.5, 1.0, 0.0], 0), &[(LS, 0.5457), (RS, 0.5458)]);
+    }
+
+    #[test]
+    fn zones_1_4_and_6_restrict_the_speakers_as_speaker_pan_py_does() {
+        // values from the trace's speaker_pan.py (pan_point with the zone, times the trim)
+        close(pan([0.25, 0.5, 0.0], 4), &[(L, 0.5698), (C, 0.5698)]);
+        close(pan([0.5, 0.5, 0.5], 4), &[(C, 0.5457), (LTM, 0.3859), (RTM, 0.3859)]);
+        // no ceiling allowed: on the floor
+        close(pan([0.5, 0.5, 0.5], 6), &[(C, 0.7718)]);
+        close(pan([0.0, 1.0, 1.0], 6), &[(L, 0.7718)]);
+        // zone 1 allows all of 5.1.2
+        close(pan([0.25, 0.5, 0.0], 1), &[(LS, 0.7445), (RS, 0.3084)]);
     }
 
     #[test]
     fn the_panner_keeps_power() {
         for &(x, y, z) in &[(0.1, 0.2, 0.0), (0.7, 0.9, 0.3), (0.33, 0.4, 0.8), (0.9, 0.1, 0.6)] {
-            let g = pan([x, y, z]);
+            let g = pan([x, y, z], 0);
             let w = (((y / 0.6f32).clamp(0.0, 1.0) + ((z - 0.2) / 0.8f32).clamp(0.0, 1.0)).clamp(0.0, 1.0)) * TRIM_DB;
             let trim = 10f32.powf(w / 20.0);
             let power: f32 = g.iter().map(|v| v * v).sum();

@@ -22,9 +22,9 @@ pub enum Element {
 }
 
 pub trait Feed {
-    /// Whether object positions step to each update (the speaker renderer ramps its gains
-    /// itself) rather than move by Atmos for Headphones' smoothing. Off by default.
-    fn set_stepped(&mut self, _on: bool) {}
+    /// Rendering for built-in speakers (`Scene::speakers`): set before the first push, since
+    /// it decides how decoded layouts are placed. Off by default.
+    fn set_speakers(&mut self, _on: bool) {}
     /// Push bitstream bytes; decoded audio comes out through `out`.
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block));
     /// The inputs' state at `sample` (start of a renderer block).
@@ -78,7 +78,7 @@ impl Snapshots {
             };
             let level = (o.sums.get(i).copied().unwrap_or(0.0) / o.count as f64).sqrt();
             let (mode, active, pos, gain) = match *s {
-                Source::Positioned { pos, mode, gain, active } => (mode as i32 as f64, active as u8 as f64, pos.map(f64::from), gain as f64),
+                Source::Positioned { pos, mode, gain, active, .. } => (mode as i32 as f64, active as u8 as f64, pos.map(f64::from), gain as f64),
                 Source::Lfe { gain } => (-1.0, 1.0, [f64::NAN; 3], gain as f64),
                 Source::Silent => (-1.0, 0.0, [f64::NAN; 3], 0.0),
             };
@@ -152,7 +152,6 @@ impl Pipeline {
     }
 
     pub fn take(&mut self, feed: &mut dyn Feed, block: Block, emit: &mut dyn FnMut(&[f32], &[f32])) {
-        feed.set_stepped(matches!(self.renderer, Engine::Speakers(_)));
         if self.origin.is_none() {
             self.origin = Some(block.start);
             self.at = block.start;
@@ -238,7 +237,7 @@ mod snapshot_tests {
     impl Feed for Two {
         fn push(&mut self, _: &[u8], _: &mut dyn FnMut(Block)) {}
         fn sources(&mut self, _: u64) -> Vec<Source> {
-            vec![Source::Positioned { pos: [0.0, 0.0, 0.0], mode: Mode::Near, gain: 1.0, active: true }, Source::Lfe { gain: 1.0 }]
+            vec![Source::Positioned { pos: [0.0, 0.0, 0.0], mode: Mode::Near, gain: 1.0, active: true, ramp: crate::render::BED_RAMP, zone: 0 }, Source::Lfe { gain: 1.0 }]
         }
         fn elements(&self) -> Vec<Element> {
             vec![Element::Object, Element::Lfe]

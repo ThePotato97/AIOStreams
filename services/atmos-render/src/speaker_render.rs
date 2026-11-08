@@ -2,8 +2,9 @@
 //! trace: renderer.md, virtualizer.md, postchain.md, profile.md): DAP-VR output mode 11 with Dolby
 //! Access's built-in-speaker settings.
 //!
-//! Per 64-sample slot: each input's 5.1.2 gains (speaker.rs), ramped linearly over 8 slots (the
-//! Windows encoder's 480-sample ramp), mix the inputs in the time domain into L R C LFE Ls Rs Ltm
+//! Per 64-sample slot: each input's 5.1.2 gains (speaker.rs), ramped linearly over ceil(ramp/64)
+//! slots (an object's ramp from the stream's metadata, the encoder's 480 for beds), mix the inputs
+//! in the time domain into L R C LFE Ls Rs Ltm
 //! Rtm; each channel through the analysis filterbank; the speaker virtualizer on the front pair
 //! (heard at 30 degrees), the surround pair and the top pair (90 degrees), all over two speakers
 //! at 10 degrees, the profile's angle; Dolby Access's 8->2 matrix; the two outputs through the
@@ -23,8 +24,7 @@ use crate::tuning::{BANDS, OUTPUT_SCALE, POST_CHAIN_GAIN};
 
 /// The profile's speaker angle for every pair, degrees (front / surround / height).
 pub const SPEAKER_ANGLE: i32 = 10;
-/// The ramp, in slots: ceil(480 / 64).
-const RAMP_SLOTS: u32 = 8;
+
 /// Dolby Access's mix matrix (Q14, identical to A's own 2-channel table for modes 10/11):
 /// L, Ls and Ltm to the left at 1.0, R, Rs and Rtm to the right, C to both at 11583, the LFE to
 /// both at 8192 (it enters at full level: the -10 dB LFE branch only runs without a matrix).
@@ -76,7 +76,7 @@ impl SpeakerRenderer {
         }
         for (ramp, s) in self.ramps.iter_mut().zip(sources) {
             let target = match *s {
-                Source::Positioned { pos, gain, active: true, .. } => pan(pos).map(|g| g * gain),
+                Source::Positioned { pos, gain, active: true, zone, .. } => pan(pos, zone).map(|g| g * gain),
                 // the LFE goes to its channel untrimmed, never panned
                 Source::Lfe { gain } => {
                     let mut t = [0.0; CHANNELS];
@@ -86,9 +86,19 @@ impl SpeakerRenderer {
                 _ => [0.0; CHANNELS],
             };
             if target != ramp.target {
+                // linear over ceil(ramp / 64) slots; a ramp of 0 steps at once
+                let slots = match *s {
+                    Source::Positioned { ramp: samples, .. } => samples.div_ceil(SLOT as u32),
+                    _ => crate::render::BED_RAMP.div_ceil(SLOT as u32),
+                };
                 ramp.target = target;
-                ramp.step = std::array::from_fn(|c| (target[c] - ramp.cur[c]) / RAMP_SLOTS as f32);
-                ramp.left = RAMP_SLOTS;
+                if slots == 0 {
+                    ramp.cur = target;
+                    ramp.left = 0;
+                } else {
+                    ramp.step = std::array::from_fn(|c| (target[c] - ramp.cur[c]) / slots as f32);
+                    ramp.left = slots;
+                }
             }
         }
     }
@@ -181,7 +191,7 @@ mod tests {
     fn a_front_centre_object_reaches_each_speaker_at_the_traced_level() {
         // postchain.md section 7: x 0.70795 (the input headroom, applied before the renderer) x 1.0
         // x 0.99995 x 0.70697 = 0.5005 per speaker; here without the headroom: 0.99995 x 0.70697
-        let centre = Source::Positioned { pos: [0.5, 0.0, 0.0], mode: Mode::Mid, gain: 1.0, active: true };
+        let centre = Source::Positioned { pos: [0.5, 0.0, 0.0], mode: Mode::Mid, gain: 1.0, active: true, ramp: 480, zone: 0 };
         let (l, r) = level(&[centre], 0.1);
         let want = 0.99995 * MIX_C;
         assert!((l - want).abs() < 2e-3 && (r - want).abs() < 2e-3, "{l} {r} vs {want}");
@@ -200,9 +210,30 @@ mod tests {
     fn a_left_object_is_cancelled_into_both_speakers() {
         // L-only content: no centre to extract, so the canceller acts fully below 5.1 kHz and
         // puts anti-phase crosstalk in the right speaker
-        let left = Source::Positioned { pos: [0.0, 0.0, 0.0], mode: Mode::Mid, gain: 1.0, active: true };
+        let left = Source::Positioned { pos: [0.0, 0.0, 0.0], mode: Mode::Mid, gain: 1.0, active: true, ramp: 480, zone: 0 };
         let (l, r) = level(&[left], 0.1);
         assert!(l > 0.0 && r > 0.0 && r < l, "{l} {r}");
+    }
+
+    #[test]
+    fn gains_ramp_over_the_elements_own_ramp() {
+        let at = |ramp| Source::Positioned { pos: [0.5, 0.0, 0.0], mode: Mode::Mid, gain: 1.0, active: true, ramp, zone: 0 };
+        let silence = [0f32; SLOT];
+        let (mut l, mut r) = ([0f32; SLOT], [0f32; SLOT]);
+        // a ramp of 0 steps at once
+        let mut sr = SpeakerRenderer::new();
+        sr.set_block(&[at(0)]);
+        sr.slot(&[&silence], &mut l, &mut r);
+        assert_eq!(sr.ramps[0].cur[C], 1.0);
+        // 960 samples: 15 slots, a fifteenth each, the target on the last
+        let mut sr = SpeakerRenderer::new();
+        sr.set_block(&[at(960)]);
+        sr.slot(&[&silence], &mut l, &mut r);
+        assert!((sr.ramps[0].cur[C] - 1.0 / 15.0).abs() < 1e-6);
+        for _ in 0..14 {
+            sr.slot(&[&silence], &mut l, &mut r);
+        }
+        assert_eq!(sr.ramps[0].cur[C], 1.0);
     }
 
     #[test]

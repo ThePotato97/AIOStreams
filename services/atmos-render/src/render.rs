@@ -17,6 +17,10 @@ use crate::limiter::{DOLBY_BLOCK, DolbyLimiter, EngineLimiter};
 use crate::tuning::{BANDS, OUTPUT_SCALE, POST_CHAIN_GAIN, Tuning};
 
 pub const SLOT: usize = 64;
+/// The Windows encoder's default ramp, samples (E `ResetMetadata`): what bed channels and
+/// channel-based input keep; objects take their own from the stream's metadata (metadata item
+/// 10, which Windows' decoder sets from OAMD: Q12, Q15).
+pub const BED_RAMP: u32 = 480;
 /// Metadata updates take effect per block of four slots.
 pub const BLOCK: usize = 256;
 pub use crate::filterbank::LATENCY as FILTERBANK_LATENCY;
@@ -24,9 +28,11 @@ pub use crate::filterbank::LATENCY as FILTERBANK_LATENCY;
 /// What the renderer needs to know about an input for one block.
 #[derive(Debug, Clone, Copy)]
 pub enum Source {
-    /// Dolby x/y/z, render mode, linear metadata gain, and whether the element is active
-    /// (an inactive element isn't in the engine's descriptor array).
-    Positioned { pos: [f32; 3], mode: Mode, gain: f32, active: bool },
+    /// Dolby x/y/z, render mode, linear metadata gain, whether the element is active (an
+    /// inactive element isn't in the engine's descriptor array), and its ramp duration in samples
+    /// (the speaker renderer's gain ramp; the headphone renderer's smoothing is the scene's), and
+    /// an object's zone constraint index (0: none; only the speaker renderer reads it).
+    Positioned { pos: [f32; 3], mode: Mode, gain: f32, active: bool, ramp: u32, zone: u8 },
     Lfe { gain: f32 },
     Silent,
 }
@@ -145,7 +151,7 @@ mod tests {
         x[10 * SLOT] = 1.0;
         for s in 0..n {
             if s % 4 == 0 {
-                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Off, gain: 1.0, active: true }]);
+                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Off, gain: 1.0, active: true, ramp: BED_RAMP, zone: 0 }]);
                 // Off has no HRTF: use Mid for the real test below; Off checked for the pan side
             }
             let (a, b) = (s * SLOT, s * SLOT + SLOT);
@@ -158,7 +164,7 @@ mod tests {
         let (mut l, mut rr) = (vec![0f32; n * SLOT], vec![0f32; n * SLOT]);
         for s in 0..n {
             if s % 4 == 0 {
-                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Mid, gain: 1.0, active: true }]);
+                r.set_block(&[Source::Positioned { pos: bed_position(5).unwrap(), mode: Mode::Mid, gain: 1.0, active: true, ramp: BED_RAMP, zone: 0 }]);
             }
             let (a, b) = (s * SLOT, s * SLOT + SLOT);
             r.slot(&[&x[a..b]], &mut l[a..b], &mut rr[a..b]);

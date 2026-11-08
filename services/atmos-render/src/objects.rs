@@ -56,6 +56,7 @@ struct Update {
     ramp: u64,
     active: bool,
     mode: Mode,
+    zone: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +64,8 @@ pub struct Input {
     pub kind: Kind,
     pub mode: Mode,
     pub active: bool,
+    /// The object's zone constraint index (0 for none; beds and ISF have none).
+    pub zone: u8,
     /// The smoothed state the renderer reads this block.
     cur: Target,
     target: Target,
@@ -141,9 +144,11 @@ fn db_to_gain(db: i8) -> f32 {
 #[derive(Default)]
 pub struct Scene {
     pub modes: Modes,
-    /// Positions step to each update instead of moving by Atmos for Headphones' smoothing: the
-    /// speaker renderer ramps its gains itself (renderer.md section 10).
-    pub stepped: bool,
+    /// Rendering for built-in speakers: positions step to each update instead of moving by Atmos
+    /// for Headphones' smoothing (the speaker renderer ramps its gains itself, renderer.md
+    /// section 10), and a 5.1 bed's surrounds aren't retyped (only the headphone renderer
+    /// retypes; the speaker renderer maps a bed channel it has directly, renderer.md 9.1).
+    pub speakers: bool,
     pub inputs: Vec<Input>,
     pending: Vec<Update>,
 }
@@ -163,7 +168,7 @@ impl Scene {
         let has = |id| ids.contains(&Some(id));
         // A 5.1 bed's surrounds (5/6 without 7/8) render at the rear corners (7/8). On Windows
         // the bed always has 7/8 (the encoder's 7.1.4 bed), so it never happens there.
-        let retype = self.modes.retypes() && has(5) && has(6) && !has(7) && !has(8);
+        let retype = !self.speakers && self.modes.retypes() && has(5) && has(6) && !has(7) && !has(8);
         let isf = bed_bits.len()..bed_bits.len() + prog.num_isf_objects;
         if self.inputs.len() != count {
             self.inputs = (0..count)
@@ -187,6 +192,7 @@ impl Scene {
                         kind,
                         mode: Mode::Mid,
                         active: true,
+                        zone: 0,
                         cur: t,
                         target: t,
                         update_at: 0,
@@ -242,7 +248,8 @@ impl Scene {
                         .map(|b| Mode::from_code(b.hp_render_mode))
                         .unwrap_or(Mode::Mid),
                 };
-                self.pending.push(Update { at, index: i, target: Target { pos, gain }, ramp, active: !not_active, mode });
+                let zone = if input.kind == Kind::Object { render.zone_constraints_idx } else { 0 };
+                self.pending.push(Update { at, index: i, target: Target { pos, gain }, ramp, active: !not_active, mode, zone });
             }
         }
         self.pending.sort_by_key(|u| u.at);
@@ -271,7 +278,14 @@ impl Scene {
                 let (pos, gain) = i.state();
                 match i.kind {
                     Kind::Lfe => Source::Lfe { gain },
-                    _ => Source::Positioned { pos, mode: i.mode, gain, active: i.is_active() },
+                    _ => {
+                        // objects ramp as their metadata says; bed channels keep the encoder's
+                        let ramp = match i.kind {
+                            Kind::Object | Kind::Isf => i.ramp.min(u32::MAX as u64) as u32,
+                            _ => crate::render::BED_RAMP,
+                        };
+                        Source::Positioned { pos, mode: i.mode, gain, active: i.is_active(), ramp, zone: i.zone }
+                    }
                 }
             })
             .collect()
@@ -293,6 +307,7 @@ impl Scene {
             input.ramp = u.ramp;
             input.active = u.active;
             input.mode = u.mode;
+            input.zone = u.zone;
             if !input.known {
                 input.known = true;
                 input.cur = u.target;
@@ -302,7 +317,7 @@ impl Scene {
             if !input.known {
                 continue;
             }
-            let smoothed = !self.stepped && matches!(input.kind, Kind::Object | Kind::Isf);
+            let smoothed = !self.speakers && matches!(input.kind, Kind::Object | Kind::Isf);
             let c = if !smoothed || input.fresh {
                 1.0
             } else {

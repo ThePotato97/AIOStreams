@@ -169,7 +169,7 @@ impl Eac3 {
     fn set_layout(&mut self, channels: usize, mask: u32) {
         if self.layout != Some((channels, mask)) {
             self.layout = Some((channels, mask));
-            self.core_beds = channels::retyped(channels::wav_mask(mask), self.scene.modes);
+            self.core_beds = channels::retyped(channels::wav_mask(mask), self.scene.modes, self.scene.speakers);
         }
     }
 
@@ -344,8 +344,8 @@ impl Eac3 {
 }
 
 impl Feed for Eac3 {
-    fn set_stepped(&mut self, on: bool) {
-        self.scene.stepped = on;
+    fn set_speakers(&mut self, on: bool) {
+        self.scene.speakers = on;
     }
 
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block)) {

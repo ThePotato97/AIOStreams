@@ -5,7 +5,7 @@
 
 use crate::direct::{Mode, bed_position};
 use crate::objects::Modes;
-use crate::render::Source;
+use crate::render::{BED_RAMP, Source};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Static {
@@ -56,9 +56,10 @@ pub fn wav_mask(mask: u32) -> Vec<Static> {
 /// A 5.1 layout's surrounds (side, without backs) at the rear corners, as Dolby's bed retype
 /// does, in stream mode. Windows' bed always has its backs, so it never retypes [Q10]; whether
 /// Windows maps 5.1 surrounds to its side or back slots isn't known.
-pub fn retyped(statics: Vec<Static>, modes: Modes) -> Vec<Static> {
+/// `speakers`: rendering for built-in speakers, whose renderer doesn't retype.
+pub fn retyped(statics: Vec<Static>, modes: Modes, speakers: bool) -> Vec<Static> {
     let has = |id| statics.contains(&Static::Bed(id));
-    if modes.retypes() && has(5) && has(6) && !has(7) && !has(8) {
+    if !speakers && modes.retypes() && has(5) && has(6) && !has(7) && !has(8) {
         statics
             .into_iter()
             .map(|s| match s {
@@ -91,13 +92,23 @@ pub fn source(s: Static, modes: Modes) -> Source {
     };
     match s {
         Static::Lfe => Source::Lfe { gain: 1.0 },
-        Static::Bed(id) => Source::Positioned { pos: bed_position(id).unwrap(), mode, gain: 1.0, active: true },
-        Static::At(pos) => Source::Positioned { pos, mode, gain: 1.0, active: true },
+        Static::Bed(id) => Source::Positioned { pos: bed_position(id).unwrap(), mode, gain: 1.0, active: true, ramp: BED_RAMP, zone: 0 },
+        Static::At(pos) => Source::Positioned { pos, mode, gain: 1.0, active: true, ramp: BED_RAMP, zone: 0 },
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_headphone_renderer_retypes_a_5_1_beds_surrounds() {
+        use super::{Modes, Static, retyped};
+        let five_one = || vec![Static::Bed(1), Static::Bed(2), Static::Bed(3), Static::Lfe, Static::Bed(5), Static::Bed(6)];
+        let surrounds = |s: Vec<Static>| (s[4], s[5]);
+        assert_eq!(surrounds(retyped(five_one(), Modes::Stream, false)), (Static::Bed(7), Static::Bed(8)));
+        // the speaker renderer maps Ls/Rs directly (renderer.md 9.1)
+        assert_eq!(surrounds(retyped(five_one(), Modes::Stream, true)), (Static::Bed(5), Static::Bed(6)));
+    }
+
     #[test]
     fn every_channel_renders_in_the_chosen_mode() {
         use crate::direct::Mode;
