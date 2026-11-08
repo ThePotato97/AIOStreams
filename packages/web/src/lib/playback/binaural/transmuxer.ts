@@ -1,11 +1,21 @@
 /*
- * A Shaka Player transmuxer that renders the transcoder's TrueHD or E-AC-3 DASH audio (codecs
- * "mlpa", "ec-3") to binaural FLAC in the browser, with atmos-render built as WebAssembly (and
- * for E-AC-3 FFmpeg's core decoder, as libav.js). Shaka hands it each segment and appends what
- * it returns, so buffering, seeking and A/V sync stay Shaka's.
+ * A Shaka Player transmuxer that converts the transcoder's TrueHD or E-AC-3 DASH audio (codecs
+ * "mlpa", "ec-3") in the browser to FLAC: the binaural render (atmos-render built as WebAssembly,
+ * and for E-AC-3 FFmpeg's core decoder, as libav.js) and the speaker version, as the player's
+ * request asks (local-audio.ts). Shaka hands it each segment and appends what it returns, so
+ * buffering, seeking and A/V sync stay Shaka's.
  */
 import { wasmUrl } from 'atmos-render-wasm-url';
+import type { OutputPlan } from './convert';
+import { localAudio, planFor } from './local-audio';
 import { sceneStore, type SceneSnapshot } from './objects';
+
+/** Without a request from the player: the binaural render alone, as before. */
+const BINAURAL_ONLY: OutputPlan = {
+  modes: 0,
+  layout: 'stereo',
+  contents: 'binaural',
+};
 
 /** What the browser plays instead. */
 export const BINAURAL_OUTPUT = 'audio/mp4; codecs="flac"';
@@ -69,6 +79,7 @@ class BinauralTransmuxer {
     }
   >();
   private original = '';
+  private plan: OutputPlan | null = null;
 
   private call(message: object, transfer: Transferable[] = []): Promise<Reply> {
     const id = this.next++;
@@ -96,7 +107,12 @@ class BinauralTransmuxer {
         w.reject(new Error(event.message || 'Binaural worker failed'));
       this.waiting.clear();
     };
-    this.loaded = this.call({ type: 'load', wasmUrl, codec }).then(() => {});
+    const request = localAudio.request;
+    const plan = request ? planFor(request) : BINAURAL_ONLY;
+    this.plan = plan;
+    this.loaded = this.call({ type: 'load', wasmUrl, codec, plan }).then(() =>
+      localAudio.started(plan)
+    );
     return this.loaded;
   }
 
@@ -147,6 +163,7 @@ class BinauralTransmuxer {
 
   destroy() {
     if (this.worker) sceneStore.stopped();
+    if (this.plan) localAudio.stopped(this.plan);
     this.worker?.terminate();
     this.worker = null;
     for (const w of this.waiting.values())

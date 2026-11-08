@@ -4,14 +4,24 @@
  * the page's thread. One worker per transmuxer, so one stream's renderer state.
  */
 import { loadLibav } from 'libav-eac3';
-import { BinauralConverter, type RendererExports } from './convert';
+import {
+  BinauralConverter,
+  type OutputPlan,
+  type RendererExports,
+} from './convert';
 import { eac3Core } from './eac3-core';
 
 let converter: BinauralConverter | null = null;
 let loading: Promise<BinauralConverter> | null = null;
 
 type Request =
-  | { id: number; type: 'load'; wasmUrl: string; codec: 'truehd' | 'eac3' }
+  | {
+      id: number;
+      type: 'load';
+      wasmUrl: string;
+      codec: 'truehd' | 'eac3';
+      plan: OutputPlan;
+    }
   | { id: number; type: 'init' | 'segment'; data: ArrayBuffer };
 
 self.onmessage = async (event: MessageEvent<Request>) => {
@@ -29,7 +39,14 @@ self.onmessage = async (event: MessageEvent<Request>) => {
         ]);
         converter = new BinauralConverter(
           instance.exports as unknown as RendererExports,
-          libav ? () => eac3Core(libav) : undefined
+          message.plan,
+          libav
+            ? {
+                render: () => eac3Core(libav),
+                // FFmpeg's defaults, as the transcoder decodes E-AC-3 for speakers
+                speakers: () => eac3Core(libav, []),
+              }
+            : undefined
         );
         return converter;
       })();

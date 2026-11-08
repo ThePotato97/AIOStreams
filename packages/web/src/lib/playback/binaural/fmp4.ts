@@ -210,8 +210,8 @@ const raw = (fill: (w: Writer) => void) => {
   return w.done();
 };
 
-/** The init segment of the FLAC track: 48 kHz stereo, 24-bit, timescale 48000. */
-export function flacInit(): Uint8Array {
+/** The init segment of the FLAC track: 48 kHz, 24-bit, timescale 48000; stereo by default. */
+export function flacInit(channels = 2): Uint8Array {
   const matrix = (w: Writer) => {
     for (const n of [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000]) w.u32(n);
   };
@@ -295,7 +295,7 @@ export function flacInit(): Uint8Array {
     })
   );
   // dfLa: the STREAMINFO block, marked last
-  const info = streamInfo();
+  const info = streamInfo(channels);
   const dfla = full(
     'dfLa',
     0,
@@ -312,7 +312,7 @@ export function flacInit(): Uint8Array {
       w.u16(1); // data reference index
       w.u32(0);
       w.u32(0);
-      w.u16(2); // channels
+      w.u16(channels);
       w.u16(FLAC_BITS);
       w.u16(0);
       w.u16(0);

@@ -1,6 +1,7 @@
 /* eslint-disable lingui/no-unlocalized-strings -- audio graph settings, not UI text. */
 import { watchHeadphones } from './headphone-setting';
 import { HESUVI, HRIR_CHANNELS, layout, type Speaker } from './hrir-layout';
+import { localAudio, routing, type Routing } from './binaural/local-audio';
 
 /*
  * Virtual surround for headphones, in the browser: each speaker channel of a
@@ -24,6 +25,20 @@ interface Graph {
   rewire(channels: number): void;
   /** Puts an HRIR set (HeSuVi's 14-channel layout) in the convolvers. */
   load(hrir: AudioBuffer): void;
+  /** A stream carrying the binaural render and the speaker version: which channels are which. */
+  route(routing: Routing | null): void;
+  /** Its binaural pair, and its speaker channels, each on (1) or off (0). */
+  binaural: GainNode;
+  speakers: GainNode;
+}
+
+/** What an element's sound should be now. */
+interface State {
+  /** Through the HRIR virtualiser. */
+  virtualise: boolean;
+  /** One of a converted stream's two outputs (local-audio.ts); null for a plain stream. */
+  packed: Routing | null;
+  headphones: boolean;
 }
 const graphs = new WeakMap<HTMLMediaElement, Graph>();
 const live = new Set<Graph>();
@@ -130,14 +145,33 @@ export function corsFor(el: HTMLMediaElement, url: string): boolean {
   return cors;
 }
 
-async function build(el: HTMLMediaElement): Promise<Graph> {
+/**
+ * The element's sound in Web Audio. Made at once, set up for `state` before the element plays a
+ * sample through it; the HRIR set follows when it's loaded.
+ */
+function build(el: HTMLMediaElement, state: State): Graph {
   const context = new AudioContext();
   const source = context.createMediaElementSource(el);
   const dry = context.createGain();
   const wet = context.createGain();
+  dry.gain.value = 0;
+  wet.gain.value = 0;
   source.connect(dry).connect(context.destination);
   wet.connect(context.destination);
-  const hrir = await hrirFor(context);
+  // A converted stream's two outputs: each of its channels to the binaural pair or the speakers.
+  const binauralOut = context.createGain();
+  const speakerOut = context.createGain();
+  binauralOut.gain.value = 0;
+  speakerOut.gain.value = 0;
+  binauralOut.connect(context.destination);
+  speakerOut.connect(context.destination);
+  const pick = context.createChannelSplitter(8);
+  pick.channelCount = 8;
+  pick.channelCountMode = 'explicit';
+  pick.channelInterpretation = 'discrete';
+  source.connect(pick);
+  let merges: AudioNode[] = [];
+  let routed = '';
   // Each speaker: one convolver with a stereo response, a mono input.
   const speakers = Object.fromEntries(
     (Object.keys(HESUVI) as Speaker[]).map((speaker) => {
@@ -172,6 +206,31 @@ async function build(el: HTMLMediaElement): Promise<Graph> {
     context,
     dry,
     wet,
+    binaural: binauralOut,
+    speakers: speakerOut,
+    route(r) {
+      const key = r ? `${r.binaural}|${r.speakers}` : '';
+      if (key === routed) return;
+      routed = key;
+      pick.disconnect();
+      for (const m of merges) m.disconnect();
+      merges = [];
+      if (!r) return;
+      const merge = (channels: number[], to: GainNode) => {
+        if (!channels.length) return;
+        const m = context.createChannelMerger(channels.length);
+        channels.forEach((c, i) => pick.connect(m, c, i));
+        // as the browser plays a stream of these channels: stereo, or 5.1 to its speakers
+        m.channelInterpretation = 'speakers';
+        m.connect(to);
+        merges.push(m);
+      };
+      merge(r.binaural, binauralOut);
+      merge(r.speakers, speakerOut);
+      const dest = context.destination;
+      if (r.speakers.length > dest.channelCount)
+        dest.channelCount = Math.min(dest.maxChannelCount, r.speakers.length);
+    },
     channels: 0,
     rewire(channels) {
       if (channels === graph.channels) return;
@@ -194,7 +253,10 @@ async function build(el: HTMLMediaElement): Promise<Graph> {
       }
     },
   };
-  graph.load(hrir);
+  apply(graph, state);
+  void hrirFor(context)
+    .then((hrir) => graph.load(hrir))
+    .catch(() => {});
   graph.rewire(6);
   // A new track starts out as 5.1 again, until its back pair is heard.
   el.addEventListener('loadstart', () => graph.rewire(6));
@@ -209,18 +271,22 @@ async function build(el: HTMLMediaElement): Promise<Graph> {
   return graph;
 }
 
-function apply(graph: Graph, on: boolean) {
-  graph.dry.gain.value = on ? 0 : 1;
-  graph.wet.gain.value = on ? 1 : 0;
-  if (on) void graph.context.resume();
+function apply(graph: Graph, state: State) {
+  graph.route(state.packed);
+  const packed = !!state.packed;
+  // A converted stream's chosen output, at once; otherwise the stream as it is, or virtualised.
+  graph.binaural.gain.value = packed && state.headphones ? 1 : 0;
+  graph.speakers.gain.value = packed && !state.headphones ? 1 : 0;
+  graph.dry.gain.value = !packed && !state.virtualise ? 1 : 0;
+  graph.wet.gain.value = !packed && state.virtualise ? 1 : 0;
+  if (packed || state.virtualise) void graph.context.resume();
 }
 
 /**
- * Keeps an element's sound rendered for headphones while the setting is on.
- * The graph is made the first time it's turned on, and then stays: an
- * element's sound can't leave Web Audio once it's in.
+ * Elements whose audio was already rendered for headphones (by the server, or converted in the
+ * page), and their updates. An element's graph, made the first time it's needed, stays: its sound
+ * can't leave Web Audio once it's in.
  */
-/** Elements whose audio the server already rendered for headphones, and their updates. */
 const rendered = new WeakMap<HTMLMediaElement, boolean>();
 const updates = new WeakMap<HTMLMediaElement, () => void>();
 
@@ -233,36 +299,52 @@ export function setServerBinaural(el: HTMLMediaElement, binaural: boolean) {
   updates.get(el)?.();
 }
 
+/**
+ * Keeps an element's sound as the headphones setting wants it: surround virtualised for
+ * headphones, and of a stream converted in the page with both outputs (local-audio.ts), the
+ * binaural pair for headphones and the speaker version otherwise, switched at once.
+ */
 export function virtualSurround(el: HTMLMediaElement): () => void {
   let setting = false;
-  let building: Promise<void> | null = null;
   const update = () => {
-    const on = setting && !rendered.get(el);
-    const graph = graphs.get(el);
-    if (graph) return apply(graph, on);
-    if (!on || building || !audible(el) || typeof AudioContext === 'undefined')
-      return;
-    building = build(el)
-      .then((made) => {
-        graphs.set(el, made);
-        live.add(made);
-        // as things stand once it's made
-        apply(made, setting && !rendered.get(el));
-      })
-      .catch(() => {})
-      .finally(() => {
-        building = null;
-      });
+    const plan = localAudio.current;
+    // the page's conversion plays in this element where its sound is marked rendered
+    const packed =
+      rendered.get(el) && plan?.contents === 'both' ? routing(plan) : null;
+    const state: State = {
+      virtualise: setting && !rendered.get(el),
+      packed,
+      headphones: setting,
+    };
+    let graph = graphs.get(el);
+    if (!graph) {
+      if (
+        (!state.virtualise && !packed) ||
+        !audible(el) ||
+        typeof AudioContext === 'undefined'
+      )
+        return;
+      try {
+        graph = build(el, state);
+      } catch {
+        return;
+      }
+      graphs.set(el, graph);
+      live.add(graph);
+    }
+    apply(graph, state);
   };
   // Sound joins Web Audio only once a source it can hear is playing.
   el.addEventListener('loadedmetadata', update);
   updates.set(el, update);
+  const unsubscribe = localAudio.subscribe(update);
   const unwatch = watchHeadphones((now) => {
     setting = now;
     update();
   });
   return () => {
     unwatch();
+    unsubscribe();
     updates.delete(el);
     el.removeEventListener('loadedmetadata', update);
   };

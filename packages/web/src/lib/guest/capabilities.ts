@@ -6,6 +6,10 @@ import type {
 } from '@aiostreams/core';
 import { canRender } from './subtitle-renderer';
 import { clientBinauralCodecs } from '../playback/binaural/transmuxer';
+import {
+  surroundOutput,
+  type HeadphoneMode,
+} from '../playback/binaural/local-audio';
 import { doviSupported } from '../playback/dovi/view';
 /** ffprobe reports -99 (or nothing) when a stream doesn't declare its level. */
 const knownLevel = (level: number | undefined, fallback: number) =>
@@ -70,7 +74,9 @@ export async function browserCapabilities(
   media: GuestMedia,
   audioIndex?: number,
   /** Surround is rendered for headphones in the page. */
-  headphones = false
+  headphones = false,
+  /** The listener's headphone mode. */
+  mode: HeadphoneMode = 'mixed'
 ): Promise<GuestCapabilities> {
   const el = document.createElement('video');
   const video = media.tracks.find((t) => t.type === 'video');
@@ -152,14 +158,6 @@ export async function browserCapabilities(
       /* Keep the basic result. */
     }
   }
-  /** Whether the browser outputs to six channels or more. */
-  const surroundOutput = () => {
-    if (typeof AudioContext === 'undefined') return false;
-    const context = new AudioContext();
-    const channels = context.destination.maxChannelCount;
-    void context.close().catch(() => {});
-    return channels >= 6;
-  };
   const plays = async (
     contentType: string,
     channels: number,
@@ -209,8 +207,11 @@ export async function browserCapabilities(
     // On headphones TrueHD and E-AC-3 are rendered to binaural (Dolby Atmos for Headphones'
     // renderer), by the server or, for the codecs below, here; other audio is virtualised here.
     binaural: headphones,
-    // Where this browser can run the renderer itself, the transcoder sends TrueHD as it is.
-    ...(headphones && clientBinauralCodecs().length
+    // The listener's headphone mode, for the server's renderer (the page applies its own).
+    ...(headphones && mode !== 'mixed' ? { binauralMode: mode } : {}),
+    // Where this browser decodes these itself (binaural for headphones, the speaker version
+    // otherwise), the transcoder sends them as they are, headphones on or off.
+    ...(clientBinauralCodecs().length
       ? { clientBinaural: clientBinauralCodecs() }
       : {}),
     // Dolby Vision drawn here from its metadata, where the page can show HDR itself

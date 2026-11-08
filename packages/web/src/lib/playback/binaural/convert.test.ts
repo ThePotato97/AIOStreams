@@ -16,7 +16,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { flacFrame } from './flac';
 import { flacFragment, flacInit, initTimescale, readFragments } from './fmp4';
-import { BinauralConverter, type RendererExports } from './convert';
+import {
+  BinauralConverter,
+  type OutputPlan,
+  type RendererExports,
+} from './convert';
 import { eac3Core, type LibAVSync } from './eac3-core';
 
 const has = (cmd: string) => {
@@ -185,6 +189,71 @@ describe.skipIf(!ffmpeg)('FLAC in fragmented MP4', () => {
   });
 });
 
+/** Binaural only, the stream's modes: what the transcoder's renderer makes. */
+const BINAURAL: OutputPlan = {
+  modes: 0,
+  layout: 'stereo',
+  contents: 'binaural',
+};
+
+/** Decodes an MP4 file to interleaved f32, every channel. */
+const decodeAll = (path: string) => {
+  const out = execFileSync(
+    'ffmpeg',
+    ['-v', 'error', '-i', path, '-f', 'f32le', '-'],
+    {
+      maxBuffer: 1 << 28,
+    }
+  );
+  return new Float32Array(out.buffer, out.byteOffset, out.byteLength / 4);
+};
+/** The transcoder's decode of a source for speakers (media.mjs: aresample to the layout). */
+const transcoderSpeakers = (
+  source: string,
+  layout: string,
+  channels: number
+) => {
+  const out = execFileSync(
+    'ffmpeg',
+    [
+      '-v',
+      'error',
+      '-i',
+      source,
+      '-map',
+      '0:a',
+      '-af',
+      `aresample=async=1:ochl=${layout}:rematrix_maxval=1`,
+      '-ac',
+      String(channels),
+      '-f',
+      'f32le',
+      '-',
+    ],
+    { maxBuffer: 1 << 28 }
+  );
+  return new Float32Array(out.buffer, out.byteOffset, out.byteLength / 4);
+};
+/** The largest difference between channels `from`.. of `got` (`stride` interleaved) and `want`. */
+function channelDiff(
+  got: Float32Array,
+  stride: number,
+  from: number,
+  want: Float32Array,
+  channels: number
+) {
+  const frames = got.length / stride;
+  expect(want.length / channels).toBeGreaterThanOrEqual(frames);
+  let max = 0;
+  for (let f = 0; f < frames; f++)
+    for (let c = 0; c < channels; c++)
+      max = Math.max(
+        max,
+        Math.abs(got[f * stride + from + c] - want[f * channels + c])
+      );
+  return max;
+}
+
 const renderer = async (): Promise<RendererExports> => {
   const { instance } = await WebAssembly.instantiate(
     readFileSync(wasmPath),
@@ -198,7 +267,7 @@ describe.skipIf(!ffmpeg || !haveWasm)(
   () => {
     it('turns the TrueHD segments into binaural FLAC with the source timing', async () => {
       const { init, chunks } = segments();
-      const conv = new BinauralConverter(await renderer());
+      const conv = new BinauralConverter(await renderer(), BINAURAL);
       const parts = [conv.init(init), ...chunks.map((c) => conv.segment(c))];
       const file = join(dir, 'binaural.mp4');
       writeFileSync(file, Buffer.concat(parts));
@@ -228,7 +297,7 @@ describe.skipIf(!ffmpeg || !haveWasm)(
 
     it("keeps the renderer's scene, at the stream's time, for the debug view", async () => {
       const { init, chunks } = segments();
-      const conv = new BinauralConverter(await renderer());
+      const conv = new BinauralConverter(await renderer(), BINAURAL);
       conv.init(init);
       conv.segment(chunks[0]);
       const first = conv.takeSnapshots();
@@ -263,9 +332,76 @@ describe.skipIf(!ffmpeg || !haveWasm)(
       expect(conv.takeSnapshots()[0].time).toBeCloseTo(8, 3);
     });
 
+    it('carries the speaker version with the binaural render, as the transcoder decodes it', async () => {
+      const { init, chunks } = segments();
+      const convert = async (plan: OutputPlan, name: string) => {
+        const conv = new BinauralConverter(await renderer(), plan);
+        const file = join(dir, name);
+        writeFileSync(
+          file,
+          Buffer.concat([
+            conv.init(init),
+            ...chunks.map((c) => conv.segment(c)),
+          ])
+        );
+        expect(probe(file).streams[0].channels).toBe(conv.channels);
+        return decodeAll(file);
+      };
+      const binaural = await convert(BINAURAL, 'only-binaural.mp4');
+      const src = join(dir, 'src.mkv');
+      // a stereo output: binaural, then the transcoder's stereo downmix
+      const stereo = await convert(
+        { modes: 0, layout: 'stereo', contents: 'both' },
+        'both-stereo.mp4'
+      );
+      expect(stereo.length / 4).toBe(binaural.length / 2);
+      expect(channelDiff(stereo, 4, 0, binaural, 2)).toBe(0);
+      // 24-bit: within a step of FFmpeg's float mix
+      const lsb = 1 / 2 ** 23;
+      expect(
+        channelDiff(stereo, 4, 2, transcoderSpeakers(src, 'stereo', 2), 2)
+      ).toBeLessThan(2 * lsb);
+      // a surround output: binaural, then 5.1 as the transcoder sends it
+      const surround = await convert(
+        { modes: 0, layout: '5.1', contents: 'both' },
+        'both-5.1.mp4'
+      );
+      expect(channelDiff(surround, 8, 0, binaural, 2)).toBe(0);
+      const five = transcoderSpeakers(src, '5.1', 6);
+      expect(channelDiff(surround, 8, 2, five, 6)).toBeLessThan(2 * lsb);
+      // the speaker version alone, at the same timing
+      const speakers = await convert(
+        { modes: 0, layout: '5.1', contents: 'speakers' },
+        'speakers-5.1.mp4'
+      );
+      expect(speakers.length / 6).toBe(binaural.length / 2);
+      expect(channelDiff(speakers, 6, 0, five, 6)).toBeLessThan(2 * lsb);
+    }, 60000);
+
+    it('renders in the mode asked for', async () => {
+      const { init, chunks } = segments();
+      const render = async (modes: number) => {
+        const conv = new BinauralConverter(await renderer(), {
+          ...BINAURAL,
+          modes,
+        });
+        conv.init(init);
+        conv.segment(chunks[0]);
+        return conv.takeSnapshots().at(-1)!.elements;
+      };
+      // a 5.1 channel presentation: Mid as mixed, Near as Windows renders, Far
+      const modes = async (m: number) =>
+        new Set(
+          (await render(m)).filter((e) => e.kind === 'bed').map((e) => e.mode)
+        );
+      expect([...(await modes(0))]).toEqual(['mid']);
+      expect([...(await modes(1))]).toEqual(['near']);
+      expect([...(await modes(2))]).toEqual(['far']);
+    });
+
     it('starts again where a segment that does not follow the last one starts', async () => {
       const { init, chunks } = segments();
-      const conv = new BinauralConverter(await renderer());
+      const conv = new BinauralConverter(await renderer(), BINAURAL);
       const head = conv.init(init);
       conv.segment(chunks[0]);
       // a seek: the third segment, at 8 s
@@ -291,13 +427,8 @@ const libav = async (): Promise<LibAVSync> => {
   });
 };
 
-/** Renders an E-AC-3 stream through DASH in the browser's way, and natively, and compares. */
-async function compareEac3(
-  source: string,
-  name: string,
-  tolerance: number,
-  atmos = false
-) {
+/** An E-AC-3 source's audio as the transcoder copies it into DASH: its init and media segments. */
+function eac3Dash(source: string, name: string) {
   const out = join(dir, name);
   execFileSync('mkdir', ['-p', out]);
   execFileSync('ffmpeg', [
@@ -331,8 +462,22 @@ async function compareEac3(
     .filter((f) => f.startsWith('chunk-'))
     .sort()
     .map((f) => readFileSync(join(out, f)));
+  return { out, init, chunks };
+}
+
+/** Renders an E-AC-3 stream through DASH in the browser's way, and natively, and compares. */
+async function compareEac3(
+  source: string,
+  name: string,
+  tolerance: number,
+  atmos = false
+) {
+  const { out, init, chunks } = eac3Dash(source, name);
   const lib = await libav();
-  const conv = new BinauralConverter(await renderer(), () => eac3Core(lib));
+  const conv = new BinauralConverter(await renderer(), BINAURAL, {
+    render: () => eac3Core(lib),
+    speakers: () => eac3Core(lib, []),
+  });
   const file = join(out, 'binaural.mp4');
   writeFileSync(
     file,
@@ -427,6 +572,62 @@ describe.skipIf(!ffmpeg || !haveWasm || !haveLibav || !existsSync(nativePath))(
       // 24-bit FLAC; the core from FFmpeg 9.0 (libav.js) against this host's FFmpeg
       await compareEac3(src, 'eac3-51', 1 / 2 ** 20);
     });
+    it('carries the speaker version FFmpeg decodes with its default options', async () => {
+      const tones = [220, 330, 440, 550, 60, 770]
+        .map((f) => `0.3*sin(2*PI*${f}*t)`)
+        .join('|');
+      const src = join(dir, 'src-eac3-dn24.mkv');
+      // dialnorm -24: the renderer's decoder (target level -31) puts it 7 dB lower than FFmpeg's
+      // defaults do, so the speaker version shows which options decoded it
+      execFileSync('ffmpeg', [
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        `aevalsrc=${tones}:c=5.1(side):s=48000`,
+        '-t',
+        '12',
+        '-c:a',
+        'eac3',
+        '-b:a',
+        '640k',
+        '-dialnorm',
+        '-24',
+        src,
+      ]);
+      const { out, init, chunks } = eac3Dash(src, 'eac3-speakers');
+      const lib = await libav();
+      const convert = async (plan: OutputPlan, name: string) => {
+        const conv = new BinauralConverter(await renderer(), plan, {
+          render: () => eac3Core(lib),
+          speakers: () => eac3Core(lib, []),
+        });
+        const file = join(out, name);
+        writeFileSync(
+          file,
+          Buffer.concat([
+            conv.init(init),
+            ...chunks.map((c) => conv.segment(c)),
+          ])
+        );
+        conv.close();
+        return decodeAll(file);
+      };
+      const binaural = await convert(BINAURAL, 'binaural.mp4');
+      const both = await convert(
+        { modes: 0, layout: 'stereo', contents: 'both' },
+        'both.mp4'
+      );
+      expect(both.length / 4).toBe(binaural.length / 2);
+      expect(channelDiff(both, 4, 0, binaural, 2)).toBe(0);
+      // the core from FFmpeg 9.0 (libav.js) against this host's FFmpeg, as above
+      const want = transcoderSpeakers(src, 'stereo', 2);
+      expect(channelDiff(both, 4, 2, want, 2)).toBeLessThan(1 / 2 ** 20);
+      // and not the renderer's decode: 7 dB apart
+      const quieter = want.map((v) => v * 2 ** (-7 / 6));
+      expect(channelDiff(both, 4, 2, quieter, 2)).toBeGreaterThan(0.01);
+    }, 120_000);
     it.skipIf(!atmosEac3 || !existsSync(atmosEac3))(
       'renders E-AC-3 with Atmos (JOC) as the native renderer does',
       async () => {

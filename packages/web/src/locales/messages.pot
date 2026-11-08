@@ -604,6 +604,10 @@ msgstr ""
 msgid "Artwork"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "As mixed"
+msgstr ""
+
 #: src/components/party/party-sheet.tsx
 msgid "As the host"
 msgstr ""
@@ -1422,8 +1426,16 @@ msgstr ""
 msgid "Doesn't match the video's own subtitles"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Dolby Atmos distance"
+msgstr ""
+
 #: src/pages/settings/playback.tsx
 msgid "Dolby Vision"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Dolby Vision couldn't be shown here, so the server converts it"
 msgstr ""
 
 #: src/pages/settings/index.tsx
@@ -1640,6 +1652,7 @@ msgstr ""
 msgid "Failed"
 msgstr ""
 
+#: src/components/player/options.tsx
 #: src/components/player/scene-overlay.tsx
 msgid "Far"
 msgstr ""
@@ -2518,6 +2531,7 @@ msgstr ""
 msgid "Navigation"
 msgstr ""
 
+#: src/components/player/options.tsx
 #: src/components/player/scene-overlay.tsx
 msgid "Near"
 msgstr ""

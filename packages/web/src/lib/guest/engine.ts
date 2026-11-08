@@ -21,6 +21,11 @@ import {
   TRANSMUXING_FAILED,
 } from '../playback/binaural/transmuxer';
 import { watchHeadphones } from '../playback/headphone-setting';
+import {
+  localAudio,
+  surroundOutput,
+  type HeadphoneMode,
+} from '../playback/binaural/local-audio';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
 import { sleep, whenReady } from './ready';
@@ -507,7 +512,13 @@ export function guestEngine(
       const info = current();
       try {
         askedHeadphones = headphones;
-        const probed = await browserCapabilities(info.media, audio, headphones);
+        askedMode = headphoneMode;
+        const probed = await browserCapabilities(
+          info.media,
+          audio,
+          headphones,
+          headphoneMode
+        );
         const capabilities = {
           ...probed,
           subtitles: (probed.subtitles ?? []).filter((f) => !unrendered.has(f)),
@@ -531,6 +542,16 @@ export function guestEngine(
         if (at !== generation) return;
         playback = result;
         onMode(result.mode);
+        // What the page's conversion of TrueHD or E-AC-3 makes, where the server copied it
+        const track = info.media.tracks.find(
+          (t) => t.type === 'audio' && t.index === audio
+        );
+        localAudio.ask({
+          headphones,
+          mode: headphoneMode,
+          surround: surroundOutput(),
+          trackChannels: track?.channels ?? 2,
+        });
         raw.load({
           ...file,
           url: new URL(result.url, window.location.href).href,
@@ -586,13 +607,33 @@ export function guestEngine(
     // Converted surround is kept for headphones, and downmixed without them:
     // a change prepares again, as does the setting read only after a prepare.
     let headphones = false;
+    let headphoneMode: HeadphoneMode = 'mixed';
     /** What the last prepare asked for. */
     let askedHeadphones: boolean | null = null;
+    let askedMode: HeadphoneMode | null = null;
     let unwatch: (() => void) | null = null;
     const watch = () => {
-      unwatch ??= watchHeadphones((now) => {
+      unwatch ??= watchHeadphones((now, mode) => {
+        // the binaural render playing (or carried) is in another mode than the listener's now
+        const staleMode = askedMode !== null && askedMode !== mode;
         headphones = now;
-        if (askedHeadphones === null || askedHeadphones === now) return;
+        headphoneMode = mode;
+        if (askedHeadphones === null) return;
+        // Converted in the page (the server copied the track either way): a stream carrying both
+        // outputs switches at once in the page's audio graph. A stale mode with headphones on, or
+        // a stream carrying only one output, is converted again from the same job's segments.
+        if (playback?.clientBinaural && !preparing) {
+          const both = localAudio.current?.contents === 'both';
+          if ((now && staleMode) || (askedHeadphones !== now && !both))
+            void prepare(position());
+          return;
+        }
+        // The server renders binaural in the listener's mode: a new one is a new job.
+        if (staleMode && now && playback?.binaural) {
+          void prepare(preparing ? target : position());
+          return;
+        }
+        if (askedHeadphones === now) return;
         const track = current().media.tracks.find(
           (t) => t.type === 'audio' && t.index === audio
         );

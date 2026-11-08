@@ -79,11 +79,12 @@ vi.mock('./capabilities', () => ({
 }));
 /** The headphones setting: its listener, called as the setting would be. */
 const headphones = vi.hoisted(() => ({
-  listener: null as ((on: boolean) => void) | null,
+  listener: null as ((on: boolean, mode?: string) => void) | null,
 }));
 vi.mock('../playback/headphone-setting', () => ({
-  watchHeadphones: (listener: (on: boolean) => void) => {
-    headphones.listener = listener;
+  watchHeadphones: (listener: (on: boolean, mode: string) => void) => {
+    // the headphone mode as mixed unless a test says otherwise
+    headphones.listener = (on, mode = 'mixed') => listener(on, mode);
     return () => {
       headphones.listener = null;
     };
@@ -155,6 +156,7 @@ vi.mock('../playback/video', () => ({
 }));
 
 import { guestEngine } from './engine';
+import { localAudio } from '../playback/binaural/local-audio';
 import type { GuestApi, GuestCurrent } from './api';
 import type { EngineFile } from '../playback/engine';
 
@@ -886,5 +888,66 @@ describe('headphones', () => {
     await start(engine);
     engine.close();
     expect(headphones.listener).toBeNull();
+  });
+
+  describe('with the track converted in the page', () => {
+    const BOTH = { modes: 0, layout: 'stereo', contents: 'both' } as const;
+    const ONE = { modes: 0, layout: '7.1', contents: 'speakers' } as const;
+    beforeEach(() => {
+      asked.extra = { clientBinaural: ['truehd'] };
+      answer = (body) => ({
+        clientBinaural: !!body.capabilities?.clientBinaural,
+      });
+    });
+    afterEach(() => {
+      localAudio.stopped(localAudio.current!);
+    });
+
+    it('switches between the outputs it carries without asking the server', async () => {
+      const { engine } = setup();
+      await start(engine, 60_000);
+      // the transmuxer converting with both outputs
+      localAudio.started(BOTH);
+      const before = prepares.length;
+      headphones.listener!(true);
+      await vi.advanceTimersByTimeAsync(0);
+      headphones.listener!(false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepares).toHaveLength(before);
+      // what the conversion was asked for: this track's channels, the mode
+      expect(localAudio.request).toMatchObject({
+        mode: 'mixed',
+        trackChannels: 6,
+      });
+    });
+
+    it('converts again for a new mode, once headphones are on', async () => {
+      const { engine } = setup();
+      await start(engine, 60_000);
+      localAudio.started(BOTH);
+      const before = prepares.length;
+      // headphones off: the binaural pair isn't heard, so nothing yet
+      headphones.listener!(false, 'far');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepares).toHaveLength(before);
+      // on: converted again in the new mode, from where it was
+      headphones.listener!(true, 'far');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepares).toHaveLength(before + 1);
+      expect(localAudio.request).toMatchObject({
+        mode: 'far',
+        headphones: true,
+      });
+    });
+
+    it('converts again where the stream carries only one output', async () => {
+      const { engine } = setup();
+      await start(engine, 60_000);
+      localAudio.started(ONE);
+      const before = prepares.length;
+      headphones.listener!(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepares).toHaveLength(before + 1);
+    });
   });
 });

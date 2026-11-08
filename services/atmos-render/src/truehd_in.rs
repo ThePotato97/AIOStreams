@@ -32,6 +32,47 @@ pub struct TrueHd {
     /// Access units before the first decodable one (a stream that starts mid-way, as after a
     /// seek): they come out as silence, so the output keeps the input's timing.
     lead: usize,
+    /// The speaker presentation of what's been pushed since `take_speakers`, for a player playing
+    /// it to speakers instead of the binaural render: the highest presentation up to 8 channels,
+    /// as FFmpeg decodes TrueHD (`mlpdec.c`: at most the third substream), interleaved in FFmpeg's
+    /// channel order (`speaker_mask`), with no dialnorm (FFmpeg applies none). One sample for each
+    /// sample rendered, silence included.
+    speakers: Vec<f32>,
+    /// FFmpeg's channel mask of `speakers` (its `thd_layout`), 0 until a presentation is decoded.
+    pub speaker_mask: u64,
+    /// For each output channel, its index in the decoded presentation.
+    speaker_order: Vec<usize>,
+}
+
+/// FFmpeg's channel bit for a TrueHD channel label (`mlp_parse.h`'s `thd_layout`, by the same
+/// channel assignment bit the crate reads the label from; the 8-channel assignment's alternate
+/// top pair, Tsl/Tsr, is the same bit as Tfl/Tfr, which FFmpeg reads as top front).
+fn ffmpeg_bit(label: ChannelLabel) -> u64 {
+    use ChannelLabel::*;
+    match label {
+        L => 1 << 0,
+        R => 1 << 1,
+        C => 1 << 2,
+        LFE => 1 << 3,
+        Lb => 1 << 4,
+        Rb => 1 << 5,
+        Lsc => 1 << 6,
+        Rsc => 1 << 7,
+        Cb => 1 << 8,
+        Ls => 1 << 9,
+        Rs => 1 << 10,
+        Tc => 1 << 11,
+        Tfl | Tsl => 1 << 12,
+        Tfc => 1 << 13,
+        Tfr | Tsr => 1 << 14,
+        Tbl => 1 << 15,
+        Tbr => 1 << 17,
+        Lw => 1 << 31,
+        Rw => 1 << 32,
+        Lsd => 1 << 33,
+        Rsd => 1 << 34,
+        LFE2 => 1 << 35,
+    }
 }
 
 /// Where a TrueHD channel label goes, as the Windows encoder's static slots (`channels.rs`).
@@ -83,6 +124,46 @@ impl TrueHd {
             last_len: 40,
             resyncing: true,
             lead: 0,
+            speakers: Vec::new(),
+            speaker_mask: 0,
+            speaker_order: Vec::new(),
+        }
+    }
+
+    /// The speaker samples since the last call (`speakers`), `speaker_channels` interleaved.
+    pub fn take_speakers(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.speakers)
+    }
+
+    pub fn speaker_channels(&self) -> usize {
+        self.speaker_order.len()
+    }
+
+    /// The speaker presentation's channels, in FFmpeg's order (by channel bit).
+    fn speaker_layout(&mut self, d: &DecodedAccessUnit) {
+        let bits: Vec<u64> = d.channel_labels.iter().map(|&l| ffmpeg_bit(l)).collect();
+        let mask = bits.iter().fold(0, |m, b| m | b);
+        if mask != self.speaker_mask || self.speaker_order.len() != bits.len() {
+            let mut order: Vec<usize> = (0..bits.len()).collect();
+            order.sort_by_key(|&i| bits[i]);
+            self.speaker_order = order;
+            self.speaker_mask = mask;
+        }
+    }
+
+    /// `n` samples of the speaker presentation: decoded, or silence where there's none.
+    fn push_speakers(&mut self, decoded: Option<&DecodedAccessUnit>, n: usize) {
+        if let Some(d) = decoded.filter(|d| d.sample_length == n) {
+            self.speaker_layout(d);
+            let scale = 1.0 / (1u32 << 23) as f32;
+            for s in 0..n {
+                for &c in &self.speaker_order {
+                    self.speakers.push(d.pcm_data[s][c] as f32 * scale);
+                }
+            }
+        } else {
+            let len = self.speakers.len() + n * self.speaker_order.len();
+            self.speakers.resize(len, 0.0);
         }
     }
 
@@ -124,6 +205,7 @@ impl TrueHd {
         let n = self.last_len;
         out(Block { start: self.samples, samples: vec![vec![0.0; n]; ch] });
         self.samples += n as u64;
+        self.push_speakers(None, n);
     }
 }
 
@@ -164,13 +246,22 @@ impl Feed for TrueHd {
                     } else {
                         decoded.iter().rev().flatten().next()
                     };
+                    // FFmpeg's: the highest presentation up to 8 channels
+                    let speakers = decoded[..3].iter().rev().flatten().next().cloned();
                     if let Some(d) = chosen {
                         let d = d.clone();
+                        let n = d.sample_length;
+                        // the speaker layout first, so the lead's silence has its channels
+                        if let Some(s) = speakers.as_ref().filter(|_| self.speaker_order.is_empty()) {
+                            self.speaker_layout(s);
+                        }
                         for _ in 0..std::mem::take(&mut self.lead) {
-                            out(Block { start: self.samples, samples: vec![vec![0.0; d.sample_length]; d.channel_count] });
-                            self.samples += d.sample_length as u64;
+                            out(Block { start: self.samples, samples: vec![vec![0.0; n]; d.channel_count] });
+                            self.samples += n as u64;
+                            self.push_speakers(None, n);
                         }
                         self.take(&d, out);
+                        self.push_speakers(speakers.as_ref(), n);
                     }
                 }
                 Err(_) => {

@@ -165,6 +165,43 @@ test('Dolby Vision the player draws is copied with its RPUs, profile 5 included'
   assert.ok(!args.includes('-bsf:v'));
 });
 
+test('a codec the player decodes itself is copied with headphones off too', () => {
+  // The player renders binaural or the speaker version itself: no new job when they're toggled.
+  const off = select(meta('truehd'), request({ binaural: false, clientBinaural: ['truehd'] }));
+  assert.equal(off.clientBinaural, true);
+  assert.equal(off.binaural, false);
+  assert.equal(off.copyAudio, true);
+  const on = select(meta('truehd'), request({ binaural: true, clientBinaural: ['truehd'] }));
+  assert.deepEqual(
+    [on.clientBinaural, on.binaural, on.copyAudio],
+    [off.clientBinaural, off.binaural, off.copyAudio]
+  );
+  // not one it doesn't decode: converted here as before
+  const aac = select(meta('aac'), request({ binaural: false, clientBinaural: ['truehd'] }));
+  assert.equal(aac.clientBinaural, false);
+  // a 96 kHz TrueHD isn't one the renderer reads
+  const hi = meta('truehd');
+  hi.tracks[1].sampleRate = 96000;
+  assert.equal(select(hi, request({ clientBinaural: ['truehd'] })).clientBinaural, false);
+});
+
+test("the listener's headphone mode reaches the renderer here", () => {
+  const args = (mode, codec = 'truehd') =>
+    rendererArgs(select(meta(codec), request({ binaural: true, binauralMode: mode })));
+  assert.deepEqual(args('near'), ['--format', 'truehd', '--modes', 'windows']);
+  assert.deepEqual(args('far'), ['--format', 'truehd', '--modes', 'far']);
+  assert.deepEqual(args(undefined), ['--format', 'truehd']);
+  // anything else is as mixed
+  assert.deepEqual(args('mid'), ['--format', 'truehd']);
+  assert.deepEqual(args('far', 'eac3').slice(-2), ['--modes', 'far']);
+  // rendered in the player: the player applies it, the job doesn't depend on it
+  const client = select(
+    meta('truehd'),
+    request({ binaural: true, binauralMode: 'far', clientBinaural: ['truehd'] })
+  );
+  assert.equal(client.binauralMode, null);
+});
+
 test('client binaural: E-AC-3 the player renders is copied, with the codec FFmpeg writes', () => {
   const asked = request({ binaural: true, clientBinaural: ['truehd', 'eac3'] });
   const policy = select(meta('eac3'), asked);

@@ -605,6 +605,10 @@ msgstr "Are you sure you want to continue?"
 msgid "Artwork"
 msgstr "Artwork"
 
+#: src/components/player/options.tsx
+msgid "As mixed"
+msgstr "As mixed"
+
 #: src/components/party/party-sheet.tsx
 msgid "As the host"
 msgstr "As the host"
@@ -1423,9 +1427,17 @@ msgstr "Documentation"
 msgid "Doesn't match the video's own subtitles"
 msgstr "Doesn't match the video's own subtitles"
 
+#: src/components/player/options.tsx
+msgid "Dolby Atmos distance"
+msgstr "Dolby Atmos distance"
+
 #: src/pages/settings/playback.tsx
 msgid "Dolby Vision"
 msgstr "Dolby Vision"
+
+#: src/lib/guest/engine.ts
+msgid "Dolby Vision couldn't be shown here, so the server converts it"
+msgstr "Dolby Vision couldn't be shown here, so the server converts it"
 
 #: src/pages/settings/index.tsx
 msgid "Donate"
@@ -1641,6 +1653,7 @@ msgstr "Fade"
 msgid "Failed"
 msgstr "Failed"
 
+#: src/components/player/options.tsx
 #: src/components/player/scene-overlay.tsx
 msgid "Far"
 msgstr "Far"
@@ -2519,6 +2532,7 @@ msgstr "Name"
 msgid "Navigation"
 msgstr "Navigation"
 
+#: src/components/player/options.tsx
 #: src/components/player/scene-overlay.tsx
 msgid "Near"
 msgstr "Near"

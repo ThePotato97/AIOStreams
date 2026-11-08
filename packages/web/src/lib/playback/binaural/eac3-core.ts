@@ -34,8 +34,8 @@ export interface LibAVSync {
   ff_free_decoder_sync(ctx: number, pkt: number, frame: number): void;
 }
 
-/** atmos-render's `loudness::ffmpeg_args(Loudness::Reference)`. */
-const REFERENCE_OPTIONS: [string, string][] = [
+/** atmos-render's `loudness::ffmpeg_args(Loudness::Reference)`: the renderer's core decoder. */
+export const REFERENCE_OPTIONS: [string, string][] = [
   ['drc_scale', '1'],
   ['heavy_compr', '0'],
   ['target_level', '-31'],
@@ -57,11 +57,18 @@ export interface CoreDecoder {
   close(): void;
 }
 
-export function eac3Core(libav: LibAVSync): CoreDecoder {
+/**
+ * A core decoder with these options; none (`[]`) is FFmpeg's defaults, as the transcoder decodes
+ * E-AC-3 for speakers.
+ */
+export function eac3Core(
+  libav: LibAVSync,
+  options: [string, string][] = REFERENCE_OPTIONS
+): CoreDecoder {
   const codec = libav.avcodec_find_decoder_by_name_sync('eac3');
   if (!codec) throw new Error('libav.js has no E-AC-3 decoder');
   const ctx = libav.avcodec_alloc_context3_sync(codec);
-  for (const [name, value] of REFERENCE_OPTIONS)
+  for (const [name, value] of options)
     if (libav.av_opt_set_sync(ctx, name, value, AV_OPT_SEARCH_CHILDREN) < 0)
       throw new Error(`The E-AC-3 decoder refused ${name}`);
   if (libav.avcodec_open2_sync(ctx, codec, 0) < 0)

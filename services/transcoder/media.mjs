@@ -161,12 +161,18 @@ export function demuxArgs(input, policy, offset) {
   ];
 }
 /** atmos-render's arguments for a policy's audio track. */
+/** The listener's headphone mode as atmos-render's --modes: everything Near (as Windows) or Far. */
+const RENDER_MODES = { near: 'windows', far: 'far' };
+
 export function rendererArgs(policy) {
   const format = BINAURAL_CODECS[policy.audio.codec];
+  const modes = RENDER_MODES[policy.binauralMode];
   return [
     '--format',
     format,
     ...(format === 'eac3' ? ['--ffmpeg', 'ffmpeg'] : []),
+    // Without one, each element in the stream's own mode (Mid where it has none).
+    ...(modes ? ['--modes', modes] : []),
   ];
 }
 /**
@@ -226,20 +232,21 @@ export function select(meta, request) {
     (video.dovi?.profile !== 5 || caps.dovi === true);
   // Dolby Vision copied with its RPUs for the player to draw
   const dovi = copyVideo && !!video.dovi && caps.dovi === true;
-  // Rendered to binaural here (atmos-render, Dolby Atmos for Headphones' renderer) where the
-  // player asks for it and the track is one the renderer reads: TrueHD or E-AC-3 at 48 kHz.
+  // A track the renderer (atmos-render, Dolby Atmos for Headphones' renderer) reads: TrueHD or
+  // E-AC-3 at 48 kHz.
   const renderable =
     !!audio &&
-    caps.binaural === true &&
     BINAURAL_CODECS[audio.codec] !== undefined &&
     (audio.sampleRate ?? 48000) === 48000;
-  // The player renders it itself where it can (in WebAssembly): the track is copied as it is.
-  // Not on a retry after failed playback, which renders it here instead.
+  // The player decodes it itself where it can (in WebAssembly), with headphones on or off, so
+  // turning them on or off doesn't need a new job: the track is copied as it is. Not on a retry
+  // after failed playback, which converts it here instead.
   const clientBinaural =
     renderable &&
     !request.force &&
     (caps.clientBinaural ?? []).includes(audio.codec);
-  const binaural = renderable && !clientBinaural;
+  // Rendered to binaural here where the player asks for it and doesn't render it itself.
+  const binaural = renderable && caps.binaural === true && !clientBinaural;
   const copyAudio =
     !!audio &&
     !binaural &&
@@ -299,6 +306,11 @@ export function select(meta, request) {
     copyAudio,
     binaural,
     clientBinaural,
+    // The listener's headphone mode where it's rendered here ('near' or 'far'; null: as mixed).
+    binauralMode:
+      binaural && Object.hasOwn(RENDER_MODES, caps.binauralMode ?? '')
+        ? caps.binauralMode
+        : null,
     dovi,
   };
 }

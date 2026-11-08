@@ -485,6 +485,12 @@ function SoundControls() {
 /** Renders surround for headphones, with the bundled HRIR set or the user's. */
 function HeadphoneControls() {
   const [on, setOn] = useSetting(settings.audio.headphones);
+  const [mode, setMode] = useSetting(settings.audio.headphoneMode);
+  const modes = [
+    { value: 'mixed', label: t`As mixed` },
+    { value: 'near', label: t`Near` },
+    { value: 'far', label: t`Far` },
+  ] as const;
   const [custom, setCustom] = React.useState<string | null>(null);
   React.useEffect(() => {
     void customHrir().then((saved) => setCustom(saved?.name ?? null));
@@ -518,6 +524,24 @@ function HeadphoneControls() {
         />
         <Trans>Virtual surround</Trans>
       </DropdownMenuItem>
+      <DropdownMenuLabel className="text-xs font-normal text-[--muted]">
+        <Trans>Dolby Atmos distance</Trans>
+      </DropdownMenuLabel>
+      {modes.map((m) => (
+        <DropdownMenuItem
+          key={m.value}
+          onSelect={keepOpen}
+          onClick={() => setMode(m.value)}
+        >
+          <LuCheck
+            className={cn(
+              'flex-none',
+              mode === m.value ? 'opacity-100' : 'opacity-0'
+            )}
+          />
+          {m.label}
+        </DropdownMenuItem>
+      ))}
       <DropdownMenuLabel className="text-xs font-normal text-[--muted]">
         {custom ? (
           <Trans>HRIR: {custom}</Trans>

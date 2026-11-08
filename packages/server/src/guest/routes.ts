@@ -448,6 +448,7 @@ const capabilitySchema = z.object({
     .array(z.enum(['truehd', 'eac3']))
     .max(2)
     .optional(),
+  binauralMode: z.enum(['near', 'far']).optional(),
   dovi: z.boolean().optional(),
   subtitles: z
     .array(z.enum(['ass', 'pgs']))

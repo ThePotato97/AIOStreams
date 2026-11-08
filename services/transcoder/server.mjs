@@ -490,6 +490,7 @@ async function prepare(body) {
     policy.burn,
     policy.binaural,
     policy.clientBinaural,
+    policy.binauralMode,
     policy.dovi,
   ]);
   const positionMs = request.positionMs;

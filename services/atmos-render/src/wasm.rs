@@ -27,6 +27,8 @@ pub struct Session {
     input: Input,
     pipeline: Pipeline,
     out: Vec<f32>,
+    /// TrueHD: the speaker presentation of the last push (`TrueHd::take_speakers`).
+    speakers: Vec<f32>,
 }
 
 /// Memory for the caller to write input into.
@@ -56,7 +58,7 @@ fn modes(code: u32) -> Modes {
 
 fn session(input: Input) -> *mut Session {
     match Pipeline::new() {
-        Ok(pipeline) => Box::into_raw(Box::new(Session { input, pipeline, out: Vec::new() })),
+        Ok(pipeline) => Box::into_raw(Box::new(Session { input, pipeline, out: Vec::new(), speakers: Vec::new() })),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -93,7 +95,7 @@ fn interleave(out: &mut Vec<f32>) -> impl FnMut(&[f32], &[f32]) + '_ {
 }
 
 fn collect(session: &mut Session, run: impl FnOnce(&mut Input, &mut Vec<Block>)) -> usize {
-    let Session { input, pipeline, out } = session;
+    let Session { input, pipeline, out, .. } = session;
     out.clear();
     if let Some(s) = pipeline.snapshots.as_mut() {
         s.data.clear();
@@ -111,7 +113,47 @@ fn collect(session: &mut Session, run: impl FnOnce(&mut Input, &mut Vec<Block>))
 pub extern "C" fn ar_push(session: *mut Session, ptr: *const u8, len: usize) -> usize {
     // SAFETY: a live session, and len readable bytes at ptr.
     let (session, bytes) = unsafe { (&mut *session, std::slice::from_raw_parts(ptr, len)) };
-    collect(session, |input, blocks| input.feed().push(bytes, &mut |b| blocks.push(b)))
+    let frames = collect(session, |input, blocks| input.feed().push(bytes, &mut |b| blocks.push(b)));
+    session.speakers = match &mut session.input {
+        Input::TrueHd(f) => f.take_speakers(),
+        Input::Eac3(_) => Vec::new(),
+    };
+    frames
+}
+
+/// TrueHD: the last push's speaker presentation, FFmpeg's decode of it (the highest presentation
+/// up to 8 channels, no dialnorm), for playing to speakers instead of the binaural render: how
+/// many f32 `ar_speakers` holds, `ar_speaker_channels` interleaved, one sample for each sample
+/// the push took (the binaural output's sample k is the stream's sample k, as for these).
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_speakers_len(session: *mut Session) -> usize {
+    // SAFETY: a live session.
+    unsafe { (*session).speakers.len() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_speakers(session: *mut Session) -> *const f32 {
+    // SAFETY: a live session.
+    unsafe { (*session).speakers.as_ptr() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_speaker_channels(session: *mut Session) -> usize {
+    // SAFETY: a live session.
+    match unsafe { &(*session).input } {
+        Input::TrueHd(f) => f.speaker_channels(),
+        Input::Eac3(_) => 0,
+    }
+}
+
+/// FFmpeg's channel mask of the speaker presentation (as f64: up to bit 35).
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_speaker_mask(session: *mut Session) -> f64 {
+    // SAFETY: a live session.
+    match unsafe { &(*session).input } {
+        Input::TrueHd(f) => f.speaker_mask as f64,
+        Input::Eac3(_) => 0.0,
+    }
 }
 
 /// E-AC-3 only: the core decoder's output for the bytes pushed so far, in order — `len` f32 at
@@ -134,7 +176,7 @@ pub extern "C" fn ar_finish(session: *mut Session) -> usize {
     // SAFETY: a live session.
     let session = unsafe { &mut *session };
     collect(session, |input, blocks| input.feed().end(&mut |b| blocks.push(b)));
-    let Session { input, pipeline, out } = session;
+    let Session { input, pipeline, out, .. } = session;
     pipeline.finish(input.feed(), &mut interleave(out));
     out.len() / 2
 }

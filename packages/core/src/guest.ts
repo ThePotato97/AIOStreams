@@ -40,10 +40,17 @@ export interface GuestCapabilities {
    */
   binaural?: boolean;
   /**
-   * Audio codecs the player renders to binaural itself (in WebAssembly): with `binaural`, a
-   * track in one of these is copied as it is, and the server doesn't render it.
+   * Audio codecs the player decodes itself (in WebAssembly), rendering binaural for headphones
+   * and the speaker version otherwise: a track in one of these is copied as it is, with
+   * headphones on or off, and the server doesn't render it.
    */
   clientBinaural?: ('truehd' | 'eac3')[];
+  /**
+   * The listener's headphone mode where the server renders binaural: every element Near (as
+   * Windows renders) or Far. Without it, each element in the stream's own mode (Mid where the
+   * stream has none), as Dolby's Reference Player renders.
+   */
+  binauralMode?: 'near' | 'far';
   /**
    * The player draws Dolby Vision itself from each frame's metadata (WebGPU on an HDR canvas):
    * Dolby Vision video is copied with its metadata, profile 5 included, rather than converted.
