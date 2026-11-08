@@ -96,6 +96,37 @@ test('client binaural: a track the player renders is copied, never played direct
   assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy');
 });
 
+test('client binaural: copied Dolby Vision loses its metadata where TrueHD needs the experimental flag', () => {
+  const dv = (dovi) => ({
+    durationMs: 6000,
+    tracks: [
+      { index: 0, type: 'video', codec: 'hevc', hdr: true, dovi },
+      { index: 1, type: 'audio', codec: 'truehd', channels: 8, sampleRate: 48000, default: true },
+    ],
+  });
+  const headphones = request(
+    { audio: false, hdr: true, binaural: true, clientBinaural: ['truehd'] },
+    { audio: 1 }
+  );
+  const bsf = (args) => args[args.indexOf('-bsf:v') + 1];
+  // Top Gun: Maverick's UHD remux: profile 7 with an HDR10 base layer
+  const { args } = ffmpegArgs('in', dv({ profile: 7, compatibility: 6 }), headphones, 'out');
+  assert.equal(args[args.indexOf('-c:v') + 1], 'copy');
+  assert.equal(args[args.indexOf('-strict') + 1], 'experimental');
+  assert.equal(bsf(args), 'dovi_rpu=strip=1');
+  // no Dolby Vision: the video as it is
+  assert.ok(!ffmpegArgs('in', dv(undefined), headphones, 'out').args.includes('-bsf:v'));
+  // headphones off: no TrueHD copy, no flag, no box to strip
+  const off = ffmpegArgs(
+    'in',
+    dv({ profile: 7, compatibility: 6 }),
+    request({ audio: false, hdr: true }, { audio: 1 }),
+    'out'
+  ).args;
+  assert.ok(!off.includes('-strict'));
+  assert.ok(!off.includes('-bsf:v'));
+});
+
 test('client binaural: E-AC-3 the player renders is copied, with the codec FFmpeg writes', () => {
   const asked = request({ binaural: true, clientBinaural: ['truehd', 'eac3'] });
   const policy = select(meta('eac3'), asked);

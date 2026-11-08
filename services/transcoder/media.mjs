@@ -515,8 +515,16 @@ export function ffmpegArgs(
   }
   if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
   // TrueHD in MP4 (mlpa) is behind FFmpeg's experimental flag.
-  if (policy.copyAudio && policy.audio.codec === 'truehd')
+  if (policy.copyAudio && policy.audio.codec === 'truehd') {
     args.push('-strict', 'experimental');
+    // That flag also has the MP4 muxer write a copied Dolby Vision stream's configuration box
+    // (dvcC), which it otherwise leaves out, and Chrome refuses Dolby Vision through Media Source
+    // unless it's encrypted ("MSE playback of DolbyVision is only supported via platform
+    // decryptor"). Without the Dolby Vision metadata it's the HDR10 stream that plays without
+    // the flag.
+    if (policy.copyVideo && policy.video?.dovi)
+      args.push('-bsf:v', 'dovi_rpu=strip=1');
+  }
   if (policy.binaural) {
     // Already stereo for headphones: FLAC where the browser plays it, else AAC.
     args.push(
