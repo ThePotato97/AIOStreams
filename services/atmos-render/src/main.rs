@@ -6,7 +6,8 @@
 //!
 //! `--modes stream` (default) renders each element in the stream's own headphone mode (Off,
 //! Near, Mid, Far; Mid where it has none), as Dolby's Reference Player does; `--modes windows`
-//! renders everything Near, as Windows does.
+//! renders everything Near, as Windows does; `--modes far` renders everything Far (no Dolby
+//! product does: a listener's choice).
 //!
 //! `--loudness reference` (default) decodes as the Reference Player does: DD+ in LINE mode, TrueHD
 //! with its dialnorm, dialogue at -31 dBFS in both. `--loudness windows` decodes DD+ as Windows does
@@ -28,7 +29,8 @@ fn main() -> Result<()> {
     let modes = match value("--modes") {
         Some("stream") | None => Modes::Stream,
         Some("windows") => Modes::Windows,
-        Some(other) => bail!("unsupported --modes {other} (stream or windows)"),
+        Some("far") => Modes::Far,
+        Some(other) => bail!("unsupported --modes {other} (stream, windows or far)"),
     };
     let loudness = match value("--loudness") {
         Some("reference") | None => Loudness::Reference,

@@ -44,8 +44,14 @@ pub extern "C" fn ar_free(ptr: *mut u8, len: usize) {
     unsafe { drop(Vec::from_raw_parts(ptr, 0, len)) }
 }
 
-fn modes(windows: bool) -> Modes {
-    if windows { Modes::Windows } else { Modes::Stream }
+/// 0: the stream's render modes (Mid where it has none); 1: every element Near, as Windows does;
+/// 2: every element Far.
+fn modes(code: u32) -> Modes {
+    match code {
+        1 => Modes::Windows,
+        2 => Modes::Far,
+        _ => Modes::Stream,
+    }
 }
 
 fn session(input: Input) -> *mut Session {
@@ -55,18 +61,18 @@ fn session(input: Input) -> *mut Session {
     }
 }
 
-/// A TrueHD session; `windows_modes` renders every element Near, as Windows does.
+/// A TrueHD session; `modes` as `modes()` reads it.
 #[unsafe(no_mangle)]
-pub extern "C" fn ar_new(windows_modes: bool) -> *mut Session {
-    session(Input::TrueHd(TrueHd::new(modes(windows_modes))))
+pub extern "C" fn ar_new(modes_code: u32) -> *mut Session {
+    session(Input::TrueHd(TrueHd::new(modes(modes_code))))
 }
 
 /// An E-AC-3 session. `windows_loudness`: Windows' RF mode instead of the Reference Player's LINE
 /// mode, and the core decoder must be set up to match (`loudness::ffmpeg_args`).
 #[unsafe(no_mangle)]
-pub extern "C" fn ar_new_eac3(windows_modes: bool, windows_loudness: bool) -> *mut Session {
+pub extern "C" fn ar_new_eac3(modes_code: u32, windows_loudness: bool) -> *mut Session {
     let loudness = if windows_loudness { Loudness::Windows } else { Loudness::Reference };
-    session(Input::Eac3(Eac3::external(modes(windows_modes), loudness)))
+    session(Input::Eac3(Eac3::external(modes(modes_code), loudness)))
 }
 
 #[unsafe(no_mangle)]

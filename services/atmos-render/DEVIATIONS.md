@@ -8,8 +8,10 @@ listed here: what it does, why, and what would settle it. An entry is added or r
 commit as the code it describes.
 
 `--modes stream` (default) takes each element's render mode from the stream, as the Reference
-Player does; `--modes windows` renders everything Near, as Windows does. Everything else is Atmos for
-Headphones' chain in both modes, the Windows encoder's input headroom included.
+Player does; `--modes windows` renders everything Near, as Windows does. `--modes far` renders
+everything Far, which no Dolby product does: it's the listener's choice (the player's headphone mode
+setting), with Far's traced tuning, otherwise as `stream`. Everything else is Atmos for Headphones'
+chain in every mode, the Windows encoder's input headroom included.
 
 ## Not implemented
 

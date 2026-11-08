@@ -58,7 +58,7 @@ pub fn wav_mask(mask: u32) -> Vec<Static> {
 /// Windows maps 5.1 surrounds to its side or back slots isn't known.
 pub fn retyped(statics: Vec<Static>, modes: Modes) -> Vec<Static> {
     let has = |id| statics.contains(&Static::Bed(id));
-    if modes == Modes::Stream && has(5) && has(6) && !has(7) && !has(8) {
+    if modes.retypes() && has(5) && has(6) && !has(7) && !has(8) {
         statics
             .into_iter()
             .map(|s| match s {
@@ -86,6 +86,7 @@ pub fn element(s: Static) -> crate::input::Element {
 pub fn source(s: Static, modes: Modes) -> Source {
     let mode = match modes {
         Modes::Windows => Mode::Near,
+        Modes::Far => Mode::Far,
         Modes::Stream => Mode::Mid,
     };
     match s {
@@ -97,6 +98,20 @@ pub fn source(s: Static, modes: Modes) -> Source {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_channel_renders_in_the_chosen_mode() {
+        use crate::direct::Mode;
+        let mode = |modes| match super::source(super::Static::Bed(1), modes) {
+            super::Source::Positioned { mode, .. } => mode,
+            _ => unreachable!(),
+        };
+        assert_eq!(mode(super::Modes::Stream), Mode::Mid);
+        assert_eq!(mode(super::Modes::Windows), Mode::Near);
+        assert_eq!(mode(super::Modes::Far), Mode::Far);
+        // Far keeps Dolby's 5.1 retype; Windows doesn't
+        assert!(super::Modes::Far.retypes() && !super::Modes::Windows.retypes());
+    }
+
     use super::*;
 
     #[test]

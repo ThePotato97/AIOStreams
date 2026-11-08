@@ -18,6 +18,17 @@ pub enum Modes {
     /// Every element Near, the stream's codes ignored: Windows, whose DD+ decoder drops the
     /// headphone element and whose encoder defaults every object to Near.
     Windows,
+    /// Every element Far, the stream's codes ignored; otherwise as Stream (a 5.1 bed's surrounds
+    /// retyped). No Dolby product renders this way: a listener's choice, with Far's traced tuning.
+    Far,
+}
+
+impl Modes {
+    /// Whether a 5.1 bed's surrounds render at the rear corners (7/8), as Dolby's renderer does;
+    /// Windows' bed always has 7/8, so it never retypes.
+    pub fn retypes(self) -> bool {
+        self != Modes::Windows
+    }
 }
 
 /// What an element is: a bed channel (Dolby channel ID), the LFE, or an object (dynamic, or
@@ -149,7 +160,7 @@ impl Scene {
         let has = |id| ids.contains(&Some(id));
         // A 5.1 bed's surrounds (5/6 without 7/8) render at the rear corners (7/8). On Windows
         // the bed always has 7/8 (the encoder's 7.1.4 bed), so it never happens there.
-        let retype = self.modes == Modes::Stream && has(5) && has(6) && !has(7) && !has(8);
+        let retype = self.modes.retypes() && has(5) && has(6) && !has(7) && !has(8);
         let isf = bed_bits.len()..bed_bits.len() + prog.num_isf_objects;
         if self.inputs.len() != count {
             self.inputs = (0..count)
@@ -219,6 +230,7 @@ impl Scene {
                 let gain = if not_active { 0.0 } else { db_to_gain(data.object_basic_info.object_gain) };
                 let mode = match self.modes {
                     Modes::Windows => Mode::Near,
+                    Modes::Far => Mode::Far,
                     // Each element its own code; ISF objects already carry the first ISF
                     // object's (the parser); Mid where the element says nothing.
                     Modes::Stream => hp
