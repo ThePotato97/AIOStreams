@@ -141,6 +141,9 @@ fn db_to_gain(db: i8) -> f32 {
 #[derive(Default)]
 pub struct Scene {
     pub modes: Modes,
+    /// Positions step to each update instead of moving by Atmos for Headphones' smoothing: the
+    /// speaker renderer ramps its gains itself (renderer.md section 10).
+    pub stepped: bool,
     pub inputs: Vec<Input>,
     pending: Vec<Update>,
 }
@@ -299,7 +302,7 @@ impl Scene {
             if !input.known {
                 continue;
             }
-            let smoothed = matches!(input.kind, Kind::Object | Kind::Isf);
+            let smoothed = !self.stepped && matches!(input.kind, Kind::Object | Kind::Isf);
             let c = if !smoothed || input.fresh {
                 1.0
             } else {

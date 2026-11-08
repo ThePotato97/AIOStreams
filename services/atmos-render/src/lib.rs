@@ -19,6 +19,9 @@ pub mod render;
 mod qmf_window;
 pub mod room;
 pub mod speaker;
+pub mod speaker_render;
+pub mod spkvirt;
+pub mod spkvirt_tables;
 pub mod truehd_in;
 pub mod tuning;
 #[cfg(target_arch = "wasm32")]

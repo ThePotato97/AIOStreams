@@ -344,6 +344,10 @@ impl Eac3 {
 }
 
 impl Feed for Eac3 {
+    fn set_stepped(&mut self, on: bool) {
+        self.scene.stepped = on;
+    }
+
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block)) {
         if let Some(stdin) = self.decoder.as_mut().and_then(|d| d.stdin.as_mut()) {
             let _ = stdin.write_all(bytes);

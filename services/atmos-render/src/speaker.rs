@@ -14,21 +14,26 @@ pub const RS: usize = 5;
 pub const LTM: usize = 6;
 pub const RTM: usize = 7;
 
-/// The speaker table (R 0x1800D46D0 = A 0x1802F5440): Dolby x (left to right), y (front to
-/// back), z (up), for every channel but the LFE. Ls/Rs sit nominally at y = 0.5 and fall back to
-/// the back corners, their dependency (Lrs/Rrs) not being in the layout. The tops' x values are
-/// the trace's 4-decimal reading of the Q15 entries.
+const fn q15(v: i32) -> f32 {
+    v as f32 / 32768.0
+}
+
+/// The speaker table (R 0x1800D46D0 = A 0x1802F5440, Q15): Dolby x (left to right), y (front to
+/// back), z (up), for every channel but the LFE. Ls/Rs sit nominally at y = 0.5 (16384) and fall
+/// back to the back corners (0/32767, 32767), their dependency (Lrs/Rrs) not being in the layout
+/// (R sub_180028090).
 const SPEAKERS: [(usize, [f32; 3]); 7] = [
-    (L, [0.0, 0.0, 0.0]),
-    (R, [1.0, 0.0, 0.0]),
-    (C, [0.5, 0.0, 0.0]),
-    (LS, [0.0, 1.0, 0.0]),
-    (RS, [1.0, 1.0, 0.0]),
-    (LTM, [0.2419, 0.5, 1.0]),
-    (RTM, [0.7581, 0.5, 1.0]),
+    (L, [q15(0), q15(0), q15(0)]),
+    (R, [q15(32767), q15(0), q15(0)]),
+    (C, [q15(16384), q15(0), q15(0)]),
+    (LS, [q15(0), q15(32767), q15(0)]),
+    (RS, [q15(32767), q15(32767), q15(0)]),
+    (LTM, [q15(7928), q15(16384), q15(32767)]),
+    (RTM, [q15(24840), q15(16384), q15(32767)]),
 ];
 
 /// The automatic trim for the layout (heights h, surrounds s), dB: 5.1.2 gives -2.25.
+#[cfg(test)]
 fn layout_trim_db(heights: f32, surrounds: f32) -> f32 {
     -(4.5 - 1.5 * heights.min(4.0) / 4.0 - 3.0 * surrounds.min(4.0) / 4.0).max(0.0)
 }
@@ -98,8 +103,8 @@ pub fn pan(pos: [f32; 3]) -> [f32; CHANNELS] {
     layer(&floor, x, (2.0 * y).min(1.0), &mut fl);
     layer(&ceiling, x, y, &mut ce);
     let theta = z * std::f32::consts::FRAC_PI_2;
-    // at the top (z >= 0x7FFF/32768) only the ceiling
-    let (wf, wc) = if z >= 32767.0 / 32768.0 { (0.0, 1.0) } else { (theta.cos(), theta.sin()) };
+    // at the top (floor(z 32768) >= 0x7FFF) only the ceiling
+    let (wf, wc) = if (z * 32768.0).floor() >= 32767.0 { (0.0, 1.0) } else { (theta.cos(), theta.sin()) };
     // the automatic trim, weighted by the object's own y and z
     let clamp = |v: f32| v.clamp(0.0, 1.0);
     let w = clamp(clamp(y / 0.6) + clamp((z0 - 0.2) / 0.8));
@@ -116,10 +121,11 @@ mod tests {
     use super::*;
     use crate::direct::bed_position;
 
+    /// The trace's worked gains (mode11_worked_gains.csv) are given to 4 decimals.
     fn close(got: [f32; CHANNELS], want: &[(usize, f32)]) {
         for ch in 0..CHANNELS {
             let w = want.iter().find(|w| w.0 == ch).map_or(0.0, |w| w.1);
-            assert!((got[ch] - w).abs() < 5e-5, "channel {ch}: {} vs {w} in {got:?}", got[ch]);
+            assert!((got[ch] - w).abs() <= 5e-5, "channel {ch}: {} vs {w} in {got:?}", got[ch]);
         }
     }
 
@@ -155,9 +161,9 @@ mod tests {
         close(bed(10), &[(RTM, 0.7718)]);
         close(bed(14), &[(RTM, 0.7718)]);
         // statics: bottom front onto L, bottom back onto Ls, back centre on both surrounds
-        close(pan([0.0, 0.0, -1.0]), &[(L, 1.0)]);
-        close(pan([0.0, 1.0, -1.0]), &[(LS, 0.7718)]);
-        close(pan([0.5, 1.0, 0.0]), &[(LS, 0.5457), (RS, 0.5457)]);
+        close(pan([0.0, 0.0, -0.70711]), &[(L, 1.0)]);
+        close(pan([0.0, 1.0, -0.70711]), &[(LS, 0.7718)]);
+        close(pan([0.5, 1.0, 0.0]), &[(LS, 0.5457), (RS, 0.5458)]);
     }
 
     #[test]

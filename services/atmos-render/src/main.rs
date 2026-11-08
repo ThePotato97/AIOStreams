@@ -9,6 +9,9 @@
 //! renders everything Near, as Windows does; `--modes far` renders everything Far (no Dolby
 //! product does: a listener's choice).
 //!
+//! `--output speakers` renders for two built-in speakers instead of headphones, as Dolby Atmos for
+//! built-in speakers does on Windows (DAP-VR output mode 11, Dolby Access's settings).
+//!
 //! `--loudness reference` (default) decodes as the Reference Player does: DD+ in LINE mode, TrueHD
 //! with its dialnorm, dialogue at -31 dBFS in both. `--loudness windows` decodes DD+ as Windows does
 //! (RF mode: dialogue at -20 dBFS on frames carrying compr, heavy compression); TrueHD keeps the
@@ -18,7 +21,7 @@ use std::io::{BufWriter, Read, Write};
 
 use anyhow::{Result, bail};
 use atmos_render::eac3_in::Eac3;
-use atmos_render::input::{Feed, Pipeline};
+use atmos_render::input::{Feed, Output, Pipeline};
 use atmos_render::loudness::Loudness;
 use atmos_render::objects::Modes;
 use atmos_render::truehd_in::TrueHd;
@@ -42,7 +45,12 @@ fn main() -> Result<()> {
         Some("eac3") => Box::new(Eac3::new(value("--ffmpeg").unwrap_or("ffmpeg"), modes, loudness)?),
         Some(other) => bail!("unsupported --format {other}"),
     };
-    let mut pipeline = Pipeline::new()?;
+    let output = match value("--output") {
+        Some("binaural") | None => Output::Binaural,
+        Some("speakers") => Output::Speakers,
+        Some(other) => bail!("unsupported --output {other} (binaural or speakers)"),
+    };
+    let mut pipeline = Pipeline::with_output(output)?;
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut out = BufWriter::with_capacity(1 << 16, std::io::stdout().lock());

@@ -7,6 +7,13 @@ their second question batch (§10). Everything the renderer does that isn't read
 listed here: what it does, why, and what would settle it. An entry is added or removed in the same
 commit as the code it describes.
 
+`--output speakers` renders for two built-in speakers instead (Dolby Atmos for built-in speakers,
+`speaker_render.rs`): the speaker-path trace (`dolby-speaker-render.md`, `renderer.md`,
+`virtualizer.md`, `postchain.md`, `profile.md`, 2026-11-08), DAP-VR output mode 11 with Dolby
+Access's built-in-speaker settings (speaker angles 10/10/10, height filter off, the 8->2 matrix,
+dynamic speaker optimization off) for a stereo endpoint. The speaker path's own entries are
+under "Speaker path" below.
+
 `--modes stream` (default) takes each element's render mode from the stream, as the Reference
 Player does; `--modes windows` renders everything Near, as Windows does. `--modes far` renders
 everything Far, which no Dolby product does: it's the listener's choice (the player's headphone mode
@@ -17,7 +24,7 @@ chain in every mode, the Windows encoder's input headroom included.
 
 | # | What | Why | Settled by |
 |---|---|---|---|
-| 1 | DAP's post-processing (leveler, IEQ, regulator, surround boost, dialogue enhancer, graphic EQ). With all of it off the post chain is unity (Q1). | Only parameter values are traced, not the algorithms. | Tracing them, if a profile with any of them on is wanted. |
+| 1 | DAP's post-processing (leveler, IEQ, regulator, surround boost, dialogue enhancer, graphic EQ, media intelligence; and the surround decoder, which the Game, Movie, Dynamic and Custom profiles turn on). With all of it off the post chain is unity (Q1). So headphones match the Game profile's settings, as do speakers (whose Movie profile adds the dialogue enhancer and surround boost, Music IEQ, Dynamic the dialogue enhancer, IEQ, MI and regulator, Custom the dialogue enhancer, surround boost and graphic EQ). Surround boost is traced (`virtualizer.md` §6) except the dB reference of its level estimate. | Only parameter values are traced, not the algorithms. | Tracing them, if a profile with any of them on is wanted. |
 | 2 | After Atmos for Headphones, Windows' playback resamples to the device's rate (E's 48 to 44.1 kHz on a 44.1 kHz device) and converts to int16 with dither. Neither is applied: they belong to one device's output path, and the listener's own device and OS apply theirs. Windows' engine limiter (0.985), which every Windows output device has, is applied. | Device-specific. | — |
 | 3 | Sample rates other than 48 kHz. The renderer assumes 48 kHz; a 96 or 192 kHz TrueHD (non-Atmos 7.1 can be) would render at the wrong speed. | A gap of ours. | Resampling, or keeping such sources off the server path. To be fixed. |
 
@@ -62,3 +69,13 @@ chain in every mode, the Windows encoder's input headroom included.
 | # | What | Why |
 |---|---|---|
 | 24 | After a seek, inputs are silent until their first OAMD; TrueHD access units before the first major sync come out as silence. | Positions are unknown until then; silence keeps the timing. |
+
+## Speaker path
+
+| # | What | Why | Settled by |
+|---|---|---|---|
+| 25 | An object update takes effect in the block containing its sample, as on the headphone path; its gains then ramp linearly over 8 slots starting with that block's first slot. | The trace gives the ramp (renderer.md §10: ceil(480/64) slots, constant within a slot) and says gains are updated every slot; when E's 10 ms buffers' updates reach a slot, and whether a ramp's first step falls in its first slot, aren't. | The slot an update lands in, in A `sub_18004BAE0`. |
+| 26 | OAMD zone masks aren't applied: every object pans over the whole 5.1.2 layout. | The zone masks are traced (`zone_masks.csv`), but their flag inputs a2[0..2] aren't (renderer.md §14 item 2), and the input doesn't read zone metadata yet. | The flags' meaning; reading zone control from OAMD. |
+| 27 | Bed channels outside Windows' 0x33FF bed (top middles 11/12, wides 15/16) pan from their Dolby bed positions (wides at y = 5461/32768); Dolby's speaker table puts Lw/Rw at y = 5285/32768. | The trace maps bed IDs to the speaker table only for the 0x33FF channels. | `dword_1800FB5F0` for those IDs. |
+| 28 | The mixer holds each gain constant within a slot. | A's SIMD mixer reads one gain vector per object (renderer.md §14 item 3); not confirmed for a ramp. | `sub_18004BFB0` during a ramp. |
+| 29 | Only a stereo endpoint: Dolby Access's 8->2 matrix. | Other endpoint channel counts hit A's mode recalculation, which discards its own result (profile.md §7). | Not needed for built-in speakers. |

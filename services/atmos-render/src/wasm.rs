@@ -4,7 +4,7 @@
 //! (libav.js) and pushes its PCM (`ar_push_pcm`). A plain C ABI, so it needs no bindings crate.
 
 use crate::eac3_in::Eac3;
-use crate::input::{Block, Feed, Pipeline};
+use crate::input::{Block, Feed, Output, Pipeline};
 use crate::loudness::Loudness;
 use crate::objects::Modes;
 use crate::truehd_in::TrueHd;
@@ -106,6 +106,21 @@ fn collect(session: &mut Session, run: impl FnOnce(&mut Input, &mut Vec<Block>))
         pipeline.take(input.feed(), b, &mut interleave(out));
     }
     out.len() / 2
+}
+
+/// Render for two built-in speakers instead of headphones (Dolby Atmos for built-in speakers),
+/// from the next push on; before the first push, for a stream rendered that way throughout.
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_render_for_speakers(session: *mut Session) -> bool {
+    // SAFETY: a live session.
+    let session = unsafe { &mut *session };
+    match Pipeline::with_output(Output::Speakers) {
+        Ok(p) => {
+            session.pipeline = p;
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Push `len` bytes of the stream; returns how many stereo frames `ar_output` now holds.

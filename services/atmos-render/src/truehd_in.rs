@@ -210,6 +210,10 @@ impl TrueHd {
 }
 
 impl Feed for TrueHd {
+    fn set_stepped(&mut self, on: bool) {
+        self.scene.stepped = on;
+    }
+
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block)) {
         self.extractor.push_bytes(bytes);
         loop {

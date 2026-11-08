@@ -1,6 +1,7 @@
 //! What a decoder hands the renderer, and the slot/block scheduling between them.
 
 use crate::render::{BLOCK, Renderer, SLOT, Source};
+use crate::speaker_render::SpeakerRenderer;
 use crate::tuning::INPUT_HEADROOM;
 
 /// Decoded audio: one Vec per input channel, all the same length, starting at sample `start`.
@@ -21,6 +22,9 @@ pub enum Element {
 }
 
 pub trait Feed {
+    /// Whether object positions step to each update (the speaker renderer ramps its gains
+    /// itself) rather than move by Atmos for Headphones' smoothing. Off by default.
+    fn set_stepped(&mut self, _on: bool) {}
     /// Push bitstream bytes; decoded audio comes out through `out`.
     fn push(&mut self, bytes: &[u8], out: &mut dyn FnMut(Block));
     /// The inputs' state at `sample` (start of a renderer block).
@@ -83,11 +87,41 @@ impl Snapshots {
     }
 }
 
+/// What the pipeline renders to: two ears (Dolby Atmos for Headphones) or two built-in speakers
+/// (Dolby Atmos for built-in speakers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Output {
+    #[default]
+    Binaural,
+    Speakers,
+}
+
+pub enum Engine {
+    Binaural(Renderer),
+    Speakers(Box<SpeakerRenderer>),
+}
+
+impl Engine {
+    fn set_block(&mut self, sources: &[Source]) {
+        match self {
+            Engine::Binaural(r) => r.set_block(sources),
+            Engine::Speakers(r) => r.set_block(sources),
+        }
+    }
+    fn slot(&mut self, inputs: &[&[f32]], left: &mut [f32], right: &mut [f32]) {
+        match self {
+            Engine::Binaural(r) => r.slot(inputs, left, right),
+            Engine::Speakers(r) => r.slot(inputs, left, right),
+        }
+    }
+}
+
 /// Buffers decoded audio into 64-sample slots and renders them; gains change once per
 /// 256-sample block (counted from the first sample). The output is the input's length and
 /// lines up with it: the filterbank latency is dropped at the start and flushed at the end.
+/// Both outputs have the same latency (`Renderer::latency`).
 pub struct Pipeline {
-    pub renderer: Renderer,
+    pub renderer: Engine,
     pending: Vec<Vec<f32>>,
     /// Stream sample of pending[..][0], and of the first sample ever taken.
     at: u64,
@@ -101,7 +135,15 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(Self { renderer: Renderer::new()?, pending: Vec::new(), at: 0, origin: None, taken: 0, rendered: 0, emitted: 0, snapshots: None })
+        Self::with_output(Output::Binaural)
+    }
+
+    pub fn with_output(output: Output) -> anyhow::Result<Self> {
+        let renderer = match output {
+            Output::Binaural => Engine::Binaural(Renderer::new()?),
+            Output::Speakers => Engine::Speakers(Box::new(SpeakerRenderer::new())),
+        };
+        Ok(Self { renderer, pending: Vec::new(), at: 0, origin: None, taken: 0, rendered: 0, emitted: 0, snapshots: None })
     }
 
     /// Keeps snapshots of the scene for the debug view, or stops.
@@ -110,6 +152,7 @@ impl Pipeline {
     }
 
     pub fn take(&mut self, feed: &mut dyn Feed, block: Block, emit: &mut dyn FnMut(&[f32], &[f32])) {
+        feed.set_stepped(matches!(self.renderer, Engine::Speakers(_)));
         if self.origin.is_none() {
             self.origin = Some(block.start);
             self.at = block.start;
