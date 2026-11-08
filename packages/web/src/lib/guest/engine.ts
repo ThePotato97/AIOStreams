@@ -1,4 +1,5 @@
 import { t } from '@lingui/core/macro';
+import { toast } from 'sonner';
 import type React from 'react';
 import type { GuestPlayback } from '@aiostreams/core';
 import type {
@@ -137,6 +138,8 @@ export function guestEngine(
     let force = false;
     /** The browser's own binaural rendering failed: the server renders for the rest of this playback. */
     let serverBinaural = false;
+    /** Binaural audio failed to play: this file plays without it, the browser's virtualiser on. */
+    let noBinaural = false;
     /** Recoveries tried since a fragment last played. */
     let tries: Tries = { network: 0, media: 0 };
     /** The prepare whose playback has been reported failed, once. */
@@ -252,7 +255,30 @@ export function guestEngine(
       void prepare(position());
       return true;
     };
+    /**
+     * The binaural audio (the server's or this browser's) failed to play: the file goes on from
+     * where it was without it, rather than stopping. A failure of the video isn't its doing.
+     */
+    const dropBinaural = (failure: Failure) => {
+      if (
+        noBinaural ||
+        failure.kind !== 'media' ||
+        failure.media?.stream === 'video' ||
+        !(playback?.binaural || playback?.clientBinaural)
+      )
+        return false;
+      noBinaural = true;
+      toast.message(
+        t`Binaural audio couldn't play, so it's off for this file`,
+        {
+          description: explainFailure(failure),
+        }
+      );
+      void prepare(position());
+      return true;
+    };
     const recover = (failure: Failure) => {
+      if (dropBinaural(failure)) return;
       const step = player ? recovery(failure, tries) : 'give-up';
       const at = generation;
       const here = () => video.current?.currentTime ?? null;
@@ -443,7 +469,9 @@ export function guestEngine(
         const capabilities = {
           ...probed,
           subtitles: (probed.subtitles ?? []).filter((f) => !unrendered.has(f)),
-          clientBinaural: serverBinaural ? undefined : probed.clientBinaural,
+          clientBinaural:
+            serverBinaural || noBinaural ? undefined : probed.clientBinaural,
+          ...(noBinaural ? { binaural: false } : {}),
         };
         const result = await api.prepare(
           {
@@ -566,6 +594,7 @@ export function guestEngine(
         file = next;
         force = false;
         serverBinaural = false;
+        noBinaural = false;
         paused = next.paused ?? true;
         const tracks = current().media.tracks;
         audio =

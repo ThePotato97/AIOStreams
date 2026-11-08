@@ -94,6 +94,19 @@ const renderers = vi.hoisted(() => ({
   pgs: [] as { bytes: number; destroyed: boolean }[],
   fail: false,
 }));
+/** The SourceBuffer that failed, as media-errors.ts would have recorded it. */
+const buffers = vi.hoisted(() => ({
+  failed: null as { mimeType: string } | null,
+}));
+vi.mock('../playback/media-errors', () => ({
+  watchBufferErrors: () => {},
+  clearBufferError: () => {},
+  lastBufferError: () => buffers.failed,
+}));
+const toasts = vi.hoisted(() => ({ messages: [] as string[] }));
+vi.mock('sonner', () => ({
+  toast: { message: (m: string) => toasts.messages.push(m) },
+}));
 vi.mock('./subtitle-renderer', () => ({
   renderAss: async (_video: unknown, content: string, fonts: string[]) => {
     if (renderers.fail) throw new Error('WebAssembly failed');
@@ -183,7 +196,7 @@ let el: {
 let prepares: {
   force?: boolean;
   positionMs: number;
-  capabilities?: { clientBinaural?: string[] };
+  capabilities?: { binaural?: boolean; clientBinaural?: string[] };
 }[];
 /** What the server answers each prepare with, besides the stream. */
 let answer: (body: (typeof prepares)[number]) => Record<string, unknown>;
@@ -242,6 +255,8 @@ beforeEach(() => {
   prepares = [];
   answer = () => ({});
   asked.extra = {};
+  buffers.failed = null;
+  toasts.messages = [];
   touch = async () => ({ ok: true });
   mode = 'audio';
   el = { currentTime: 0, error: null, src: '', seekable: { length: 0 } };
@@ -474,6 +489,42 @@ describe('binaural audio rendered in the browser', () => {
     await vi.advanceTimersByTimeAsync(0);
     await start(engine);
     expect(prepares.at(-1)!.capabilities?.clientBinaural).toEqual(['truehd']);
+  });
+});
+
+describe('binaural audio that fails to play', () => {
+  it('is turned off for the file, which plays on from where it was', async () => {
+    answer = (body) => ({ binaural: body.capabilities?.binaural !== false });
+    asked.extra = { binaural: true, clientBinaural: ['truehd'] };
+    const { engine, failures } = setup();
+    await start(engine, 30_000);
+    expect(prepares[0].capabilities).toMatchObject({ binaural: true });
+    el.currentTime = 52;
+    buffers.failed = { mimeType: 'audio/mp4; codecs="flac"' };
+    player().fire('error', shakaError(3, 3014, { data: [0, null] }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(2);
+    expect(prepares[1]).toMatchObject({ positionMs: 52_000, force: false });
+    expect(prepares[1].capabilities).toMatchObject({ binaural: false });
+    expect(prepares[1].capabilities?.clientBinaural).toBeUndefined();
+    expect(failures()).toHaveLength(0);
+    expect(toasts.messages).toHaveLength(1);
+    // the next file has it again
+    await start(engine);
+    expect(prepares.at(-1)!.capabilities).toMatchObject({ binaural: true });
+  });
+  it("isn't blamed for the video failing", async () => {
+    answer = () => ({ binaural: true });
+    asked.extra = { binaural: true };
+    const { engine } = setup();
+    await start(engine);
+    buffers.failed = { mimeType: 'video/mp4; codecs="hvc1.2.4.L153.B0"' };
+    player().fire('error', shakaError(3, 3014, { data: [0, null] }));
+    await vi.advanceTimersByTimeAsync(0);
+    // recovered in place as any media failure is, with binaural audio still asked for
+    expect(prepares).toHaveLength(1);
+    expect(player().loads).toHaveLength(2);
+    expect(toasts.messages).toHaveLength(0);
   });
 });
 

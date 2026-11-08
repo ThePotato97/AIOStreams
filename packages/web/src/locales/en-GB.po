@@ -718,6 +718,10 @@ msgstr "Below zero plays the sound earlier, as for wireless headphones that lag 
 msgid "Bigger subtitles"
 msgstr "Bigger subtitles"
 
+#: src/lib/guest/engine.ts
+msgid "Binaural audio couldn't play, so it's off for this file"
+msgstr "Binaural audio couldn't play, so it's off for this file"
+
 #: src/lib/i18n.ts
 msgid "Black"
 msgstr "Black"
