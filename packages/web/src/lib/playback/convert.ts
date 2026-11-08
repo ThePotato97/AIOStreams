@@ -168,11 +168,10 @@ export function convertingEngine(
         return reopen();
       }
       converting.close();
+      const why = reason ?? t`conversion is unavailable on this server`;
       emit({
         type: 'failed',
-        error: t`This browser can't play this file's audio, and it couldn't be converted: ${
-          reason ?? t`conversion is unavailable on this server`
-        }`,
+        error: t`This browser can't play this file's audio, and it couldn't be converted: ${why}`,
         retry: { label: t`Try again`, run: reopen },
         transcoder,
       });

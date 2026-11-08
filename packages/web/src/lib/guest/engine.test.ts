@@ -62,7 +62,11 @@ const fakes = vi.hoisted(() => {
 vi.mock('@lingui/core/macro', () => ({
   t: (s: TemplateStringsArray, ...v: unknown[]) => String.raw({ raw: s }, ...v),
 }));
-const asked = vi.hoisted(() => ({ headphones: [] as boolean[] }));
+const asked = vi.hoisted(() => ({
+  headphones: [] as boolean[],
+  /** Capabilities the probe adds. */
+  extra: {} as Record<string, unknown>,
+}));
 vi.mock('./capabilities', () => ({
   browserCapabilities: async (
     _media: unknown,
@@ -70,7 +74,7 @@ vi.mock('./capabilities', () => ({
     headphones: boolean
   ) => {
     asked.headphones.push(headphones);
-    return { subtitles: ['ass', 'pgs'] };
+    return { subtitles: ['ass', 'pgs'], ...asked.extra };
   },
 }));
 /** The headphones setting: its listener, called as the setting would be. */
@@ -176,15 +180,22 @@ let el: {
     end?: (i: number) => number;
   };
 };
-let prepares: { force?: boolean; positionMs: number }[];
+let prepares: {
+  force?: boolean;
+  positionMs: number;
+  capabilities?: { clientBinaural?: string[] };
+}[];
+/** What the server answers each prepare with, besides the stream. */
+let answer: (body: (typeof prepares)[number]) => Record<string, unknown>;
 let touch: () => Promise<unknown>;
 let mode: string;
 function setup(options: Parameters<typeof guestEngine>[4] = {}) {
   const events: { type: string; error?: string; retry?: unknown }[] = [];
   const api = {
-    prepare: vi.fn(async (body: { force?: boolean; positionMs: number }) => {
+    prepare: vi.fn(async (body: (typeof prepares)[number]) => {
       prepares.push(body);
       return {
+        ...answer(body),
         mode,
         url: `/party/guest/media/${mode === 'direct' ? 'original' : 'job/manifest.mpd'}?token=t&lease=l`,
         offsetMs: 0,
@@ -229,6 +240,8 @@ beforeEach(() => {
   fakes.retryWorks = true;
   fakes.loadResult = () => Promise.resolve();
   prepares = [];
+  answer = () => ({});
+  asked.extra = {};
   touch = async () => ({ ok: true });
   mode = 'audio';
   el = { currentTime: 0, error: null, src: '', seekable: { length: 0 } };
@@ -425,6 +438,42 @@ describe('a stream that cannot be fetched', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(failures()).toHaveLength(0);
     expect(player().retryStreaming).not.toHaveBeenCalled();
+  });
+});
+
+describe('binaural audio rendered in the browser', () => {
+  it('is rendered by the server instead, from where it was, when the browser fails at it', async () => {
+    asked.extra = { clientBinaural: ['truehd'] };
+    answer = (body) => ({
+      clientBinaural: !!body.capabilities?.clientBinaural,
+    });
+    const { engine, failures } = setup();
+    await start(engine, 30_000);
+    expect(prepares[0].capabilities?.clientBinaural).toEqual(['truehd']);
+    el.currentTime = 41;
+    // TRANSMUXING_FAILED
+    player().fire('error', shakaError(3, 3018));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(2);
+    expect(prepares[1]).toMatchObject({ force: false, positionMs: 41_000 });
+    expect(prepares[1].capabilities?.clientBinaural).toBeUndefined();
+    expect(failures()).toHaveLength(0);
+    // and not asked of the browser again for this file
+    player().fire('error', shakaError(3, 3018));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(2);
+  });
+  it('is asked of the browser again for the next file', async () => {
+    asked.extra = { clientBinaural: ['truehd'] };
+    answer = (body) => ({
+      clientBinaural: !!body.capabilities?.clientBinaural,
+    });
+    const { engine } = setup();
+    await start(engine);
+    player().fire('error', shakaError(3, 3018));
+    await vi.advanceTimersByTimeAsync(0);
+    await start(engine);
+    expect(prepares.at(-1)!.capabilities?.clientBinaural).toEqual(['truehd']);
   });
 });
 

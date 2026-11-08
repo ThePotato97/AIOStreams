@@ -11,3 +11,5 @@ metadata.json
 data/
 testing/
 build/
+packages/web/src/lib/playback/binaural/atmos_render.wasm
+

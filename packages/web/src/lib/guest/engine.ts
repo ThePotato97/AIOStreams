@@ -7,6 +7,10 @@ import type {
   EngineEvent,
 } from '../playback/engine';
 import { videoEngine } from '../playback/video';
+import {
+  registerBinauralTransmuxer,
+  TRANSMUXING_FAILED,
+} from '../playback/binaural/transmuxer';
 import { watchHeadphones } from '../playback/headphone-setting';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
@@ -36,10 +40,10 @@ interface ShakaPlayer extends EventTarget {
     presentationTimeline?: { getMaxSegmentEndTime(): number | null };
   } | null;
 }
-interface Shaka {
+type Shaka = {
   Player: { new (): ShakaPlayer; isBrowserSupported(): boolean };
   polyfill: { installAll(): void };
-}
+} & Parameters<typeof registerBinauralTransmuxer>[0];
 const isShakaError = (error: unknown): error is ShakaError =>
   typeof (error as ShakaError)?.category === 'number' &&
   typeof (error as ShakaError)?.code === 'number';
@@ -122,6 +126,8 @@ export function guestEngine(
     /** Errors already handled: a failed load also reports its error. */
     const handled = new WeakSet<object>();
     let force = false;
+    /** The browser's own binaural rendering failed: the server renders for the rest of this playback. */
+    let serverBinaural = false;
     /** Recoveries tried since a fragment last played. */
     let tries: Tries = { network: 0, media: 0 };
     /** The prepare whose playback has been reported failed, once. */
@@ -194,11 +200,20 @@ export function guestEngine(
         if (isShakaError(error)) {
           if (interrupted(error) || handled.has(error)) return;
           handled.add(error);
+          if (binauralFailed(error)) return;
           recover(shakaFailure(error));
         } else fail({ kind: 'other', detail: (error as Error).message });
       });
     };
     /** What the player tries first: fetch the stream again, or reload it where it was. */
+    /** The browser couldn't render the audio to binaural: the server does it instead, from here. */
+    const binauralFailed = (error: ShakaError) => {
+      if (error.code !== TRANSMUXING_FAILED || !playback?.clientBinaural)
+        return false;
+      serverBinaural = true;
+      void prepare(position());
+      return true;
+    };
     const recover = (failure: Failure) => {
       const step = player ? recovery(failure, tries) : 'give-up';
       const at = generation;
@@ -276,6 +291,8 @@ export function guestEngine(
           };
         if (at !== generation) return;
         shaka.polyfill.installAll();
+        // TrueHD the transcoder left for this browser to render to binaural.
+        registerBinauralTransmuxer(shaka);
         if (!shaka.Player.isBrowserSupported())
           throw Error('This browser cannot play converted streams');
         const next = new shaka.Player();
@@ -289,6 +306,7 @@ export function guestEngine(
           // Shaka handles the rest itself.
           if (error.severity !== CRITICAL || interrupted(error)) return;
           handled.add(error);
+          if (binauralFailed(error)) return;
           recover(shakaFailure(error));
         });
         next.addEventListener('buffering', (event) => {
@@ -384,6 +402,7 @@ export function guestEngine(
         const capabilities = {
           ...probed,
           subtitles: (probed.subtitles ?? []).filter((f) => !unrendered.has(f)),
+          clientBinaural: serverBinaural ? undefined : probed.clientBinaural,
         };
         const result = await api.prepare(
           {
@@ -406,7 +425,8 @@ export function guestEngine(
           startMs: Math.max(0, target - result.offsetMs),
           paused,
           subtitles: [],
-          binaural: !!result.binaural,
+          // Rendered on the server or here: either way no virtualiser on top.
+          binaural: !!result.binaural || !!result.clientBinaural,
         });
         if (result.subtitleUrl)
           void attachSubtitle(result, at, controller.signal);
@@ -471,7 +491,7 @@ export function guestEngine(
         // for that, and turning them off leaves binaural audio that has to be converted again.
         const binaural =
           (now && (track?.codec === 'truehd' || track?.codec === 'eac3')) ||
-          (!now && !!playback?.binaural);
+          (!now && (!!playback?.binaural || !!playback?.clientBinaural));
         if ((converted && (track?.channels ?? 2) > 2) || binaural)
           void prepare(preparing ? target : position());
       });
@@ -504,6 +524,7 @@ export function guestEngine(
         playback = null;
         file = next;
         force = false;
+        serverBinaural = false;
         paused = next.paused ?? true;
         const tracks = current().media.tracks;
         audio =

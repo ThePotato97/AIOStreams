@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { formatter } from '@lingui/format-po';
 import { defineConfig, loadEnv, type RsbuildConfig } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
@@ -86,6 +86,16 @@ const BUNDLED_ICONS = [
 ].map((name) => ({ from: `../frontend/public/${name}`, to: name }));
 
 /**
+ * The binaural renderer's WebAssembly (scripts/build-atmos-wasm.sh). Without it, binaural
+ * rendering stays on the server.
+ */
+function atmosWasmUrl(): string {
+  const dir = new URL('./src/lib/playback/binaural/', import.meta.url);
+  const built = existsSync(new URL('atmos_render.wasm', dir));
+  return new URL(built ? 'wasm-url.ts' : 'wasm-url-missing.ts', dir).pathname;
+}
+
+/**
  * `--env-mode standalone` builds the app on its own, with a server list,
  * instead of the copy each server hosts at `/web`.
  */
@@ -105,6 +115,7 @@ export default defineConfig(async ({ envMode }) => {
     // Dependencies too, which are otherwise shipped as published: older browsers can't parse some of their syntax.
     include: [/[\\/]node_modules[\\/]/],
   };
+  const resolve = { alias: { 'atmos-render-wasm-url': atmosWasmUrl() } };
   // Lingui's macros compile at build time, and each catalog loads compiled.
   const tools: RsbuildConfig['tools'] = {
     swc: { jsc: { experimental: { plugins: [['@lingui/swc-plugin', {}]] } } },
@@ -116,6 +127,7 @@ export default defineConfig(async ({ envMode }) => {
     return {
       plugins: [pluginReact(), pluginLicenses()],
       source,
+      resolve,
       tools,
       html: {
         template: './index.html',
@@ -133,6 +145,7 @@ export default defineConfig(async ({ envMode }) => {
   return {
     plugins: [pluginReact(), pluginLicenses()],
     source,
+    resolve,
     tools,
     html: {
       template: './index.html',

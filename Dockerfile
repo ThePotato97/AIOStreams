@@ -4,6 +4,14 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
+# atmos-render as WebAssembly, for the web app's in-browser binaural rendering
+# (scripts/build-atmos-wasm.sh does the same outside Docker).
+FROM rust:1-bookworm AS atmos-wasm
+WORKDIR /src
+RUN rustup target add wasm32-unknown-unknown
+COPY services/atmos-render ./
+RUN cargo build --lib --release --locked --target wasm32-unknown-unknown
+
 FROM base AS builder
 
 WORKDIR /build
@@ -46,7 +54,8 @@ COPY packages/web ./packages/web
 COPY packages/crypto ./packages/crypto
 COPY scripts ./scripts
 COPY resources ./resources
-
+COPY --from=atmos-wasm /src/target/wasm32-unknown-unknown/release/atmos_render.wasm \
+  ./packages/web/src/lib/playback/binaural/atmos_render.wasm
 
 # Build the project.
 RUN pnpm run build

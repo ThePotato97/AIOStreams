@@ -19,3 +19,8 @@ declare module '*.po' {
   import type { Messages } from '@lingui/core';
   export const messages: Messages;
 }
+
+/** The binaural renderer's WebAssembly URL, or null where it wasn't built (an rsbuild alias). */
+declare module 'atmos-render-wasm-url' {
+  export const wasmUrl: string | null;
+}
