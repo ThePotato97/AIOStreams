@@ -220,6 +220,11 @@ pub const OMNI_GAIN: f32 = 0.70700;
 /// Scale on the binaural output (`dapvr_render_objects_and_scale` -> `sub_1800EAB60(buf, -3)`).
 pub const OUTPUT_SCALE: f32 = 0.125;
 
+/// The DAP post chain's gain with leveler, IEQ, EQ and regulator off (0x180009C75): 2^x of
+/// -14/130 x 21.592773 by the engine's cubic, 0.19962984 (-13.995 dB). Taking `sub_18006A8E0` as
+/// floor, as the trace does [I].
+pub const POST_CHAIN_GAIN: f32 = f32::from_bits(0x3E4C_6BC4);
+
 /// Per-ear HRTF gain with near-field ILD off (both tunings).
 pub const EAR_GAIN: f32 = 0.70711;
 

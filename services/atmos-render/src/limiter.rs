@@ -1,8 +1,133 @@
 //! The output limiters.
 //!
+//! `DolbyLimiter` is Atmos for Headphones' own peak limiter (`DolbyAudioProcessing.dll` 7.3.7,
+//! process `sub_18003C9F0`, state from `sub_18003C870`, constants from `sub_180017330`). With the
+//! render's x1/8 and the post chain's -14 dB before it, its fixed make-up (256 G = 40.09) brings
+//! the output back to x1.0005, under a ceiling of 0.99987.
+//!
 //! `EngineLimiter` is Windows' audio-engine limiter (`CAudioLimiter` in AudioEng.dll 10.0.26100,
 //! `ProcessLimiterBuffer` 0x1800083A0, `AllocateDelayLine` 0x18000CD08, `Initialize` 0x18000CE10),
 //! which runs on every Windows output device after Dolby Atmos for Headphones.
+
+/// Dolby's limiter block (B): the engine runs 256-frame blocks in four sub-blocks.
+pub const DOLBY_BLOCK: usize = 64;
+/// Threshold T (`dword_1802EDFB0`) and output gain G (`dword_1802EDFAC`); the output is
+/// 256 G x the limited signal (make-up 40.09375, ceiling 256 G T = 0.999869).
+const DOLBY_T: f32 = f32::from_bits(0x3CCC_4B60);
+const DOLBY_G: f32 = f32::from_bits(0x3E20_6000);
+/// The 48 kHz, B = 64 table (0x180332150): t0, t1, t2, t3, release coefficient c.
+const DOLBY_RATE: [f32; 5] = [
+    f32::from_bits(0x3F7A_2800),
+    f32::from_bits(0x3CBB_0000),
+    f32::from_bits(0x3F7E_8600),
+    f32::from_bits(0x3BBD_0000),
+    f32::from_bits(0x3F54_CC00),
+];
+/// `dword_18032CA40`, `dword_18032CA44`, `dword_18032CA48`.
+const DOLBY_ADAPT_BELOW: f32 = f32::from_bits(0x3F57_6600);
+const DOLBY_ADAPT_K: f32 = f32::from_bits(0x3F98_209C);
+const DOLBY_ONE: f32 = f32::from_bits(0x3F80_0000);
+/// The crossfade window for B = 64 (0x1803317C0); w[i] + w[63 - i] = 1.
+const DOLBY_WINDOW: [u32; DOLBY_BLOCK] = [
+    0x39200000, 0x3AB00000, 0x3B760000, 0x3BF10000, 0x3C470000, 0x3C944000, 0x3CCEC000, 0x3D094000,
+    0x3D2FC000, 0x3D5AA000, 0x3D850000, 0x3D9EE000, 0x3DBAD000, 0x3DD8C000, 0x3DF8A000, 0x3E0D3000,
+    0x3E1EF800, 0x3E319000, 0x3E450000, 0x3E593000, 0x3E6E1800, 0x3E81D000, 0x3E8CE800, 0x3E984400,
+    0x3EA3DC00, 0x3EAFB400, 0x3EBBB800, 0x3EC7E800, 0x3ED43C00, 0x3EE0A800, 0x3EED2C00, 0x3EF9B800,
+    0x3F032400, 0x3F096A00, 0x3F0FAC00, 0x3F15E200, 0x3F1C0C00, 0x3F222400, 0x3F282600, 0x3F2E1200,
+    0x3F33DE00, 0x3F398C00, 0x3F3F1800, 0x3F447A00, 0x3F49B400, 0x3F4EC000, 0x3F539C00, 0x3F584200,
+    0x3F5CB400, 0x3F60EC00, 0x3F64E800, 0x3F68A600, 0x3F6C2400, 0x3F6F6000, 0x3F725600, 0x3F750400,
+    0x3F776C00, 0x3F798A00, 0x3F7B5E00, 0x3F7CE400, 0x3F7E1E00, 0x3F7F0A00, 0x3F7FA800, 0x3F7FF600,
+];
+
+/// Atmos for Headphones' peak limiter, ported from `sub_18003C9F0` (main path: enabled, no hard
+/// clip), with `sub_18003C870`'s initial state. It works on blocks of 64 frames: the gain for a
+/// block comes from its peak and the previous block's, and the block is output one block later,
+/// crossfaded from the previous gain to the new one through the window.
+pub struct DolbyLimiter {
+    /// The delayed block, per channel (+0x58).
+    delay: [[f32; DOLBY_BLOCK]; 2],
+    /// Previous block's peak (+0x3C), gain of the delayed block (+0x40), gain history (+0x78,
+    /// one entry for B = 64), g_s (+0x4C), gain (+0x50), release state s (+0x54), G_old (+0x74).
+    prev_peak: f32,
+    g_old: f32,
+    history: f32,
+    g_s: f32,
+    gain: f32,
+    s: f32,
+    g_prev: f32,
+}
+
+impl Default for DolbyLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DolbyLimiter {
+    pub fn new() -> Self {
+        // sub_18003C870: g_old = g_s = gain = s = 1, previous peak 0, history entries 1, the
+        // delay line zeroed; sub_180017330 then sets G_old = G = 0.15661621 (sub_18003C2D0).
+        Self {
+            delay: [[0.0; DOLBY_BLOCK]; 2],
+            prev_peak: 0.0,
+            g_old: 1.0,
+            history: 1.0,
+            g_s: 1.0,
+            gain: 1.0,
+            s: 1.0,
+            g_prev: DOLBY_G,
+        }
+    }
+
+    /// One block of 64 frames per channel in, the previous block out (in place), limited and
+    /// with the make-up gain.
+    pub fn block(&mut self, left: &mut [f32], right: &mut [f32]) {
+        debug_assert!(left.len() == DOLBY_BLOCK && right.len() == DOLBY_BLOCK);
+        let w = |i: usize| f32::from_bits(DOLBY_WINDOW[i]);
+        // The block's peak over both channels.
+        let mut peak = 0f32;
+        for &x in left.iter().chain(right.iter()) {
+            peak = peak.max(x.abs());
+        }
+        self.g_old = self.gain;
+        let d = peak.max(self.prev_peak) * self.g_s;
+        self.prev_peak = peak;
+        let r = if d > DOLBY_T { (DOLBY_ONE / d) * DOLBY_T } else { DOLBY_ONE };
+        // The smallest of this r and the last ones (one for B = 64), then this one kept.
+        let r_min = r.min(self.history);
+        self.history = r;
+        let target = r * self.g_s;
+        let v = if self.gain > target {
+            // attack: at once
+            self.s = r;
+            self.gain = target;
+            r
+        } else {
+            // release toward the smallest recent r
+            let c = DOLBY_RATE[4];
+            self.s = self.s * c + (r_min - c * r_min);
+            self.gain = target.min((self.g_s * self.s).max(self.gain));
+            self.s
+        };
+        self.g_s = if DOLBY_ADAPT_BELOW > v {
+            self.g_s * DOLBY_RATE[0] + v * self.g_s * DOLBY_ADAPT_K * DOLBY_RATE[1]
+        } else {
+            self.g_s * DOLBY_RATE[2] + DOLBY_RATE[3]
+        };
+        // Output the delayed block, crossfaded from the old gain to the new: 256 d (g_old G_old
+        // w[63 - i] + g G w[i]); this block goes into the delay line.
+        let old = self.g_old * self.g_prev;
+        let new = self.gain * DOLBY_G;
+        for (ch, x) in [left, right].into_iter().enumerate() {
+            for i in 0..DOLBY_BLOCK {
+                let dl = self.delay[ch][i];
+                self.delay[ch][i] = x[i];
+                x[i] = (w(DOLBY_BLOCK - 1 - i) * (old * dl) + dl * new * w(i)) * 256.0;
+            }
+        }
+        self.g_prev = DOLBY_G;
+    }
+}
 
 /// 0.985f (0x3F7C28F6): the engine limiter's ceiling, and its tracked peak at rest.
 const ENGINE_CEILING: f32 = f32::from_bits(0x3F7C_28F6);
@@ -126,6 +251,50 @@ impl EngineLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dolby_window_crossfades_to_one() {
+        for i in 0..DOLBY_BLOCK {
+            let sum = f32::from_bits(DOLBY_WINDOW[i]) + f32::from_bits(DOLBY_WINDOW[DOLBY_BLOCK - 1 - i]);
+            assert_eq!(sum, 1.0);
+        }
+    }
+
+    /// Runs `blocks` of a stereo signal through, returning the output.
+    fn dolby(signal: impl Fn(usize) -> f32, blocks: usize) -> Vec<f32> {
+        let mut lim = DolbyLimiter::new();
+        let mut out = Vec::new();
+        for b in 0..blocks {
+            let mut l: Vec<f32> = (0..DOLBY_BLOCK).map(|i| signal(b * DOLBY_BLOCK + i)).collect();
+            let mut r = l.clone();
+            lim.block(&mut l, &mut r);
+            out.extend(l);
+        }
+        out
+    }
+
+    #[test]
+    fn dolby_limiter_below_its_threshold_is_a_delay_and_the_make_up_gain() {
+        // a signal at half the threshold comes out one block later at 256 G = 40.09375 times
+        let x = |n: usize| 0.5 * DOLBY_T * (n as f32 * 0.01).sin();
+        let out = dolby(x, 40);
+        for n in DOLBY_BLOCK..out.len() {
+            let expected = x(n - DOLBY_BLOCK) * 256.0 * DOLBY_G;
+            assert!((out[n] - expected).abs() < 1e-6, "{n}: {} vs {expected}", out[n]);
+        }
+        assert_eq!(256.0 * DOLBY_G, 40.09375);
+    }
+
+    #[test]
+    fn dolby_limiter_holds_a_loud_signal_at_its_ceiling() {
+        // four times over the threshold: never above 256 G T = 0.99987 in the output
+        let x = |n: usize| 4.0 * DOLBY_T * (n as f32 * 0.05).sin();
+        let out = dolby(x, 200);
+        let ceiling = 256.0 * DOLBY_G * DOLBY_T;
+        let max = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(max <= ceiling * 1.0001, "{max} vs {ceiling}");
+        assert!(max > 0.9 * ceiling, "{max}");
+    }
 
     #[test]
     fn the_engine_limiter_delays_by_64_at_48k_and_passes_what_is_below_its_ceiling() {
