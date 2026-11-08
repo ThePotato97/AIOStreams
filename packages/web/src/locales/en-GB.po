@@ -218,6 +218,10 @@ msgstr "{selected, plural, one {# selected} other {# selected}}"
 msgid "{shown}×"
 msgstr "{shown}×"
 
+#: src/components/player/scene-overlay.tsx
+msgid "{sounding} of {total} with signal"
+msgstr "{sounding} of {total} with signal"
+
 #: src/components/player/controls.tsx
 msgid "{stepSeconds, plural, one {Back # second} other {Back # seconds}}"
 msgstr "{stepSeconds, plural, one {Back # second} other {Back # seconds}}"

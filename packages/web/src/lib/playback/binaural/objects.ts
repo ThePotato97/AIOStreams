@@ -101,6 +101,28 @@ export const BED_LABELS: Record<number, string> = {
   16: 'Rw',
 };
 
+/** How long an element has to have had no signal to count as silent, seconds. */
+export const SILENT_AFTER = 1;
+
+/**
+ * The elements of `current` with no signal in any of `recent` (the snapshots of the last
+ * `SILENT_AFTER` seconds, `current` among them): spare objects a mix doesn't use, say, rather than
+ * a moment's quiet. Snapshots with another element count (a new scene) don't count.
+ */
+export function silentElements(
+  recent: SceneSnapshot[],
+  current: SceneSnapshot
+): Set<number> {
+  const same = recent.filter(
+    (s) => s.elements.length === current.elements.length
+  );
+  const silent = new Set<number>();
+  current.elements.forEach((_, i) => {
+    if (same.every((s) => !(s.elements[i].level > 0))) silent.add(i);
+  });
+  return silent;
+}
+
 /** How much is kept around the playing position, seconds. */
 const KEEP_BEHIND = 30;
 const KEEP_AHEAD = 120;
@@ -154,6 +176,11 @@ class SceneStore {
       .filter((s) => s.time < from || s.time > to)
       .concat(snapshots)
       .sort((a, b) => a.time - b.time);
+  }
+
+  /** The snapshots from `from` to `to`, seconds. */
+  between(from: number, to: number): SceneSnapshot[] {
+    return this.snapshots.filter((s) => s.time >= from && s.time <= to);
   }
 
   /** The snapshot in effect at `time` (the last one at or before it), within a second. */

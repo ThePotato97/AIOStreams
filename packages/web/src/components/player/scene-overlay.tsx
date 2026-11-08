@@ -1,8 +1,11 @@
 import { t } from '@lingui/core/macro';
 import React from 'react';
+import { cn } from '@aiostreams/ui/core/styling';
 import {
   BED_LABELS,
+  SILENT_AFTER,
   sceneStore,
+  silentElements,
   type SceneElement,
   type SceneSnapshot,
 } from '../../lib/playback/binaural/objects';
@@ -56,12 +59,14 @@ function name(e: SceneElement, i: number, counts: Map<string, number>) {
 function Room({
   title,
   elements,
+  silent,
   axes,
   across,
   down,
 }: {
   title: string;
   elements: SceneElement[];
+  silent: Set<number>;
   axes: [number, number];
   across: string;
   down: string;
@@ -93,21 +98,25 @@ function Room({
           r={3}
           fill="white"
         />
-        {elements.map((e, i) =>
-          e.pos ? (
-            <circle
-              key={i}
-              cx={at(e.pos[axes[0]])}
-              // z grows upwards
-              cy={at(axes[1] === 2 ? 1 - e.pos[2] : e.pos[axes[1]])}
-              r={radius(e.level)}
-              fill={e.active ? COLOURS[e.kind] : 'none'}
-              fillOpacity={0.7}
-              stroke={COLOURS[e.kind]}
-              strokeOpacity={e.active ? 1 : 0.4}
-            />
-          ) : null
-        )}
+        {/* silent and inactive ones first, under the rest, and hollow */}
+        {elements
+          .map((e, i) => ({ e, quiet: !e.active || silent.has(i) }))
+          .sort((a, b) => Number(b.quiet) - Number(a.quiet))
+          .map(({ e, quiet }, i) =>
+            e.pos ? (
+              <circle
+                key={i}
+                cx={at(e.pos[axes[0]])}
+                // z grows upwards
+                cy={at(axes[1] === 2 ? 1 - e.pos[2] : e.pos[axes[1]])}
+                r={radius(e.level)}
+                fill={quiet ? 'none' : COLOURS[e.kind]}
+                fillOpacity={0.7}
+                stroke={COLOURS[e.kind]}
+                strokeOpacity={quiet ? 0.35 : 1}
+              />
+            ) : null
+          )}
       </svg>
       <figcaption className="text-[10px] leading-tight text-white/60">
         {title}
@@ -118,12 +127,18 @@ function Room({
   );
 }
 
-function Scene({ snapshot }: { snapshot: SceneSnapshot }) {
+function Scene({
+  snapshot,
+  silent,
+}: {
+  snapshot: SceneSnapshot;
+  silent: Set<number>;
+}) {
   const counts = new Map<string, number>();
-  const rows = snapshot.elements.map((e, i) => ({
-    e,
-    label: name(e, i, counts),
-  }));
+  // Named in stream order; the silent ones go to the bottom.
+  const rows = snapshot.elements
+    .map((e, i) => ({ e, label: name(e, i, counts), silent: silent.has(i) }))
+    .sort((a, b) => Number(a.silent) - Number(b.silent));
   const modes: Record<string, string> = {
     off: t`Off`,
     near: t`Near`,
@@ -136,6 +151,7 @@ function Scene({ snapshot }: { snapshot: SceneSnapshot }) {
         <Room
           title={t`From above`}
           elements={snapshot.elements}
+          silent={silent}
           axes={[0, 1]}
           across={t`left to right`}
           down={t`front to back`}
@@ -143,6 +159,7 @@ function Scene({ snapshot }: { snapshot: SceneSnapshot }) {
         <Room
           title={t`From the side`}
           elements={snapshot.elements}
+          silent={silent}
           axes={[1, 2]}
           across={t`front to back`}
           down={t`ceiling to floor`}
@@ -161,11 +178,14 @@ function Scene({ snapshot }: { snapshot: SceneSnapshot }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ e, label }, i) => (
-            <tr key={i} className={e.active ? '' : 'text-white/40'}>
+          {rows.map(({ e, label, silent: quiet }, i) => (
+            <tr key={i} className={e.active && !quiet ? '' : 'text-white/40'}>
               <td className="whitespace-nowrap text-start">
                 <span
-                  className="me-1 inline-block size-2 rounded-full"
+                  className={cn(
+                    'me-1 inline-block size-2 rounded-full',
+                    (!e.active || quiet) && 'opacity-40'
+                  )}
                   style={{ background: COLOURS[e.kind] }}
                 />
                 {label}
@@ -187,6 +207,23 @@ function Scene({ snapshot }: { snapshot: SceneSnapshot }) {
   );
 }
 
+function Counts({
+  snapshot,
+  silent,
+}: {
+  snapshot: SceneSnapshot;
+  silent: Set<number>;
+}) {
+  const total = snapshot.elements.length;
+  const sounding = total - silent.size;
+  const time = snapshot.time.toFixed(2);
+  return (
+    <span className="ms-2 font-mono text-xs font-normal text-white/60">
+      {t`${sounding} of ${total} with signal`} · {time} s
+    </span>
+  );
+}
+
 /**
  * The binaural renderer's scene at the video's current time: where each object, bed channel and
  * the LFE is, its render mode, metadata gain and input level, as the renderer in this browser
@@ -198,13 +235,25 @@ export function SceneOverlay({
   video: React.RefObject<HTMLVideoElement | null>;
 }) {
   const { live, shown } = useSceneView();
-  const [snapshot, setSnapshot] = React.useState<SceneSnapshot | null>(null);
+  const [view, setView] = React.useState<{
+    snapshot: SceneSnapshot;
+    silent: Set<number>;
+  } | null>(null);
   React.useEffect(() => {
     if (!live || !shown) return;
     let frame = 0;
     const tick = () => {
       const el = video.current;
-      setSnapshot(el ? sceneStore.at(el.currentTime) : null);
+      const snapshot = el ? sceneStore.at(el.currentTime) : null;
+      setView(
+        snapshot && {
+          snapshot,
+          silent: silentElements(
+            sceneStore.between(snapshot.time - SILENT_AFTER, snapshot.time),
+            snapshot
+          ),
+        }
+      );
       frame = requestAnimationFrame(tick);
     };
     tick();
@@ -219,14 +268,10 @@ export function SceneOverlay({
     >
       <h2 className="mb-1 font-sans text-sm font-medium">
         {t`Audio objects`}
-        {snapshot && (
-          <span className="ms-2 font-mono text-xs font-normal text-white/60">
-            {snapshot.elements.length} · {snapshot.time.toFixed(2)} s
-          </span>
-        )}
+        {view && <Counts {...view} />}
       </h2>
-      {snapshot ? (
-        <Scene snapshot={snapshot} />
+      {view ? (
+        <Scene {...view} />
       ) : (
         <p className="text-white/60">{t`Waiting for the renderer…`}</p>
       )}
