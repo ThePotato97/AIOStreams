@@ -7,6 +7,9 @@ description = "Renders Dolby Atmos (TrueHD, E-AC-3 JOC) objects to binaural ster
 license = "MIT"
 publish = false
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 anyhow = "1"
 oamd = "0.1"
