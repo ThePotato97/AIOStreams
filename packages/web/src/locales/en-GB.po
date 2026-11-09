@@ -4373,6 +4373,14 @@ msgstr "Status"
 msgid "Stereo"
 msgstr "Stereo"
 
+#: src/components/player/scene-overlay.tsx
+msgid "Stereo bypass L"
+msgstr "Stereo bypass L"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Stereo bypass R"
+msgstr "Stereo bypass R"
+
 #: src/lib/playback/convert.ts
 msgid "Still downloading; it starts when it's ready."
 msgstr "Still downloading; it starts when it's ready."

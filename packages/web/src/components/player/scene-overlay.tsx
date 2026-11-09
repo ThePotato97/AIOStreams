@@ -43,6 +43,7 @@ const COLOURS: Record<SceneElement['kind'], string> = {
   bed: '#fbbf24',
   isf: '#a78bfa',
   lfe: '#f87171',
+  bypass: '#e5e5e5',
   unknown: '#a3a3a3',
 };
 const OFF = '#737373';
@@ -54,6 +55,9 @@ function names(elements: SceneElement[]): string[] {
     const bed = e.bed ?? 0;
     if (e.kind === 'bed') return BED_LABELS[bed] ?? t`Bed ${bed}`;
     if (e.kind === 'lfe') return t`LFE`;
+    // E's slots 17/18: summed into output L/R, never rendered in the room
+    if (e.kind === 'bypass')
+      return e.bed === 1 ? t`Stereo bypass R` : t`Stereo bypass L`;
     const n = (counts.get(e.kind) ?? 0) + 1;
     counts.set(e.kind, n);
     if (e.kind === 'object') return t`Object ${n}`;

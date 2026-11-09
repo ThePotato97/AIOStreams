@@ -106,7 +106,7 @@ pub fn element(s: Static) -> crate::input::Element {
         Static::Bed(id) => Element::Bed(id),
         Static::Lfe => Element::Lfe,
         Static::At(_) => Element::Object,
-        Static::Bypass(side) => Element::Bed(side as u32 + 1),
+        Static::Bypass(side) => Element::Bypass(side),
     }
 }
 

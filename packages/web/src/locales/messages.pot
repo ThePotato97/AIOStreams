@@ -4372,6 +4372,14 @@ msgstr ""
 msgid "Stereo"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Stereo bypass L"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Stereo bypass R"
+msgstr ""
+
 #: src/lib/playback/convert.ts
 msgid "Still downloading; it starts when it's ready."
 msgstr ""

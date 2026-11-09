@@ -19,6 +19,9 @@ pub enum Element {
     Lfe,
     /// An intermediate spatial format element.
     Isf,
+    /// One of the stereo-bypass inputs (0 left, 1 right): summed into output L/R, never rendered
+    /// in the room (E slots 17/18).
+    Bypass(usize),
 }
 
 pub trait Feed {
@@ -80,14 +83,15 @@ impl Snapshots {
                 Some(Element::Bed(id)) => (1.0, *id as f64),
                 Some(Element::Lfe) => (2.0, 0.0),
                 Some(Element::Isf) => (3.0, 0.0),
+                Some(Element::Bypass(side)) => (4.0, *side as f64),
                 None => (-1.0, 0.0),
             };
             let level = (o.sums.get(i).copied().unwrap_or(0.0) / o.count as f64).sqrt();
             let (mode, active, pos, gain) = match *s {
                 Source::Positioned { pos, mode, gain, active, .. } => (mode as i32 as f64, active as u8 as f64, pos.map(f64::from), gain as f64),
                 Source::Lfe { gain } => (-1.0, 1.0, [f64::NAN; 3], gain as f64),
-                // drawn where E places the pair (x 0/1), with no render mode
-                Source::Bypass { side, gain } => (-1.0, 1.0, [side as f64, 0.0, 0.0], gain as f64),
+                // no render mode and no place in the room: straight to output L/R
+                Source::Bypass { gain, .. } => (-1.0, 1.0, [f64::NAN; 3], gain as f64),
                 Source::Silent => (-1.0, 0.0, [f64::NAN; 3], 0.0),
             };
             self.data.extend_from_slice(&[kind, bed, mode, active, pos[0], pos[1], pos[2], gain, level]);
@@ -306,7 +310,7 @@ mod snapshot_tests {
             vec![Source::Bypass { side: 0, gain: 1.0 }, Source::Bypass { side: 1, gain: 1.0 }]
         }
         fn elements(&self) -> Vec<Element> {
-            vec![Element::Bed(1), Element::Bed(2)]
+            vec![Element::Bypass(0), Element::Bypass(1)]
         }
         fn bypassed(&self) -> Vec<bool> {
             vec![true, true]
@@ -324,8 +328,9 @@ mod snapshot_tests {
         let size = 2 + 2 * SNAPSHOT_FIELDS;
         let (l, r) = (&d[size + 2..size + 11], &d[size + 11..size + 20]);
         assert!((l[8] - 1.25).abs() < 1e-6 && (r[8] - 0.5).abs() < 1e-6, "{} {}", l[8], r[8]);
-        // drawn where E puts the pair, with no render mode
-        assert_eq!((l[2], l[4], r[4]), (-1.0, 0.0, 1.0));
+        // the bypass pair, left then right, with no render mode and no position
+        assert_eq!((l[0], l[1], r[0], r[1], l[2]), (4.0, 0.0, 4.0, 1.0, -1.0));
+        assert!(l[4].is_nan() && r[4].is_nan());
     }
 
     #[test]
