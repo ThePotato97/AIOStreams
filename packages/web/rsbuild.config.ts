@@ -102,10 +102,17 @@ function atmosWasmUrl(): string {
 }
 
 /**
- * The E-AC-3 core decoder for in-browser binaural rendering, libav.js
- * (scripts/build-libav-eac3.sh). Without it, E-AC-3 binaural rendering stays on the server.
+ * FFmpeg's decoders for in-browser binaural rendering, libav.js (scripts/build-libav-eac3.sh), and
+ * the codecs they decode, as the build lists them in decoders.json (one from before it did has
+ * the AC-3/E-AC-3 decoder alone). Without it, those codecs' binaural rendering stays on the
+ * server.
  */
 const LIBAV_EAC3 = existsSync(new URL('libav/libav.wasm', BINAURAL));
+const LIBAV_DECODERS: string[] = !LIBAV_EAC3
+  ? []
+  : existsSync(new URL('libav/decoders.json', BINAURAL))
+    ? JSON.parse(readFileSync(new URL('libav/decoders.json', BINAURAL), 'utf8'))
+    : ['eac3', 'ac3'];
 
 /**
  * `--env-mode standalone` builds the app on its own, with a server list,
@@ -120,7 +127,7 @@ export default defineConfig(async ({ envMode }) => {
     __APP_COMMIT__: JSON.stringify(buildCommit()),
     __UNFINISHED_LOCALES__: JSON.stringify(await unfinishedLocales()),
     __LICENSES_FILE__: JSON.stringify(LICENSES_FILE),
-    __LIBAV_EAC3__: JSON.stringify(LIBAV_EAC3),
+    __LIBAV_DECODERS__: JSON.stringify(LIBAV_DECODERS),
   };
   const source = {
     entry: { index: './src/main.tsx' },

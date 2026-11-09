@@ -1,7 +1,8 @@
 /*
- * Converts the transcoder's TrueHD or E-AC-3 DASH audio to FLAC, segment by segment: the binaural
- * render (atmos-render as WebAssembly; for E-AC-3 a core decoder, libav.js, eac3-core.ts, decodes
- * the core the renderer's JOC rebuilds the objects from) and the speaker version the transcoder
+ * Converts the transcoder's TrueHD, E-AC-3, AC-3 or DTS DASH audio to FLAC, segment by segment: the
+ * binaural render (atmos-render as WebAssembly; for E-AC-3 and AC-3 a core decoder, libav.js,
+ * eac3-core.ts, decodes the core the renderer's JOC rebuilds the objects from; for DTS it decodes
+ * the channels the renderer takes as they are) and the speaker version the transcoder
  * would send with headphones off (speakers.ts), together in each frame where they fit, so the page
  * switches between them at once. Runs in a worker; kept free of worker APIs so it can be tested on
  * its own.
@@ -46,6 +47,7 @@ export interface RendererExports {
   ar_free(ptr: number, len: number): void;
   ar_new(modes: number): number;
   ar_new_eac3(modes: number, windowsLoudness: number): number;
+  ar_new_decoded(modes: number): number;
   ar_drop(session: number): void;
   ar_push(session: number, ptr: number, len: number): number;
   ar_push_pcm(
@@ -81,7 +83,7 @@ export class BinauralConverter {
   /** The renderer's scene snapshots since `takeSnapshots` (the debug view). */
   private snapshots: SceneSnapshot[] = [];
   private decoder: CoreDecoder | null = null;
-  /** E-AC-3: the core decoded again with FFmpeg's default options, as the transcoder decodes it. */
+  /** Decoded codecs: decoded again with FFmpeg's default options, as the transcoder decodes them. */
   private speakerDecoder: CoreDecoder | null = null;
   private readonly mix: SpeakerMix;
   /** Channels in each output frame. */
@@ -91,13 +93,15 @@ export class BinauralConverter {
   private queued = 0;
 
   /**
-   * `cores`: E-AC-3, with new core decoders for each session (one set up for the renderer, one with
-   * FFmpeg's defaults for the speaker version); without, TrueHD.
+   * `cores`: E-AC-3, AC-3 and DTS, with new decoders for each session (one set up for the renderer,
+   * one with FFmpeg's defaults for the speaker version) and the renderer session they feed (`eac3`:
+   * the Dolby core, its metadata read from the bytes; `decoded`: channels alone); without, TrueHD.
    */
   constructor(
     private readonly r: RendererExports,
     readonly plan: OutputPlan,
     private readonly cores?: {
+      session: 'eac3' | 'decoded';
       render: () => CoreDecoder;
       speakers: () => CoreDecoder;
     }
@@ -123,9 +127,11 @@ export class BinauralConverter {
   private restart(at: number) {
     if (this.session) this.r.ar_drop(this.session);
     // The Reference Player's loudness, as the transcoder's renderer.
-    this.session = this.cores
-      ? this.r.ar_new_eac3(this.plan.modes, 0)
-      : this.r.ar_new(this.plan.modes);
+    this.session = !this.cores
+      ? this.r.ar_new(this.plan.modes)
+      : this.cores.session === 'decoded'
+        ? this.r.ar_new_decoded(this.plan.modes)
+        : this.r.ar_new_eac3(this.plan.modes, 0);
     if (!this.session) throw new Error('The binaural renderer could not start');
     // A new session starts from fresh decoders, as the transcoder starts a new FFmpeg.
     this.decoder?.close();
@@ -197,7 +203,7 @@ export class BinauralConverter {
         duration += s.duration;
       }
       const units = fragment.samples.map((s) => s.data);
-      // E-AC-3: the speaker version first, so it's queued before the render that it goes with
+      // Decoded codecs: the speaker version first, so it's queued before the render it goes with
       const speakers = this.speakerDecoder?.decode(units);
       if (speakers)
         this.queueSpeakers(

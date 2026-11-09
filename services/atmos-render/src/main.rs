@@ -1,8 +1,12 @@
-//! atmos-render: reads a raw Dolby TrueHD or E-AC-3 elementary stream on stdin and
+//! atmos-render: reads a raw TrueHD, E-AC-3, AC-3 or DTS elementary stream on stdin and
 //! writes binaural stereo, 48 kHz 32-bit float little-endian interleaved, on stdout; the output
 //! has the input's length and timing.
 //!
 //!   ffmpeg -i film.mkv -map 0:a:0 -c copy -f truehd - | atmos-render --format truehd > out.f32
+//!
+//! `--format` is `truehd`, `eac3`, `ac3` or `dts` (FFmpeg's raw formats); E-AC-3, AC-3 and DTS are
+//! decoded by an FFmpeg child (`--ffmpeg`, default `ffmpeg`). DTS (and its DTS-HD extensions) is
+//! channels only, decoded with FFmpeg's defaults (`decoded_in.rs`).
 //!
 //! `--modes stream` (default) renders each element in the stream's own headphone mode (Off,
 //! Near, Mid, Far; Mid where it has none), as Dolby's Reference Player does; `--modes windows`
@@ -20,6 +24,7 @@
 use std::io::{BufWriter, Read, Write};
 
 use anyhow::{Result, bail};
+use atmos_render::decoded_in::Decoded;
 use atmos_render::eac3_in::Eac3;
 use atmos_render::input::{Feed, Output, Pipeline};
 use atmos_render::loudness::Loudness;
@@ -42,7 +47,8 @@ fn main() -> Result<()> {
     };
     let mut feed: Box<dyn Feed> = match value("--format") {
         Some("truehd") | None => Box::new(TrueHd::new(modes)),
-        Some("eac3") => Box::new(Eac3::new(value("--ffmpeg").unwrap_or("ffmpeg"), modes, loudness)?),
+        Some(f @ ("eac3" | "ac3")) => Box::new(Eac3::new(value("--ffmpeg").unwrap_or("ffmpeg"), f, modes, loudness)?),
+        Some("dts") => Box::new(Decoded::new(value("--ffmpeg").unwrap_or("ffmpeg"), "dts", modes)?),
         Some(other) => bail!("unsupported --format {other}"),
     };
     let output = match value("--output") {

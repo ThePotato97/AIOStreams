@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  define: { __LIBAV_EAC3__: 'false' },
+  define: { __LIBAV_DECODERS__: '[]' },
   resolve: {
     alias: {
       // No workers here: the binaural renderer's own tests load the WebAssembly directly.

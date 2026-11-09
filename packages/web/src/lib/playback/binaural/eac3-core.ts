@@ -1,8 +1,9 @@
 /*
- * The E-AC-3 core decoder for binaural rendering in the browser: FFmpeg's decoder, built as
- * libav.js (scripts/build-libav-eac3.sh), set up as the transcoder's renderer sets up its FFmpeg
- * child for the Reference Player's loudness (atmos-render's loudness.rs: LINE mode, dialogue at
- * -31 dBFS). Runs in the binaural worker, synchronously (libav.js in "direct" mode).
+ * The decoders for binaural rendering in the browser: FFmpeg's, built as libav.js
+ * (scripts/build-libav-eac3.sh). E-AC-3 and AC-3 are set up as the transcoder's renderer sets up
+ * its FFmpeg child for the Reference Player's loudness (atmos-render's loudness.rs: LINE mode,
+ * dialogue at -31 dBFS); DTS with FFmpeg's defaults, as the renderer's child decodes it
+ * (decoded_in.rs). Runs in the binaural worker, synchronously (libav.js in "direct" mode).
  */
 
 /** The part of a libav.js instance (direct mode, `_sync` calls) used here. */
@@ -25,7 +26,8 @@ export interface LibAVSync {
     packets: { data: Uint8Array }[],
     config?: boolean | { fin?: boolean; ignoreErrors?: boolean }
   ): {
-    data: Float32Array[];
+    /** Per channel for planar formats: floats, or integers for DTS-HD's lossless output. */
+    data: (Float32Array | Int32Array | Int16Array)[];
     channels?: number;
     channel_layout?: number;
     nb_samples: number;
@@ -41,7 +43,18 @@ export const REFERENCE_OPTIONS: [string, string][] = [
   ['target_level', '-31'],
 ];
 const AV_OPT_SEARCH_CHILDREN = 1;
+const AV_SAMPLE_FMT_S16P = 6;
+const AV_SAMPLE_FMT_S32P = 7;
 const AV_SAMPLE_FMT_FLTP = 8;
+/**
+ * Each planar format's scale to float, as swresample converts it (the renderer's FFmpeg child
+ * writes pcm_f32le): integers over 2^15 or 2^31.
+ */
+const SCALE: Record<number, number> = {
+  [AV_SAMPLE_FMT_FLTP]: 1,
+  [AV_SAMPLE_FMT_S32P]: 1 / 2 ** 31,
+  [AV_SAMPLE_FMT_S16P]: 1 / 2 ** 15,
+};
 
 /** Decoded core PCM: interleaved, in FFmpeg's (WAV) channel order. */
 export interface CorePcm {
@@ -58,21 +71,30 @@ export interface CoreDecoder {
 }
 
 /**
- * A core decoder with these options; none (`[]`) is FFmpeg's defaults, as the transcoder decodes
- * E-AC-3 for speakers.
+ * The E-AC-3 core decoder with these options; none (`[]`) is FFmpeg's defaults, as the transcoder
+ * decodes E-AC-3 for speakers. It reads AC-3 too, as the renderer's FFmpeg child does.
  */
 export function eac3Core(
   libav: LibAVSync,
   options: [string, string][] = REFERENCE_OPTIONS
 ): CoreDecoder {
-  const codec = libav.avcodec_find_decoder_by_name_sync('eac3');
-  if (!codec) throw new Error('libav.js has no E-AC-3 decoder');
+  return libavDecoder(libav, 'eac3', options);
+}
+
+/** FFmpeg's decoder `name` ("eac3", "ac3", "dca") with these options. */
+export function libavDecoder(
+  libav: LibAVSync,
+  name: string,
+  options: [string, string][] = []
+): CoreDecoder {
+  const codec = libav.avcodec_find_decoder_by_name_sync(name);
+  if (!codec) throw new Error(`libav.js has no ${name} decoder`);
   const ctx = libav.avcodec_alloc_context3_sync(codec);
-  for (const [name, value] of options)
-    if (libav.av_opt_set_sync(ctx, name, value, AV_OPT_SEARCH_CHILDREN) < 0)
-      throw new Error(`The E-AC-3 decoder refused ${name}`);
+  for (const [option, value] of options)
+    if (libav.av_opt_set_sync(ctx, option, value, AV_OPT_SEARCH_CHILDREN) < 0)
+      throw new Error(`The ${name} decoder refused ${option}`);
   if (libav.avcodec_open2_sync(ctx, codec, 0) < 0)
-    throw new Error('The E-AC-3 decoder could not open');
+    throw new Error(`The ${name} decoder could not open`);
   const pkt = libav.av_packet_alloc_sync();
   const frame = libav.av_frame_alloc_sync();
   return {
@@ -94,10 +116,12 @@ export function eac3Core(
       const pcm = new Float32Array(total * channels);
       let at = 0;
       for (const f of frames) {
-        if (f.format !== AV_SAMPLE_FMT_FLTP || f.data.length !== channels)
-          throw new Error('Unexpected E-AC-3 decoder output');
+        const scale = SCALE[f.format];
+        if (scale === undefined || f.data.length !== channels)
+          throw new Error(`Unexpected ${name} decoder output`);
         for (let i = 0; i < f.nb_samples; i++)
-          for (let ch = 0; ch < channels; ch++) pcm[at++] = f.data[ch][i];
+          for (let ch = 0; ch < channels; ch++)
+            pcm[at++] = f.data[ch][i] * scale;
       }
       return { channels, mask, pcm };
     },

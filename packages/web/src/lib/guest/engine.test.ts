@@ -492,6 +492,20 @@ describe('binaural audio rendered in the browser', () => {
     await start(engine);
     expect(prepares.at(-1)!.capabilities?.clientBinaural).toEqual(['truehd']);
   });
+  it('is asked of the browser again for another audio track', async () => {
+    asked.extra = { clientBinaural: ['truehd'] };
+    answer = (body) => ({
+      clientBinaural: !!body.capabilities?.clientBinaural,
+    });
+    const { engine } = setup();
+    await start(engine);
+    player().fire('error', shakaError(3, 3018));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)!.capabilities?.clientBinaural).toBeUndefined();
+    engine.setAudio!('2');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)!.capabilities?.clientBinaural).toEqual(['truehd']);
+  });
 });
 
 describe('binaural audio that fails to play', () => {
@@ -511,7 +525,11 @@ describe('binaural audio that fails to play', () => {
     expect(prepares[1].capabilities?.clientBinaural).toBeUndefined();
     expect(failures()).toHaveLength(0);
     expect(toasts.messages).toHaveLength(1);
-    // the next file has it again
+    // another audio track has it again, and so does the next file
+    engine.setAudio!('2');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)!.capabilities).toMatchObject({ binaural: true });
+    expect(prepares.at(-1)!.capabilities?.clientBinaural).toEqual(['truehd']);
     await start(engine);
     expect(prepares.at(-1)!.capabilities).toMatchObject({ binaural: true });
   });
@@ -554,6 +572,29 @@ describe('a stream the browser cannot decode', () => {
     expect(prepares).toHaveLength(2);
     expect(failures()).toHaveLength(1);
     expect(failures()[0].error).toContain('VIDEO_ERROR');
+  });
+  it('is played as it is again for another audio track, where the audio failed', async () => {
+    const { engine } = setup();
+    await start(engine, 30_000);
+    buffers.failed = { mimeType: 'audio/mp4; codecs="ac-3"' };
+    for (let i = 0; i < 3; i++) {
+      player().fire('error', shakaError(3, 3014, { data: [0, null] }));
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(prepares.at(-1)).toMatchObject({ force: true });
+    engine.setAudio!('2');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)).toMatchObject({ force: false, audio: 2 });
+  });
+  it('stays converted in full for another audio track, where the video failed', async () => {
+    const { engine } = setup();
+    await start(engine, 30_000);
+    for (let i = 0; i < 3; i++) player().fire('error', videoError());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)).toMatchObject({ force: true });
+    engine.setAudio!('2');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)).toMatchObject({ force: true, audio: 2 });
   });
   it('is converted in full when the browser has no decoder for its video', async () => {
     // Shaka refuses the manifest outright: no stream it can play.

@@ -26,8 +26,11 @@ declare module 'atmos-render-wasm-url' {
   export const wasmUrl: string | null;
 }
 
-/** Whether the E-AC-3 core decoder's libav.js was built (scripts/build-libav-eac3.sh). */
-declare const __LIBAV_EAC3__: boolean;
+/**
+ * The codecs ("eac3", "ac3", "dts") the built libav.js decodes for binaural rendering in the page
+ * (scripts/build-libav-eac3.sh); none where it wasn't built.
+ */
+declare const __LIBAV_DECODERS__: string[];
 
 /** Loads that libav.js, or null where it wasn't built (an rsbuild alias). */
 declare module 'libav-eac3' {

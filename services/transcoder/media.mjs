@@ -111,8 +111,19 @@ function rate(value) {
     .map(Number);
   return b && Number.isFinite(a / b) ? a / b : 0;
 }
-/** Audio codecs atmos-render reads, and the raw format FFmpeg hands them over in. */
-export const BINAURAL_CODECS = { truehd: 'truehd', eac3: 'eac3' };
+/**
+ * Audio codecs atmos-render reads, and the raw format FFmpeg hands them over in: TrueHD and
+ * E-AC-3 (with Atmos where they carry it), AC-3, and DTS (DTS-HD included; channels only, as
+ * FFmpeg decodes it).
+ */
+export const BINAURAL_CODECS = {
+  truehd: 'truehd',
+  eac3: 'eac3',
+  ac3: 'ac3',
+  dts: 'dts',
+};
+/** The ones atmos-render decodes with an FFmpeg child of its own. */
+const DECODED_BY_FFMPEG = new Set(['eac3', 'ac3', 'dts']);
 /**
  * The demuxing FFmpeg of a binaural conversion: the source's audio track as a raw elementary
  * stream on pipe:1 for atmos-render, and the same packets' timestamps (framemd5, flushed per
@@ -170,7 +181,7 @@ export function rendererArgs(policy) {
   return [
     '--format',
     format,
-    ...(format === 'eac3' ? ['--ffmpeg', 'ffmpeg'] : []),
+    ...(DECODED_BY_FFMPEG.has(format) ? ['--ffmpeg', 'ffmpeg'] : []),
     // Without one, each element in the stream's own mode (Mid where it has none).
     ...(modes ? ['--modes', modes] : []),
   ];
@@ -232,8 +243,8 @@ export function select(meta, request) {
     (video.dovi?.profile !== 5 || caps.dovi === true);
   // Dolby Vision copied with its RPUs for the player to draw
   const dovi = copyVideo && !!video.dovi && caps.dovi === true;
-  // A track the renderer (atmos-render, Dolby Atmos for Headphones' renderer) reads: TrueHD or
-  // E-AC-3 at 48 kHz.
+  // A track the renderer (atmos-render, Dolby Atmos for Headphones' renderer) reads: TrueHD,
+  // E-AC-3, AC-3 or DTS at 48 kHz.
   const renderable =
     !!audio &&
     BINAURAL_CODECS[audio.codec] !== undefined &&
@@ -750,9 +761,13 @@ export function manifestStart(mpd) {
   return Number.isFinite(start) ? start : null;
 }
 /** The manifest with the video's full codec string in place of FFmpeg's bare one. */
-/** The manifest's codec string for an audio track copied as it is, where FFmpeg writes none. */
+/**
+ * The manifest's codec string for an audio track copied as it is, where FFmpeg writes none:
+ * TrueHD's, and DTS's (MP4's object type for it, as FFmpeg 6 writes).
+ */
+const COPIED_CODECS = { truehd: 'mlpa', dts: 'mp4a.a9' };
 export function audioCodec(policy) {
-  return policy.copyAudio && policy.audio?.codec === 'truehd' ? 'mlpa' : null;
+  return (policy.copyAudio && COPIED_CODECS[policy.audio?.codec]) || null;
 }
 /** Fills in an audio representation's empty codec string (FFmpeg writes none for TrueHD). */
 export function withAudioCodec(mpd, codec) {

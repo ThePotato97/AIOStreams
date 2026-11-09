@@ -5,6 +5,7 @@
 pub mod bits;
 pub mod channels;
 pub mod complex;
+pub mod decoded_in;
 pub mod direct;
 pub mod eac3_in;
 pub mod filterbank;

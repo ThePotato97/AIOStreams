@@ -64,6 +64,9 @@ export function codec(track: GuestTrack): string | null {
       return 'ac-3';
     case 'eac3':
       return 'ec-3';
+    // as the transcoder's DASH copy names it (MP4's object type for DTS)
+    case 'dts':
+      return 'mp4a.a9';
     case 'flac':
       return 'flac';
     default:
@@ -204,7 +207,7 @@ export async function browserCapabilities(
     hdr,
     surround,
     lossless,
-    // On headphones TrueHD and E-AC-3 are rendered to binaural (Dolby Atmos for Headphones'
+    // On headphones TrueHD, E-AC-3, AC-3 and DTS are rendered to binaural (Dolby Atmos for Headphones'
     // renderer), by the server or, for the codecs below, here; other audio is virtualised here.
     binaural: headphones,
     // The listener's headphone mode, for the server's renderer (the page applies its own).

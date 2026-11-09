@@ -9,7 +9,26 @@ import {
   type OutputPlan,
   type RendererExports,
 } from './convert';
-import { eac3Core } from './eac3-core';
+import { libavDecoder, REFERENCE_OPTIONS } from './eac3-core';
+import type { Codec } from './codecs';
+
+/**
+ * Each codec libav.js decodes: FFmpeg's decoder, with the options the renderer's own FFmpeg child
+ * uses (atmos-render's loudness.rs for the Dolby ones, FFmpeg's defaults for DTS), and the
+ * renderer session it feeds (`eac3`: the Dolby core, its EMDF read from the bytes; `decoded`:
+ * channels alone). The speaker version is decoded with FFmpeg's defaults, as the transcoder
+ * decodes these for speakers.
+ */
+const DECODERS: Partial<
+  Record<
+    Codec,
+    { name: string; options: [string, string][]; session: 'eac3' | 'decoded' }
+  >
+> = {
+  eac3: { name: 'eac3', options: REFERENCE_OPTIONS, session: 'eac3' },
+  ac3: { name: 'ac3', options: REFERENCE_OPTIONS, session: 'eac3' },
+  dts: { name: 'dca', options: [], session: 'decoded' },
+};
 
 let converter: BinauralConverter | null = null;
 let loading: Promise<BinauralConverter> | null = null;
@@ -19,7 +38,7 @@ type Request =
       id: number;
       type: 'load';
       wasmUrl: string;
-      codec: 'truehd' | 'eac3';
+      codec: Codec;
       plan: OutputPlan;
     }
   | { id: number; type: 'init' | 'segment'; data: ArrayBuffer };
@@ -29,22 +48,24 @@ self.onmessage = async (event: MessageEvent<Request>) => {
   try {
     if (message.type === 'load') {
       loading = (async () => {
+        const decoder = DECODERS[message.codec];
         const [{ instance }, libav] = await Promise.all([
           WebAssembly.instantiateStreaming(fetch(message.wasmUrl), {}),
-          // E-AC-3: FFmpeg's decoder for the core, as libav.js
-          message.codec === 'eac3'
+          // FFmpeg's decoder, as libav.js; TrueHD is decoded by the renderer itself
+          decoder
             ? (loadLibav?.() ??
-              Promise.reject(new Error('The E-AC-3 decoder was not built')))
+              Promise.reject(new Error('The libav.js decoders were not built')))
             : null,
         ]);
         converter = new BinauralConverter(
           instance.exports as unknown as RendererExports,
           message.plan,
-          libav
+          decoder && libav
             ? {
-                render: () => eac3Core(libav),
-                // FFmpeg's defaults, as the transcoder decodes E-AC-3 for speakers
-                speakers: () => eac3Core(libav, []),
+                session: decoder.session,
+                render: () =>
+                  libavDecoder(libav, decoder.name, decoder.options),
+                speakers: () => libavDecoder(libav, decoder.name),
               }
             : undefined
         );

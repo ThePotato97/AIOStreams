@@ -21,7 +21,13 @@ import {
   type OutputPlan,
   type RendererExports,
 } from './convert';
-import { eac3Core, type LibAVSync } from './eac3-core';
+import {
+  eac3Core,
+  libavDecoder,
+  REFERENCE_OPTIONS,
+  type CoreDecoder,
+  type LibAVSync,
+} from './eac3-core';
 
 const has = (cmd: string) => {
   try {
@@ -427,8 +433,21 @@ const libav = async (): Promise<LibAVSync> => {
   });
 };
 
-/** An E-AC-3 source's audio as the transcoder copies it into DASH: its init and media segments. */
-function eac3Dash(source: string, name: string) {
+/** The DASH copy's codec string, and the renderer's format, for each codec decoded with libav.js. */
+const DECODED = {
+  eac3: { written: 'ec-3', format: 'eac3', decoder: 'eac3', session: 'eac3' },
+  ac3: { written: 'ac-3', format: 'ac3', decoder: 'ac3', session: 'eac3' },
+  dts: {
+    written: 'mp4a.a9',
+    format: 'dts',
+    decoder: 'dca',
+    session: 'decoded',
+  },
+} as const;
+type DecodedCodec = keyof typeof DECODED;
+
+/** A source's audio as the transcoder copies it into DASH: its init and media segments. */
+function eac3Dash(source: string, name: string, codec: DecodedCodec = 'eac3') {
   const out = join(dir, name);
   execFileSync('mkdir', ['-p', out]);
   execFileSync('ffmpeg', [
@@ -449,7 +468,7 @@ function eac3Dash(source: string, name: string) {
     join(out, 'manifest.mpd'),
   ]);
   expect(readFileSync(join(out, 'manifest.mpd'), 'utf8')).toContain(
-    'codecs="ec-3"'
+    `codecs="${DECODED[codec].written}"`
   );
   const files = readdirSync(out);
   const init = readFileSync(
@@ -465,19 +484,80 @@ function eac3Dash(source: string, name: string) {
   return { out, init, chunks };
 }
 
-/** Renders an E-AC-3 stream through DASH in the browser's way, and natively, and compares. */
+/** The converter's decoders for a codec, as the worker sets them up. */
+const cores = (lib: LibAVSync, codec: DecodedCodec) => {
+  const { decoder, session } = DECODED[codec];
+  // the Dolby ones at the Reference Player's loudness; DTS with FFmpeg's defaults (worker.ts)
+  const options = codec === 'dts' ? [] : REFERENCE_OPTIONS;
+  return {
+    session,
+    render: () => libavDecoder(lib, decoder, options),
+    speakers: () => libavDecoder(lib, decoder),
+  };
+};
+
+/**
+ * FFmpeg's own decode of a raw stream with its defaults, handed out `perUnit` samples per access
+ * unit: libav.js's decoder (the same decoder) where this libav.js build lacks it.
+ */
+function ffmpegDecoder(
+  source: string,
+  format: string,
+  perUnit: number,
+  channels: number,
+  mask: number
+): () => CoreDecoder {
+  const raw = join(dir, `ffmpeg-decoder.${format}`);
+  execFileSync('ffmpeg', [
+    '-v',
+    'error',
+    '-i',
+    source,
+    '-map',
+    '0:a',
+    '-c',
+    'copy',
+    '-f',
+    format,
+    '-y',
+    raw,
+  ]);
+  const out = execFileSync(
+    'ffmpeg',
+    ['-v', 'error', '-f', format, '-i', raw, '-f', 'f32le', '-'],
+    { maxBuffer: 1 << 28 }
+  );
+  const all = new Float32Array(out.buffer, out.byteOffset, out.byteLength / 4);
+  return () => {
+    let at = 0;
+    return {
+      decode(units) {
+        const n = Math.min(units.length * perUnit * channels, all.length - at);
+        if (n <= 0) return null;
+        const pcm = all.slice(at, at + n);
+        at += n;
+        return { channels, mask, pcm };
+      },
+      close() {},
+    };
+  };
+}
+
+/** Renders a stream through DASH in the browser's way, and natively, and compares. */
 async function compareEac3(
   source: string,
   name: string,
   tolerance: number,
-  atmos = false
+  atmos = false,
+  codec: DecodedCodec = 'eac3',
+  decoders?: ReturnType<typeof cores>
 ) {
-  const { out, init, chunks } = eac3Dash(source, name);
-  const lib = await libav();
-  const conv = new BinauralConverter(await renderer(), BINAURAL, {
-    render: () => eac3Core(lib),
-    speakers: () => eac3Core(lib, []),
-  });
+  const { out, init, chunks } = eac3Dash(source, name, codec);
+  const conv = new BinauralConverter(
+    await renderer(),
+    BINAURAL,
+    decoders ?? cores(await libav(), codec)
+  );
   const file = join(out, 'binaural.mp4');
   writeFileSync(
     file,
@@ -504,7 +584,8 @@ async function compareEac3(
   } else expect(objects).toHaveLength(0);
   expect(probe(file).streams[0].codec_name).toBe('flac');
   const got = decode(file);
-  const raw = join(out, 'src.ec3');
+  const raw = join(out, 'src.raw');
+  const format = DECODED[codec].format;
   execFileSync('ffmpeg', [
     '-v',
     'error',
@@ -515,10 +596,10 @@ async function compareEac3(
     '-c',
     'copy',
     '-f',
-    'eac3',
+    format,
     raw,
   ]);
-  const native = execFileSync(nativePath, ['--format', 'eac3'], {
+  const native = execFileSync(nativePath, ['--format', format], {
     input: readFileSync(raw),
     maxBuffer: 1 << 30,
   });
@@ -546,15 +627,60 @@ async function compareEac3(
   expect(max).toBeLessThan(tolerance);
 }
 
+/**
+ * Tones quiet enough that the output stays under the limiters with the Movie profile's volmax:
+ * their attack would magnify the two decoders' last-bit differences.
+ */
+const QUIET = [220, 330, 440, 550, 60, 770]
+  .map((f) => `0.05*sin(2*PI*${f}*t)`)
+  .join('|');
+/** Whether this libav.js build has the DTS decoder (decoders.json; an older build doesn't). */
+const haveDca =
+  existsSync(join(libavDir, 'decoders.json')) &&
+  (
+    JSON.parse(
+      readFileSync(join(libavDir, 'decoders.json'), 'utf8')
+    ) as string[]
+  ).includes('dts');
+
+describe.skipIf(!ffmpeg || !haveWasm || !existsSync(nativePath))(
+  "DTS from its decoder's PCM",
+  () => {
+    it('renders 5.1 DTS as the native renderer does', async () => {
+      const src = join(dir, 'src-dts-pcm.mkv');
+      execFileSync('ffmpeg', [
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        `aevalsrc=${QUIET}:c=5.1(side):s=48000`,
+        '-t',
+        '12',
+        '-c:a',
+        'dca',
+        '-strict',
+        '-2',
+        '-b:a',
+        '1509k',
+        src,
+      ]);
+      // FFmpeg's DTS encoder writes 512-sample frames; 5.1(side) is WAV's 0x60F
+      const decoder = ffmpegDecoder(src, 'dts', 512, 6, 0x60f);
+      await compareEac3(src, 'dts-pcm', 1e-6, false, 'dts', {
+        session: 'decoded',
+        render: decoder,
+        speakers: decoder,
+      });
+    });
+  }
+);
+
 describe.skipIf(!ffmpeg || !haveWasm || !haveLibav || !existsSync(nativePath))(
-  'E-AC-3 with the libav.js core decoder',
+  'E-AC-3, AC-3 and DTS with the libav.js decoders',
   () => {
     it('renders 5.1 E-AC-3 as the native renderer does', async () => {
-      // quiet enough that the output stays under the limiters with the Movie profile's volmax:
-      // their attack would magnify the two decoders' last-bit differences
-      const tones = [220, 330, 440, 550, 60, 770]
-        .map((f) => `0.05*sin(2*PI*${f}*t)`)
-        .join('|');
+      const tones = QUIET;
       const src = join(dir, 'src-eac3.mkv');
       execFileSync('ffmpeg', [
         '-v',
@@ -602,6 +728,7 @@ describe.skipIf(!ffmpeg || !haveWasm || !haveLibav || !existsSync(nativePath))(
       const lib = await libav();
       const convert = async (plan: OutputPlan, name: string) => {
         const conv = new BinauralConverter(await renderer(), plan, {
+          session: 'eac3',
           render: () => eac3Core(lib),
           speakers: () => eac3Core(lib, []),
         });
@@ -630,6 +757,49 @@ describe.skipIf(!ffmpeg || !haveWasm || !haveLibav || !existsSync(nativePath))(
       const quieter = want.map((v) => v * 2 ** (-7 / 6));
       expect(channelDiff(both, 4, 2, quieter, 2)).toBeGreaterThan(0.01);
     }, 120_000);
+    it('renders 5.1 AC-3 as the native renderer does', async () => {
+      const src = join(dir, 'src-ac3.mkv');
+      execFileSync('ffmpeg', [
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        `aevalsrc=${QUIET}:c=5.1(side):s=48000`,
+        '-t',
+        '12',
+        '-c:a',
+        'ac3',
+        '-b:a',
+        '448k',
+        src,
+      ]);
+      await compareEac3(src, 'ac3-51', 1 / 2 ** 20, false, 'ac3');
+    });
+    it.skipIf(!haveDca)(
+      'renders 5.1 DTS as the native renderer does',
+      async () => {
+        const src = join(dir, 'src-dts.mkv');
+        execFileSync('ffmpeg', [
+          '-v',
+          'error',
+          '-f',
+          'lavfi',
+          '-i',
+          `aevalsrc=${QUIET}:c=5.1(side):s=48000`,
+          '-t',
+          '12',
+          '-c:a',
+          'dca',
+          '-strict',
+          '-2',
+          '-b:a',
+          '1509k',
+          src,
+        ]);
+        await compareEac3(src, 'dts-51', 1 / 2 ** 20, false, 'dts');
+      }
+    );
     it.skipIf(!atmosEac3 || !existsSync(atmosEac3))(
       'renders E-AC-3 with Atmos (JOC) as the native renderer does',
       async () => {

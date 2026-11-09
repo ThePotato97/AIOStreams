@@ -1,7 +1,8 @@
 /*
- * A Shaka Player transmuxer that converts the transcoder's TrueHD or E-AC-3 DASH audio (codecs
- * "mlpa", "ec-3") in the browser to FLAC: the binaural render (atmos-render built as WebAssembly,
- * and for E-AC-3 FFmpeg's core decoder, as libav.js) and the speaker version, as the player's
+ * A Shaka Player transmuxer that converts the transcoder's TrueHD, E-AC-3, AC-3 or DTS DASH audio
+ * (codecs "mlpa", "ec-3", "ac-3", "mp4a.a9") in the browser to FLAC: the binaural render
+ * (atmos-render built as WebAssembly, and for the others FFmpeg's decoders, as libav.js) and the
+ * speaker version, as the player's
  * request asks (local-audio.ts). Shaka hands it each segment and appends what it returns, so
  * buffering, seeking and A/V sync stay Shaka's.
  */
@@ -9,6 +10,7 @@ import { wasmUrl } from 'atmos-render-wasm-url';
 import type { OutputPlan } from './convert';
 import { localAudio, planFor } from './local-audio';
 import { sceneStore, type SceneSnapshot } from './objects';
+import type { Codec } from './codecs';
 
 /** Without a request from the player: the binaural render alone, as before. */
 const BINAURAL_ONLY: OutputPlan = {
@@ -19,15 +21,27 @@ const BINAURAL_ONLY: OutputPlan = {
 
 /** What the browser plays instead. */
 export const BINAURAL_OUTPUT = 'audio/mp4; codecs="flac"';
-type Codec = 'truehd' | 'eac3';
-/** Each codec as the transcoder's manifest names it. */
+/**
+ * Each codec as the transcoder's manifest names it: DTS as MP4's object types for it (FFmpeg
+ * writes 0xA9; DTS-HD's are 0xAA and 0xAB) or its sample entries.
+ */
 const INPUT: Record<Codec, RegExp> = {
   truehd: /codecs="?mlpa/i,
   eac3: /codecs="?ec-3/i,
+  ac3: /codecs="?ac-3/i,
+  dts: /codecs="?(mp4a\.a[9ab]|dts[cehl])\b/i,
 };
 /** Each codec as the browser would get it without the transmuxer. */
-const TRUEHD_AS_IS = 'audio/mp4; codecs="mlpa"';
-const EAC3_AS_IS = 'audio/mp4; codecs="ec-3"';
+/* eslint-disable lingui/no-unlocalized-strings -- MIME types for the browser, not UI text */
+const AS_IS: Record<Codec, string> = {
+  truehd: 'audio/mp4; codecs="mlpa"',
+  eac3: 'audio/mp4; codecs="ec-3"',
+  ac3: 'audio/mp4; codecs="ac-3"',
+  dts: 'audio/mp4; codecs="mp4a.a9"',
+};
+/* eslint-enable lingui/no-unlocalized-strings */
+/** The codecs libav.js decodes, where it was built (scripts/build-libav-eac3.sh). */
+const LIBAV: Codec[] = __LIBAV_DECODERS__ as Codec[];
 const codecOf = (mimeType: string) =>
   (Object.keys(INPUT) as Codec[]).find((c) => INPUT[c].test(mimeType));
 
@@ -43,18 +57,16 @@ export function clientBinauralSupported(): boolean {
 }
 
 /**
- * The codecs this browser renders to binaural itself: those it doesn't play itself (E-AC-3 also
- * needs the core decoder built).
+ * The codecs this browser renders to binaural itself: those it doesn't play itself (all but
+ * TrueHD also need their decoder built into libav.js).
  */
 export function clientBinauralCodecs(): Codec[] {
   if (!clientBinauralSupported()) return [];
-  const codecs: Codec[] = [];
   // Shaka transmuxes only what the browser can't play itself: where it claims to, it would get
   // the stream as it is, so the server renders that codec instead.
-  if (!MediaSource.isTypeSupported(TRUEHD_AS_IS)) codecs.push('truehd');
-  if (__LIBAV_EAC3__ && !MediaSource.isTypeSupported(EAC3_AS_IS))
-    codecs.push('eac3');
-  return codecs;
+  return (['truehd', ...LIBAV] as Codec[]).filter(
+    (codec) => !MediaSource.isTypeSupported(AS_IS[codec])
+  );
 }
 
 /** The worker's answer: converted bytes, and the scene snapshots taken converting them. */

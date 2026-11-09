@@ -445,8 +445,8 @@ const capabilitySchema = z.object({
   lossless: z.boolean().optional(),
   binaural: z.boolean().optional(),
   clientBinaural: z
-    .array(z.enum(['truehd', 'eac3']))
-    .max(2)
+    .array(z.enum(['truehd', 'eac3', 'ac3', 'dts']))
+    .max(4)
     .optional(),
   binauralMode: z.enum(['near', 'far']).optional(),
   dovi: z.boolean().optional(),

@@ -53,9 +53,9 @@ const request = (capabilities = {}, extra = {}) => ({
   ...extra,
 });
 
-test('binaural: TrueHD and E-AC-3 at 48 kHz, where the player asks', () => {
+test('binaural: TrueHD, E-AC-3, AC-3 and DTS at 48 kHz, where the player asks', () => {
   const asked = request({ binaural: true });
-  for (const codec of ['truehd', 'eac3']) {
+  for (const codec of ['truehd', 'eac3', 'ac3', 'dts']) {
     const policy = select(meta(codec), asked);
     assert.equal(policy.binaural, true, codec);
     // the audio is converted even where the browser plays it
@@ -63,8 +63,9 @@ test('binaural: TrueHD and E-AC-3 at 48 kHz, where the player asks', () => {
     assert.equal(policy.audioReason, 'binaural rendering', codec);
   }
   assert.equal(select(meta('truehd'), request()).binaural, false);
-  assert.equal(select(meta('dts'), asked).binaural, false);
-  assert.equal(select(meta('ac3'), asked).binaural, false);
+  // other surround is virtualised in the page
+  assert.equal(select(meta('aac'), asked).binaural, false);
+  assert.equal(select(meta('flac'), asked).binaural, false);
   // the renderer is 48 kHz only
   assert.equal(
     select(meta('truehd', { sampleRate: 96000 }), asked).binaural,
@@ -94,6 +95,27 @@ test('client binaural: a track the player renders is copied, never played direct
   const { args } = ffmpegArgs('in', meta('truehd'), asked, 'out');
   assert.equal(args[args.indexOf('-strict') + 1], 'experimental');
   assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy');
+});
+
+test('client binaural: AC-3 and DTS are copied for the player as E-AC-3 is', () => {
+  const asked = request({
+    audio: false,
+    binaural: true,
+    clientBinaural: ['eac3', 'ac3', 'dts'],
+  });
+  for (const codec of ['eac3', 'ac3', 'dts']) {
+    const policy = select(meta(codec), asked);
+    assert.equal(policy.clientBinaural, true, codec);
+    assert.equal(policy.binaural, false, codec);
+    assert.equal(policy.copyAudio, true, codec);
+    const { args } = ffmpegArgs('in', meta(codec), asked, 'out');
+    assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy', codec);
+    assert.ok(!args.includes('-strict'), codec);
+  }
+  // FFmpeg names E-AC-3 and AC-3 in the manifest; DTS gets MP4's object type where it doesn't
+  assert.equal(audioCodec(select(meta('eac3'), asked)), null);
+  assert.equal(audioCodec(select(meta('ac3'), asked)), null);
+  assert.equal(audioCodec(select(meta('dts'), asked)), 'mp4a.a9');
 });
 
 test('client binaural: copied Dolby Vision loses its metadata where TrueHD needs the experimental flag', () => {
@@ -244,6 +266,13 @@ test('binaural: the arguments of the three processes', () => {
   ]);
   const truehd = select(meta('truehd'), request({ binaural: true }));
   assert.deepEqual(rendererArgs(truehd), ['--format', 'truehd']);
+  // AC-3 and DTS: raw as FFmpeg names them, decoded by the renderer's own FFmpeg
+  for (const codec of ['ac3', 'dts']) {
+    const p = select(meta(codec), request({ binaural: true }));
+    const d = demuxArgs('in', p, 0);
+    assert.equal(d[d.indexOf('pipe:1') - 1], codec);
+    assert.deepEqual(rendererArgs(p), ['--format', codec, '--ffmpeg', 'ffmpeg']);
+  }
   // the converting FFmpeg reads the rendered stereo on pipe:4 from the first packet's time
   const { args } = ffmpegArgs(
     'in',
@@ -300,13 +329,15 @@ let dir, source, worker, base, headers;
 before(async () => {
   if (!haveRenderer) return;
   dir = await mkdtemp(`${tmpdir()}/binaural-`);
-  // Six seconds of 5.1, each channel its own tone, as TrueHD and as E-AC-3.
+  // Six seconds of 5.1, each channel its own tone, as TrueHD, E-AC-3, AC-3 and DTS.
   const tones = [220, 330, 440, 550, 60, 770]
     .map((f) => `0.3*sin(2*PI*${f}*t)`)
     .join('|');
   for (const [name, codec, seconds] of [
     ['truehd', ['-c:a', 'truehd', '-strict', '-2'], '6'],
     ['eac3', ['-c:a', 'eac3', '-b:a', '384k'], '6'],
+    ['ac3', ['-c:a', 'ac3', '-b:a', '448k'], '6'],
+    ['dts', ['-c:a', 'dca', '-strict', '-2', '-b:a', '1509k'], '6'],
     ['truehd-long', ['-c:a', 'truehd', '-strict', '-2'], '20'],
   ])
     await exec('ffmpeg', [
@@ -332,7 +363,8 @@ before(async () => {
       `${dir}/${name}.mkv`,
     ]);
   source = createHttpServer(async (req, res) => {
-    const file = `${dir}/${req.url.includes('eac3') ? 'eac3' : req.url.includes('truehd-long') ? 'truehd-long' : 'truehd'}.mkv`;
+    const name = /\/(eac3|ac3|dts|truehd-long)/.exec(req.url)?.[1] ?? 'truehd';
+    const file = `${dir}/${name}.mkv`;
     const size = (await stat(file)).size;
     const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? '');
     const start = range ? Number(range[1]) : 0,
@@ -350,6 +382,8 @@ before(async () => {
   process.env.TRANSCODER_SECRET = 'b'.repeat(32);
   process.env.CACHE_DIR = `${dir}/worker`;
   process.env.TRANSCODER_ENCODER = 'cpu';
+  // every test's job stays on the one worker until its viewer leaves (a minute)
+  process.env.TRANSCODER_MAX_COPY_JOBS = '32';
   const { createServer } = await import('./server.mjs');
   worker = createServer();
   await new Promise((resolve) => worker.listen(0, '127.0.0.1', resolve));
@@ -427,7 +461,7 @@ async function finished(id) {
   };
 }
 
-for (const codec of ['truehd', 'eac3'])
+for (const codec of ['truehd', 'eac3', 'ac3', 'dts'])
   test(
     `real chain: ${codec} rendered to binaural stereo, in step with the video`,
     { skip: !haveRenderer && 'atmos-render not installed' },
@@ -504,6 +538,37 @@ test(
     assert.equal(audio.channels, 6);
   }
 );
+
+for (const [codec, written] of [
+  ['ac3', 'ac-3'],
+  ['dts', 'mp4a.a9'],
+])
+  test(
+    `real chain: ${codec} copied for the player to render, with its codec in the manifest`,
+    { skip: !haveRenderer && 'atmos-render not installed' },
+    async () => {
+      const result = await call('/prepare', {
+        input: `${process.env.AIOSTREAMS_INTERNAL_URL}/party/guest/source/${codec}`,
+        viewer: `client-viewer-${codec}-xxxxxxxx`,
+        request: request(
+          { audio: false, binaural: true, clientBinaural: [codec] },
+          { positionMs: 0 }
+        ),
+      });
+      assert.equal(result.clientBinaural, true);
+      assert.equal(result.binaural, false);
+      const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
+        headers,
+      });
+      assert.match(
+        await res.text(),
+        new RegExp(`mimeType="audio/mp4" codecs="${written}"`)
+      );
+      const { audio } = await finished(result.id);
+      assert.equal(audio.codec_name, codec);
+      assert.equal(audio.channels, 6);
+    }
+  );
 
 test(
   'real chain: a renderer that dies while playing fails the job, and the track converts without it next time',

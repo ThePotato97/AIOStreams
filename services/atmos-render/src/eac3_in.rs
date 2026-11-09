@@ -26,17 +26,45 @@ struct Unit {
     oamd: Option<oamd::ObjectAudioMetadataPayload>,
 }
 
-enum Pcm {
+pub(crate) enum Pcm {
     Layout { channels: usize, mask: u32 },
     Samples(Vec<f32>),
 }
 
-/// The FFmpeg child decoding the core.
-struct Decoder {
+/// An FFmpeg child decoding the bytes it's fed (raw `format`) to WAV, with its decoder options
+/// `options`: its PCM, layout first, comes back on `pcm`.
+pub(crate) struct Decoder {
     child: Option<Child>,
-    stdin: Option<ChildStdin>,
+    pub(crate) stdin: Option<ChildStdin>,
     reader: Option<JoinHandle<()>>,
-    pcm: Receiver<Pcm>,
+    pub(crate) pcm: Receiver<Pcm>,
+}
+
+impl Decoder {
+    pub(crate) fn spawn(ffmpeg: &str, options: &[&str], format: &str) -> anyhow::Result<Self> {
+        let mut child = Command::new(ffmpeg)
+            .args(["-v", "error"])
+            .args(options)
+            .args(["-f", format, "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_f32le", "pipe:1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        let (tx, rx) = channel();
+        let reader = spawn_reader(child.stdout.take().unwrap(), tx);
+        let stdin = child.stdin.take();
+        Ok(Decoder { child: Some(child), stdin, reader: Some(reader), pcm: rx })
+    }
+
+    /// Waits for the child, once its input is closed and its output read.
+    pub(crate) fn finish(&mut self) {
+        if let Some(r) = self.reader.take() {
+            let _ = r.join();
+        }
+        if let Some(mut c) = self.child.take() {
+            let _ = c.wait();
+        }
+    }
 }
 
 pub struct Eac3 {
@@ -76,7 +104,7 @@ fn mask_bits(mask: u32) -> Vec<u32> {
     WAV.iter().map(|&(b, _)| b).filter(|b| mask & b != 0).collect()
 }
 
-fn spawn_reader(mut out: std::process::ChildStdout, tx: Sender<Pcm>) -> JoinHandle<()> {
+pub(crate) fn spawn_reader(mut out: std::process::ChildStdout, tx: Sender<Pcm>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         // WAV header: find "fmt " and "data"
         let mut head = Vec::new();
@@ -131,21 +159,11 @@ fn spawn_reader(mut out: std::process::ChildStdout, tx: Sender<Pcm>) -> JoinHand
 }
 
 impl Eac3 {
-    /// `ffmpeg` decodes the core, with DRC and dialnorm set up for `loudness` (`loudness.rs`).
-    pub fn new(ffmpeg: &str, modes: Modes, loudness: Loudness) -> anyhow::Result<Self> {
-        let mut child = Command::new(ffmpeg)
-            .args(["-v", "error"])
-            .args(loudness::ffmpeg_args(loudness))
-            .args(["-f", "eac3", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_f32le", "pipe:1"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let (tx, rx) = channel();
-        let reader = spawn_reader(child.stdout.take().unwrap(), tx);
-        let stdin = child.stdin.take();
+    /// `ffmpeg` decodes the core, with DRC and dialnorm set up for `loudness` (`loudness.rs`), from
+    /// raw `format`: "eac3", or "ac3" for an AC-3 stream (the same decoder, the same options).
+    pub fn new(ffmpeg: &str, format: &str, modes: Modes, loudness: Loudness) -> anyhow::Result<Self> {
         let mut feed = Self::external(modes, loudness);
-        feed.decoder = Some(Decoder { child: Some(child), stdin, reader: Some(reader), pcm: rx });
+        feed.decoder = Some(Decoder::spawn(ffmpeg, &loudness::ffmpeg_args(loudness), format)?);
         Ok(feed)
     }
 
@@ -385,12 +403,7 @@ impl Feed for Eac3 {
             }
         }
         if let Some(mut d) = self.decoder.take() {
-            if let Some(r) = d.reader.take() {
-                let _ = r.join();
-            }
-            if let Some(mut c) = d.child.take() {
-                let _ = c.wait();
-            }
+            d.finish();
         }
     }
 

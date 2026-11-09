@@ -12,7 +12,7 @@ RUN rustup target add wasm32-unknown-unknown
 COPY services/atmos-render ./
 RUN cargo build --lib --release --locked --target wasm32-unknown-unknown
 
-# FFmpeg's E-AC-3 decoder as libav.js, for the same with E-AC-3 (its core).
+# FFmpeg's E-AC-3, AC-3 and DTS decoders as libav.js, for the same with those (decoded in the page).
 FROM emscripten/emsdk:6.0.5 AS libav-eac3
 RUN apt-get update \
   && apt-get install -y --no-install-recommends pkg-config \

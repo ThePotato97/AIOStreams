@@ -1,8 +1,10 @@
-//! The renderer as WebAssembly, for playback in the browser: a session takes a TrueHD or E-AC-3
-//! elementary stream in chunks and gives back binaural stereo (48 kHz, interleaved f32), with
-//! the input's timing. For E-AC-3 the caller also decodes the core with FFmpeg's decoder
-//! (libav.js) and pushes its PCM (`ar_push_pcm`). A plain C ABI, so it needs no bindings crate.
+//! The renderer as WebAssembly, for playback in the browser: a session takes a TrueHD, E-AC-3 or
+//! AC-3 elementary stream in chunks and gives back binaural stereo (48 kHz, interleaved f32), with
+//! the input's timing. For E-AC-3 and AC-3 the caller also decodes the core with FFmpeg's decoder
+//! (libav.js) and pushes its PCM (`ar_push_pcm`); a decoded session (DTS) takes that PCM alone.
+//! A plain C ABI, so it needs no bindings crate.
 
+use crate::decoded_in::Decoded;
 use crate::eac3_in::Eac3;
 use crate::input::{Block, Feed, Output, Pipeline};
 use crate::loudness::Loudness;
@@ -12,6 +14,7 @@ use crate::truehd_in::TrueHd;
 enum Input {
     TrueHd(TrueHd),
     Eac3(Eac3),
+    Decoded(Decoded),
 }
 
 impl Input {
@@ -19,6 +22,7 @@ impl Input {
         match self {
             Input::TrueHd(f) => f,
             Input::Eac3(f) => f,
+            Input::Decoded(f) => f,
         }
     }
 }
@@ -77,10 +81,17 @@ pub extern "C" fn ar_new_eac3(modes_code: u32, windows_loudness: bool) -> *mut S
     session(Input::Eac3(Eac3::external(modes(modes_code), loudness)))
 }
 
+/// A decoded session (DTS): channels only, whose PCM the caller decodes with FFmpeg's decoder and
+/// its defaults (libav.js) and pushes (`ar_push_pcm`); `ar_push` takes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_new_decoded(modes_code: u32) -> *mut Session {
+    session(Input::Decoded(Decoded::external(modes(modes_code))))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ar_drop(session: *mut Session) {
     if !session.is_null() {
-        // SAFETY: from ar_new or ar_new_eac3, and dropped once.
+        // SAFETY: from ar_new, ar_new_eac3 or ar_new_decoded, and dropped once.
         unsafe { drop(Box::from_raw(session)) }
     }
 }
@@ -132,7 +143,7 @@ pub extern "C" fn ar_push(session: *mut Session, ptr: *const u8, len: usize) -> 
     let frames = collect(session, |input, blocks| input.feed().push(bytes, &mut |b| blocks.push(b)));
     session.speakers = match &mut session.input {
         Input::TrueHd(f) => f.take_speakers(),
-        Input::Eac3(_) => Vec::new(),
+        Input::Eac3(_) | Input::Decoded(_) => Vec::new(),
     };
     frames
 }
@@ -158,7 +169,7 @@ pub extern "C" fn ar_speaker_channels(session: *mut Session) -> usize {
     // SAFETY: a live session.
     match unsafe { &(*session).input } {
         Input::TrueHd(f) => f.speaker_channels(),
-        Input::Eac3(_) => 0,
+        Input::Eac3(_) | Input::Decoded(_) => 0,
     }
 }
 
@@ -168,11 +179,11 @@ pub extern "C" fn ar_speaker_mask(session: *mut Session) -> f64 {
     // SAFETY: a live session.
     match unsafe { &(*session).input } {
         Input::TrueHd(f) => f.speaker_mask as f64,
-        Input::Eac3(_) => 0.0,
+        Input::Eac3(_) | Input::Decoded(_) => 0.0,
     }
 }
 
-/// E-AC-3 only: the core decoder's output for the bytes pushed so far, in order — `len` f32 at
+/// E-AC-3, AC-3 and decoded sessions: the decoder's output for the bytes pushed so far, in order — `len` f32 at
 /// `ptr`, interleaved in FFmpeg's (WAV) channel order, `channels` channels with channel mask
 /// `mask`. Returns how many stereo frames `ar_output` now holds (0 for a TrueHD session).
 #[unsafe(no_mangle)]
@@ -180,8 +191,10 @@ pub extern "C" fn ar_push_pcm(session: *mut Session, ptr: *const f32, len: usize
     // SAFETY: a live session, and len readable f32 at ptr.
     let (session, samples) = unsafe { (&mut *session, std::slice::from_raw_parts(ptr, len)) };
     collect(session, |input, blocks| {
-        if let Input::Eac3(f) = input {
-            f.push_pcm(channels, mask, samples, &mut |b| blocks.push(b));
+        match input {
+            Input::Eac3(f) => f.push_pcm(channels, mask, samples, &mut |b| blocks.push(b)),
+            Input::Decoded(f) => f.push_pcm(channels, mask, samples, &mut |b| blocks.push(b)),
+            Input::TrueHd(_) => {}
         }
     })
 }

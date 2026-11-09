@@ -44,7 +44,7 @@ export interface GuestCapabilities {
    * and the speaker version otherwise: a track in one of these is copied as it is, with
    * headphones on or off, and the server doesn't render it.
    */
-  clientBinaural?: ('truehd' | 'eac3')[];
+  clientBinaural?: ('truehd' | 'eac3' | 'ac3' | 'dts')[];
   /**
    * The listener's headphone mode where the server renders binaural: every element Near (as
    * Windows renders) or Far. Without it, each element in the stream's own mode (Mid where the

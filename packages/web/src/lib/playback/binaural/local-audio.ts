@@ -1,5 +1,5 @@
 /*
- * TrueHD and E-AC-3 decoded in the page (transmuxer.ts): what the player asks for, the plan the
+ * TrueHD, E-AC-3, AC-3 and DTS decoded in the page (transmuxer.ts): what the player asks for, the plan the
  * transmuxer follows, and what it's producing now, for the page's audio graph (headphones.ts) to
  * play the right channels. Where the binaural render and the speaker version fit together (FLAC's
  * 8 channels) and the page can pick channels itself (Web Audio), both are carried and turning

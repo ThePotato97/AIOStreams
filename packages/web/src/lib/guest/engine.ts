@@ -147,9 +147,11 @@ export function guestEngine(
     /** Errors already handled: a failed load also reports its error. */
     const handled = new WeakSet<object>();
     let force = false;
-    /** The browser's own binaural rendering failed: the server renders for the rest of this playback. */
+    /** `force` came from the audio failing: another audio track starts without it. */
+    let forcedByAudio = false;
+    /** The browser's own binaural rendering failed: the server renders this audio track. */
     let serverBinaural = false;
-    /** Binaural audio failed to play: this file plays without it, the browser's virtualiser on. */
+    /** Binaural audio failed to play: this audio track plays without it, the browser's virtualiser on. */
     let noBinaural = false;
     /** Drawing Dolby Vision here failed: the server handles it for the rest of this file. */
     let noDovi = false;
@@ -203,6 +205,8 @@ export function guestEngine(
           'convert-all'
       ) {
         force = true;
+        forcedByAudio =
+          failure.kind === 'media' && failure.media?.stream === 'audio';
         void prepare(at);
         return;
       }
@@ -283,7 +287,7 @@ export function guestEngine(
         return false;
       noBinaural = true;
       toast.message(
-        t`Binaural audio couldn't play, so it's off for this file`,
+        t`Binaural audio couldn't play, so it's off for this audio track`,
         {
           description: explainFailure(failure),
         }
@@ -693,7 +697,7 @@ export function guestEngine(
         clearTimeout(disabledTimer);
         playback = null;
         file = next;
-        force = false;
+        force = forcedByAudio = false;
         serverBinaural = false;
         noBinaural = false;
         noDovi = false;
@@ -764,6 +768,11 @@ export function guestEngine(
         const next = Number(id);
         if (audio === next) return;
         audio = next;
+        // What failed was this track: another one starts afresh, rendered here where it can be.
+        // A full conversion the video needed stays.
+        if (forcedByAudio) force = forcedByAudio = false;
+        serverBinaural = false;
+        noBinaural = false;
         // another track's elements; the prepare below converts it with them all on
         sceneStore.allOn();
         clearTimeout(disabledTimer);

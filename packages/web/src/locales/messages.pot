@@ -734,7 +734,7 @@ msgid "Bigger subtitles"
 msgstr ""
 
 #: src/lib/guest/engine.ts
-msgid "Binaural audio couldn't play, so it's off for this file"
+msgid "Binaural audio couldn't play, so it's off for this audio track"
 msgstr ""
 
 #: src/lib/i18n.ts

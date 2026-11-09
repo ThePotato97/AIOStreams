@@ -1,5 +1,5 @@
 /*
- * Loads the E-AC-3 core decoder's libav.js (scripts/build-libav-eac3.sh; not committed, so the
+ * Loads the E-AC-3, AC-3 and DTS decoders' libav.js (scripts/build-libav-eac3.sh; not committed, so the
  * build picks libav-eac3-missing.ts without it). In the binaural worker, in "direct" mode: its
  * calls run synchronously there, off the page's thread.
  */
