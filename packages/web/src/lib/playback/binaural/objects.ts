@@ -6,12 +6,16 @@
  */
 
 export type ElementKind =
-  'object' | 'bed' | 'lfe' | 'isf' | 'bypass' | 'unknown';
+  'object' | 'bed' | 'lfe' | 'isf' | 'bypass' | 'channel' | 'unknown';
 export type RenderMode = 'off' | 'near' | 'far' | 'mid';
 
 export interface SceneElement {
   kind: ElementKind;
-  /** A bed channel's ID (atmos-render's `direct::bed_position`); a stereo-bypass input's side (0 left, 1 right). */
+  /**
+   * A bed channel's ID (atmos-render's `direct::bed_position`); the LFE's number (1, or 2 for
+   * LFE2); a stereo-bypass input's side (0 left, 1 right); a named channel's code
+   * (`CHANNEL_NAMES`).
+   */
   bed?: number;
   /** Atmos for Headphones' render mode; none for the LFE. */
   mode: RenderMode | null;
@@ -42,6 +46,7 @@ const KINDS: Record<number, ElementKind> = {
   2: 'lfe',
   3: 'isf',
   4: 'bypass',
+  5: 'channel',
 };
 const MODES: Record<number, RenderMode> = {
   0: 'off',
@@ -74,7 +79,10 @@ export function readSnapshots(
         data.subarray(at, at + FIELDS);
       elements.push({
         kind: KINDS[kind] ?? 'unknown',
-        bed: kind === 1 || kind === 4 ? bed : undefined,
+        bed:
+          kind === 1 || kind === 2 || kind === 4 || kind === 5
+            ? bed
+            : undefined,
         mode: MODES[mode] ?? null,
         active: active === 1,
         pos: Number.isNaN(x) ? null : [x, y, z],

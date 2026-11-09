@@ -9,7 +9,7 @@ use truehd::process::parse::Parser;
 use truehd::structs::channel::ChannelLabel;
 use truehd::utils::errors::ExtractError;
 
-use crate::channels::{self, Static};
+use crate::channels::{self, Channel, Static};
 use crate::input::{Block, Feed};
 use crate::objects::{Modes, Scene};
 use crate::render::Source;
@@ -88,7 +88,7 @@ fn label_static(label: ChannelLabel) -> Static {
         Rs => Static::Bed(6),
         Lb => Static::Bed(7),
         Rb => Static::Bed(8),
-        Cb => Static::At([0.5, 1.0, 0.0]), // back centre, as the encoder's slot 16
+        Cb => Static::Channel(Channel::BackCentre), // as the encoder's slot 16
         Tfl => Static::Bed(9),
         Tfr => Static::Bed(10),
         Tbl => Static::Bed(13),
@@ -101,10 +101,10 @@ fn label_static(label: ChannelLabel) -> Static {
         // No Windows slot and no bed ID: at their labels' places [I].
         Lsd => Static::Bed(5),
         Rsd => Static::Bed(6),
-        Lsc => Static::At([0.25, 0.0, 0.0]),
-        Rsc => Static::At([0.75, 0.0, 0.0]),
-        Tc => Static::At([0.5, 0.5, 1.0]),
-        Tfc => Static::At([0.5, 0.0, 1.0]),
+        Lsc => Static::Channel(Channel::FrontLeftOfCentre),
+        Rsc => Static::Channel(Channel::FrontRightOfCentre),
+        Tc => Static::Channel(Channel::TopCentre),
+        Tfc => Static::Channel(Channel::TopFrontCentre),
     }
 }
 
@@ -282,7 +282,7 @@ impl Feed for TrueHd {
         if self.atmos == Some(true) {
             self.scene.elements()
         } else {
-            self.channel_beds.iter().map(|&s| channels::element(s)).collect()
+            channels::elements(&self.channel_beds)
         }
     }
 

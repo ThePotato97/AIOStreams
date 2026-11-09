@@ -394,7 +394,7 @@ impl Feed for Eac3 {
         if self.atmos == Some(true) {
             self.scene.elements()
         } else {
-            self.core_beds.iter().map(|&s| channels::element(s)).collect()
+            channels::elements(&self.core_beds)
         }
     }
 

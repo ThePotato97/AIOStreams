@@ -22,6 +22,10 @@ pub enum Element {
     /// One of the stereo-bypass inputs (0 left, 1 right): summed into output L/R, never rendered
     /// in the room (E slots 17/18).
     Bypass(usize),
+    /// The second LFE.
+    Lfe2,
+    /// A channel with no bed ID, by its code (`channels::Channel`).
+    Channel(u32),
 }
 
 pub trait Feed {
@@ -82,15 +86,17 @@ impl Snapshots {
         self.data.push(o.sample as f64);
         self.data.push(o.sources.len() as f64);
         for (i, s) in o.sources.iter().enumerate() {
-            // kind (0 object, 1 bed, 2 LFE, 3 ISF, 4 stereo bypass, -1 unknown), bed ID (bypass:
-            // side), render mode (Off 0, Near 1, Far 2, Mid 3; -1 none), active, x, y, z (NaN:
+            // kind (0 object, 1 bed, 2 LFE, 3 ISF, 4 stereo bypass, 5 named channel, -1 unknown),
+            // bed ID (LFE: 1, LFE2: 2; bypass: side; named channel: its code), render mode (Off 0, Near 1, Far 2, Mid 3; -1 none), active, x, y, z (NaN:
             // none), metadata gain, RMS level, Windows slot (-1 none)
             let (kind, bed) = match o.elements.get(i) {
                 Some(Element::Object) => (0.0, 0.0),
                 Some(Element::Bed(id)) => (1.0, *id as f64),
-                Some(Element::Lfe) => (2.0, 0.0),
+                Some(Element::Lfe) => (2.0, 1.0),
+                Some(Element::Lfe2) => (2.0, 2.0),
                 Some(Element::Isf) => (3.0, 0.0),
                 Some(Element::Bypass(side)) => (4.0, *side as f64),
+                Some(Element::Channel(code)) => (5.0, *code as f64),
                 None => (-1.0, 0.0),
             };
             let level = (o.sums.get(i).copied().unwrap_or(0.0) / o.count as f64).sqrt();

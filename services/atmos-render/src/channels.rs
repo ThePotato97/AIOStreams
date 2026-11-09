@@ -11,10 +11,36 @@ use crate::render::{BED_RAMP, Source};
 pub enum Static {
     Bed(u32),
     Lfe,
-    /// A positioned object, Dolby x/y/z.
-    At([f32; 3]),
+    /// A channel with no bed ID, placed as a positioned object.
+    Channel(Channel),
     /// One of E's two stereo-bypass objects (0 left, 1 right), which A takes as bypass inputs.
     Bypass(usize),
+}
+
+/// The channels with no bed ID, by name: placed as positioned objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    FrontLeftOfCentre = 1,
+    FrontRightOfCentre = 2,
+    BackCentre = 3,
+    TopCentre = 4,
+    TopFrontCentre = 5,
+    TopBackCentre = 6,
+}
+
+impl Channel {
+    /// Dolby x/y/z.
+    pub fn position(self) -> [f32; 3] {
+        match self {
+            // no Windows slot: halfway between the centre and the front left/right [I]
+            Channel::FrontLeftOfCentre => [0.25, 0.0, 0.0],
+            Channel::FrontRightOfCentre => [0.75, 0.0, 0.0],
+            Channel::BackCentre => BACK_CENTRE,
+            Channel::TopCentre => TOP_CENTRE,
+            Channel::TopFrontCentre => TOP_FRONT_CENTRE,
+            Channel::TopBackCentre => TOP_BACK_CENTRE,
+        }
+    }
 }
 
 /// Back centre, slot 16: (0.5, 1, 0).
@@ -35,17 +61,17 @@ pub const WAV: [(u32, Static); 18] = [
     (0x8, Static::Lfe),                  // LFE
     (0x10, Static::Bed(7)),              // back left
     (0x20, Static::Bed(8)),              // back right
-    (0x40, Static::At([0.25, 0.0, 0.0])), // front left of centre: no Windows slot, halfway [I]
-    (0x80, Static::At([0.75, 0.0, 0.0])), // front right of centre: as above [I]
-    (0x100, Static::At(BACK_CENTRE)),    // back centre
+    (0x40, Static::Channel(Channel::FrontLeftOfCentre)),
+    (0x80, Static::Channel(Channel::FrontRightOfCentre)),
+    (0x100, Static::Channel(Channel::BackCentre)),
     (0x200, Static::Bed(5)),             // side left
     (0x400, Static::Bed(6)),             // side right
-    (0x800, Static::At(TOP_CENTRE)),     // top centre [I]
+    (0x800, Static::Channel(Channel::TopCentre)), // [I]
     (0x1000, Static::Bed(9)),            // top front left
-    (0x2000, Static::At(TOP_FRONT_CENTRE)), // top front centre [I]
+    (0x2000, Static::Channel(Channel::TopFrontCentre)), // [I]
     (0x4000, Static::Bed(10)),           // top front right
     (0x8000, Static::Bed(13)),           // top back left
-    (0x10000, Static::At(TOP_BACK_CENTRE)), // top back centre [I]
+    (0x10000, Static::Channel(Channel::TopBackCentre)), // [I]
     (0x20000, Static::Bed(14)),          // top back right
 ];
 
@@ -110,8 +136,8 @@ pub fn windows_slots(statics: &[Static]) -> Vec<Option<u16>> {
         .map(|&s| match s {
             Static::Bed(id) => crate::objects::windows_bed_slot(id),
             Static::Lfe => (!std::mem::replace(&mut lfe, true)).then_some(3),
-            Static::At(pos) if pos == BACK_CENTRE => Some(16),
-            Static::At(_) => None,
+            Static::Channel(Channel::BackCentre) => Some(16),
+            Static::Channel(_) => None,
             Static::Bypass(side) => Some(17 + side as u16),
         })
         .collect()
@@ -123,9 +149,22 @@ pub fn element(s: Static) -> crate::input::Element {
     match s {
         Static::Bed(id) => Element::Bed(id),
         Static::Lfe => Element::Lfe,
-        Static::At(_) => Element::Object,
+        Static::Channel(c) => Element::Channel(c as u32),
         Static::Bypass(side) => Element::Bypass(side),
     }
+}
+
+/// What each static input is, in order, for the debug view: as `element`, with a second LFE as
+/// LFE2 (TrueHD's LFE2 label; channel order puts it after the LFE).
+pub fn elements(statics: &[Static]) -> Vec<crate::input::Element> {
+    let mut lfe = false;
+    statics
+        .iter()
+        .map(|&s| match s {
+            Static::Lfe if std::mem::replace(&mut lfe, true) => crate::input::Element::Lfe2,
+            s => element(s),
+        })
+        .collect()
 }
 
 /// The renderer source of a static at unity gain. Windows renders every static Near; the stream
@@ -142,7 +181,7 @@ pub fn source(s: Static, modes: Modes) -> Source {
     match s {
         Static::Lfe => Source::Lfe { gain: 1.0 },
         Static::Bed(id) => Source::Positioned { pos: bed_position(id).unwrap(), mode, gain: 1.0, active: true, ramp: BED_RAMP, zone: 0 },
-        Static::At(pos) => Source::Positioned { pos, mode, gain: 1.0, active: true, ramp: BED_RAMP, zone: 0 },
+        Static::Channel(c) => Source::Positioned { pos: c.position(), mode, gain: 1.0, active: true, ramp: BED_RAMP, zone: 0 },
         Static::Bypass(side) => Source::Bypass { side, gain: 1.0 },
     }
 }
@@ -222,7 +261,22 @@ mod tests {
             [0, 1, 2, 3, 6, 7, 4, 5].map(Some).to_vec()
         );
         // back centre at 16, a front left of centre nowhere, a second LFE nowhere
-        assert_eq!(windows_slots(&[Static::At(BACK_CENTRE), Static::At([0.25, 0.0, 0.0]), Static::Lfe, Static::Lfe]), vec![Some(16), None, Some(3), None]);
+        assert_eq!(
+            windows_slots(&[Static::Channel(Channel::BackCentre), Static::Channel(Channel::FrontLeftOfCentre), Static::Lfe, Static::Lfe]),
+            vec![Some(16), None, Some(3), None]
+        );
         assert_eq!(windows_slots(&[Static::Bypass(0), Static::Bypass(1)]), vec![Some(17), Some(18)]);
+    }
+
+    #[test]
+    fn channels_without_a_bed_id_keep_their_names() {
+        use crate::input::Element;
+        // 7.1 with front left/right of centre and back centre, and a second LFE
+        let statics = vec![Static::Lfe, Static::Channel(Channel::FrontLeftOfCentre), Static::Channel(Channel::BackCentre), Static::Lfe];
+        assert_eq!(elements(&statics), vec![Element::Lfe, Element::Channel(1), Element::Channel(3), Element::Lfe2]);
+        // placed where they were
+        assert_eq!(Channel::BackCentre.position(), [0.5, 1.0, 0.0]);
+        assert_eq!(wav_mask(0x40)[0], Static::Channel(Channel::FrontLeftOfCentre));
+        assert_eq!(wav_mask(0x10000)[0], Static::Channel(Channel::TopBackCentre));
     }
 }

@@ -44,6 +44,8 @@ const COLOURS: Record<SceneElement['kind'], string> = {
   isf: '#a78bfa',
   lfe: '#f87171',
   bypass: '#e5e5e5',
+  // channels of a channel-based stream, as the beds
+  channel: '#fbbf24',
   unknown: '#a3a3a3',
 };
 const OFF = '#737373';
@@ -54,7 +56,20 @@ function names(elements: SceneElement[]): string[] {
   return elements.map((e, i) => {
     const bed = e.bed ?? 0;
     if (e.kind === 'bed') return BED_LABELS[bed] ?? t`Bed ${bed}`;
-    if (e.kind === 'lfe') return t`LFE`;
+    if (e.kind === 'lfe') return e.bed === 2 ? t`LFE2` : t`LFE`;
+    // channels with no bed ID (atmos-render's `channels::Channel`)
+    if (e.kind === 'channel') {
+      const names: Record<number, string> = {
+        1: t`Front left of centre`,
+        2: t`Front right of centre`,
+        3: t`Back centre`,
+        4: t`Top centre`,
+        5: t`Top front centre`,
+        6: t`Top back centre`,
+      };
+      const code = e.bed ?? 0;
+      return names[code] ?? t`Channel ${code}`;
+    }
     // E's slots 17/18: summed into output L/R, never rendered in the room
     if (e.kind === 'bypass')
       return e.bed === 1 ? t`Stereo bypass R` : t`Stereo bypass L`;

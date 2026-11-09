@@ -689,6 +689,10 @@ msgstr ""
 msgid "Back button"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Back centre"
+msgstr ""
+
 #: src/pages/settings/playback.tsx
 msgid "Back in the player"
 msgstr ""
@@ -887,6 +891,10 @@ msgstr ""
 
 #: src/pages/settings/apps.tsx
 msgid "Channel"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Channel {code}"
 msgstr ""
 
 #: src/pages/settings/audio.tsx
@@ -1794,6 +1802,14 @@ msgstr ""
 msgid "front"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Front left of centre"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Front right of centre"
+msgstr ""
+
 #: src/pages/settings/interface.tsx
 msgid "Frosted glass"
 msgstr ""
@@ -2259,6 +2275,10 @@ msgstr ""
 
 #: src/components/player/scene-overlay.tsx
 msgid "LFE"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "LFE2"
 msgstr ""
 
 #: src/components/licenses.tsx
@@ -5045,8 +5065,20 @@ msgstr ""
 msgid "Too many tries. Wait a moment, then try again."
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Top back centre"
+msgstr ""
+
 #: src/pages/settings/interface.tsx
 msgid "Top bar"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Top centre"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Top front centre"
 msgstr ""
 
 #: src/pages/settings/interface.tsx

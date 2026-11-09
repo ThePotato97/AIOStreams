@@ -690,6 +690,10 @@ msgstr "Back"
 msgid "Back button"
 msgstr "Back button"
 
+#: src/components/player/scene-overlay.tsx
+msgid "Back centre"
+msgstr "Back centre"
+
 #: src/pages/settings/playback.tsx
 msgid "Back in the player"
 msgstr "Back in the player"
@@ -889,6 +893,10 @@ msgstr "Change these on a phone, a computer or in a browser."
 #: src/pages/settings/apps.tsx
 msgid "Channel"
 msgstr "Channel"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Channel {code}"
+msgstr "Channel {code}"
 
 #: src/pages/settings/audio.tsx
 msgid "Channels"
@@ -1795,6 +1803,14 @@ msgstr "From the start"
 msgid "front"
 msgstr "front"
 
+#: src/components/player/scene-overlay.tsx
+msgid "Front left of centre"
+msgstr "Front left of centre"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Front right of centre"
+msgstr "Front right of centre"
+
 #: src/pages/settings/interface.tsx
 msgid "Frosted glass"
 msgstr "Frosted glass"
@@ -2261,6 +2277,10 @@ msgstr "Level dB"
 #: src/components/player/scene-overlay.tsx
 msgid "LFE"
 msgstr "LFE"
+
+#: src/components/player/scene-overlay.tsx
+msgid "LFE2"
+msgstr "LFE2"
 
 #: src/components/licenses.tsx
 msgid "Licences"
@@ -5046,9 +5066,21 @@ msgstr "Too many tries. Wait a moment and try again."
 msgid "Too many tries. Wait a moment, then try again."
 msgstr "Too many tries. Wait a moment, then try again."
 
+#: src/components/player/scene-overlay.tsx
+msgid "Top back centre"
+msgstr "Top back centre"
+
 #: src/pages/settings/interface.tsx
 msgid "Top bar"
 msgstr "Top bar"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Top centre"
+msgstr "Top centre"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Top front centre"
+msgstr "Top front centre"
 
 #: src/pages/settings/interface.tsx
 msgid "Top tabs"

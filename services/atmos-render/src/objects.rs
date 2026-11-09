@@ -198,6 +198,8 @@ pub struct Scene {
     pending: Vec<Update>,
     /// Each input's slot in Windows' renderer (`windows_slots`).
     slots: Vec<Option<u16>>,
+    /// Which inputs are the LFE2 bed channel (the debug view's name).
+    lfe2: Vec<bool>,
 }
 
 impl Scene {
@@ -219,6 +221,9 @@ impl Scene {
         let isf = bed_bits.len()..bed_bits.len() + prog.num_isf_objects;
         if self.inputs.len() != count {
             self.slots = windows_slots(&bed_bits, isf.clone(), count);
+            self.lfe2 = (0..count)
+                .map(|i| bed_bits.get(i).is_some_and(|&b| SpeakerLabels::from_u8(b as u8) == Some(SpeakerLabels::LFE2)))
+                .collect();
             self.inputs = (0..count)
                 .map(|i| {
                     let (kind, pos) = if let Some(id) = ids.get(i) {
@@ -308,8 +313,10 @@ impl Scene {
         use crate::input::Element;
         self.inputs
             .iter()
-            .map(|i| match i.kind {
+            .enumerate()
+            .map(|(n, i)| match i.kind {
                 Kind::Bed(id) => Element::Bed(id),
+                Kind::Lfe if self.lfe2.get(n).copied().unwrap_or(false) => Element::Lfe2,
                 Kind::Lfe => Element::Lfe,
                 Kind::Object => Element::Object,
                 Kind::Isf => Element::Isf,

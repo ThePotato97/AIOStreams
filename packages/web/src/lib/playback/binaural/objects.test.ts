@@ -110,3 +110,39 @@ describe('snapshots from the renderer', () => {
     ]);
   });
 });
+
+describe('named channels and LFE2', () => {
+  it('are read with their codes', () => {
+    const n = NaN;
+    // kind 2 (LFE) numbered 2, and kind 5 (named channel) with code 3, back centre
+    const data = new Float64Array([
+      0,
+      2,
+      2,
+      2,
+      -1,
+      1,
+      n,
+      n,
+      n,
+      1,
+      0.5,
+      -1,
+      5,
+      3,
+      1,
+      1,
+      0.5,
+      1,
+      0,
+      1,
+      0.25,
+      16,
+    ]);
+    const [snapshot] = readSnapshots(data, 0, 48000);
+    expect(snapshot.elements.map((e) => [e.kind, e.bed, e.slot])).toEqual([
+      ['lfe', 2, null],
+      ['channel', 3, 16],
+    ]);
+  });
+});
