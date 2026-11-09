@@ -108,7 +108,11 @@ class BinauralTransmuxer {
       this.waiting.clear();
     };
     const request = localAudio.request;
-    const plan = request ? planFor(request) : BINAURAL_ONLY;
+    const plan = {
+      ...(request ? planFor(request) : BINAURAL_ONLY),
+      // what the debug view has switched off
+      disabled: sceneStore.disabledList(),
+    };
     this.plan = plan;
     this.loaded = this.call({ type: 'load', wasmUrl, codec, plan }).then(() =>
       localAudio.started(plan)

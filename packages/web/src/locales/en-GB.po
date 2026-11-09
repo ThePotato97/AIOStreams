@@ -59,6 +59,10 @@ msgstr "{count, plural, one {Download added} other {# downloads added}}"
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr "{count, plural, one {Trailer} other {Trailers}}"
 
+#: src/components/player/scene-overlay.tsx
+msgid "{count} switched off, rendered again from here"
+msgstr "{count} switched off, rendered again from here"
+
 #: src/lib/guest/engine.ts
 msgid "{detail}. Try another quality or ask the host to select another source."
 msgstr "{detail}. Try another quality or ask the host to select another source."
@@ -504,6 +508,10 @@ msgstr "All episodes"
 msgid "All fields"
 msgstr "All fields"
 
+#: src/components/player/scene-overlay.tsx
+msgid "All on"
+msgstr "All on"
+
 #: src/components/playlists.tsx
 msgid "All playlists"
 msgstr "All playlists"
@@ -847,10 +855,6 @@ msgstr "Casual"
 #: src/pages/discover.tsx
 msgid "Catalog"
 msgstr "Catalog"
-
-#: src/components/player/scene-overlay.tsx
-msgid "ceiling to floor"
-msgstr "ceiling to floor"
 
 #: src/pages/settings/downloads.tsx
 msgid "Change"
@@ -1783,21 +1787,13 @@ msgstr "Forward"
 msgid "Frame timings"
 msgstr "Frame timings"
 
-#: src/components/player/scene-overlay.tsx
-msgid "From above"
-msgstr "From above"
-
-#: src/components/player/scene-overlay.tsx
-msgid "From the side"
-msgstr "From the side"
-
 #: src/components/version-picker.tsx
 msgid "From the start"
 msgstr "From the start"
 
 #: src/components/player/scene-overlay.tsx
-msgid "front to back"
-msgstr "front to back"
+msgid "front"
+msgstr "front"
 
 #: src/pages/settings/interface.tsx
 msgid "Frosted glass"
@@ -2233,10 +2229,6 @@ msgstr "Left"
 #: src/pages/settings/interface.tsx
 msgid "Left empty, posters stand alone. A poster without artwork still shows its title."
 msgstr "Left empty, posters stand alone. A poster without artwork still shows its title."
-
-#: src/components/player/scene-overlay.tsx
-msgid "left to right"
-msgstr "left to right"
 
 #: src/components/player/options.tsx
 msgid "Less dialogue boost"
@@ -2845,6 +2837,7 @@ msgid "Older ones wait for the server instead. Without a connection, everything 
 msgstr "Older ones wait for the server instead. Without a connection, everything saved is shown."
 
 #: src/components/player/options.tsx
+#: src/components/player/scene-overlay.tsx
 msgid "On"
 msgstr "On"
 
@@ -2871,6 +2864,10 @@ msgstr "On wide screens"
 #: src/components/shortcut-settings.tsx
 msgid "Once one of the controls is selected, the arrow keys move between the controls instead."
 msgstr "Once one of the controls is selected, the arrow keys move between the controls instead."
+
+#: src/components/player/scene-overlay.tsx
+msgid "only"
+msgstr "only"
 
 #: src/lib/subtitles/files.ts
 msgid "Only {names} files can be added"
@@ -2903,6 +2900,10 @@ msgstr "Only the host controls playback."
 #: src/pages/settings/audio.tsx
 msgid "Only the ones your TV or receiver decodes; this app decodes the rest. DTS-HD needs DTS too."
 msgstr "Only the ones your TV or receiver decodes; this app decodes the rest. DTS-HD needs DTS too."
+
+#: src/components/player/scene-overlay.tsx
+msgid "Only this"
+msgstr "Only this"
 
 #: src/lib/i18n.ts
 msgid "Oops!"
@@ -3669,6 +3670,14 @@ msgstr "Removed from history"
 #: src/components/playlists.tsx
 msgid "Rename"
 msgstr "Rename"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Render {label}"
+msgstr "Render {label}"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Render only {label}"
+msgstr "Render only {label}"
 
 #: src/components/playlists.tsx
 msgid "Repeat"
@@ -4787,6 +4796,10 @@ msgstr "The relay could not read that."
 #: src/pages/settings/downloads.tsx
 msgid "The rest wait their turn."
 msgstr "The rest wait their turn."
+
+#: src/components/player/scene-overlay.tsx
+msgid "The room in 3D: drag to turn it, double-click to reset"
+msgstr "The room in 3D: drag to turn it, double-click to reset"
 
 #: src/pages/settings/playback.tsx
 msgid "The same for episodes marked as a recap."

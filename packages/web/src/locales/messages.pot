@@ -58,6 +58,10 @@ msgstr ""
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "{count} switched off, rendered again from here"
+msgstr ""
+
 #: src/lib/guest/engine.ts
 msgid "{detail}. Try another quality or ask the host to select another source."
 msgstr ""
@@ -503,6 +507,10 @@ msgstr ""
 msgid "All fields"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "All on"
+msgstr ""
+
 #: src/components/playlists.tsx
 msgid "All playlists"
 msgstr ""
@@ -845,10 +853,6 @@ msgstr ""
 
 #: src/pages/discover.tsx
 msgid "Catalog"
-msgstr ""
-
-#: src/components/player/scene-overlay.tsx
-msgid "ceiling to floor"
 msgstr ""
 
 #: src/pages/settings/downloads.tsx
@@ -1782,20 +1786,12 @@ msgstr ""
 msgid "Frame timings"
 msgstr ""
 
-#: src/components/player/scene-overlay.tsx
-msgid "From above"
-msgstr ""
-
-#: src/components/player/scene-overlay.tsx
-msgid "From the side"
-msgstr ""
-
 #: src/components/version-picker.tsx
 msgid "From the start"
 msgstr ""
 
 #: src/components/player/scene-overlay.tsx
-msgid "front to back"
+msgid "front"
 msgstr ""
 
 #: src/pages/settings/interface.tsx
@@ -2231,10 +2227,6 @@ msgstr ""
 
 #: src/pages/settings/interface.tsx
 msgid "Left empty, posters stand alone. A poster without artwork still shows its title."
-msgstr ""
-
-#: src/components/player/scene-overlay.tsx
-msgid "left to right"
 msgstr ""
 
 #: src/components/player/options.tsx
@@ -2844,6 +2836,7 @@ msgid "Older ones wait for the server instead. Without a connection, everything 
 msgstr ""
 
 #: src/components/player/options.tsx
+#: src/components/player/scene-overlay.tsx
 msgid "On"
 msgstr ""
 
@@ -2869,6 +2862,10 @@ msgstr ""
 
 #: src/components/shortcut-settings.tsx
 msgid "Once one of the controls is selected, the arrow keys move between the controls instead."
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "only"
 msgstr ""
 
 #: src/lib/subtitles/files.ts
@@ -2901,6 +2898,10 @@ msgstr ""
 
 #: src/pages/settings/audio.tsx
 msgid "Only the ones your TV or receiver decodes; this app decodes the rest. DTS-HD needs DTS too."
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Only this"
 msgstr ""
 
 #: src/lib/i18n.ts
@@ -3667,6 +3668,14 @@ msgstr ""
 
 #: src/components/playlists.tsx
 msgid "Rename"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Render {label}"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Render only {label}"
 msgstr ""
 
 #: src/components/playlists.tsx
@@ -4785,6 +4794,10 @@ msgstr ""
 
 #: src/pages/settings/downloads.tsx
 msgid "The rest wait their turn."
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "The room in 3D: drag to turn it, double-click to reset"
 msgstr ""
 
 #: src/pages/settings/playback.tsx

@@ -103,6 +103,15 @@ export const BED_LABELS: Record<number, string> = {
 
 /** How long an element has to have had no signal to count as silent, seconds. */
 export const SILENT_AFTER = 1;
+/**
+ * Below this an input counts as having no signal, dBFS: decoders leave idle objects at a noise
+ * floor rather than at exact zero (DD+ JOC objects sit near -123 dB). Display only.
+ */
+export const SILENT_DB = -100;
+const SILENT_LEVEL = 10 ** (SILENT_DB / 20);
+
+/** Whether an input level is signal rather than a decoder's noise floor. */
+export const hasSignal = (level: number) => level >= SILENT_LEVEL;
 
 /**
  * The elements of `current` with no signal in any of `recent` (the snapshots of the last
@@ -118,7 +127,7 @@ export function silentElements(
   );
   const silent = new Set<number>();
   current.elements.forEach((_, i) => {
-    if (same.every((s) => !(s.elements[i].level > 0))) silent.add(i);
+    if (same.every((s) => !hasSignal(s.elements[i].level))) silent.add(i);
   });
   return silent;
 }
@@ -133,7 +142,15 @@ class SceneStore {
   private snapshots: SceneSnapshot[] = [];
   private renderers = 0;
   private listeners = new Set<Listener>();
+  /** Told when the switched-off elements change: the audio has to be rendered again. */
+  private disabledListeners = new Set<Listener>();
   shown = false;
+  /**
+   * Elements switched off in the view (indices in the snapshots' order), rendered as silence in
+   * this browser's binaural render. Kept across the reloads a change causes; cleared when the view
+   * closes and when another track plays.
+   */
+  disabled: ReadonlySet<number> = new Set();
 
   private notify() {
     for (const l of this.listeners) l();
@@ -164,7 +181,58 @@ class SceneStore {
 
   toggle = () => {
     this.shown = !this.shown;
+    // nothing stays switched off once the view that shows it is gone
+    if (!this.shown) this.setDisabled(new Set());
     this.notify();
+  };
+
+  /** The switched-off elements, ascending. */
+  disabledList(): number[] {
+    return [...this.disabled].sort((a, b) => a - b);
+  }
+
+  private setDisabled(next: Set<number>) {
+    const same =
+      next.size === this.disabled.size &&
+      [...next].every((i) => this.disabled.has(i));
+    if (same) return;
+    this.disabled = next;
+    this.notify();
+    for (const l of this.disabledListeners) l();
+  }
+
+  /** Switches one element on or off. */
+  toggleElement = (index: number) => {
+    const next = new Set(this.disabled);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    this.setDisabled(next);
+  };
+
+  /** Switches these elements on or off together. */
+  setElements = (indices: number[], on: boolean) => {
+    const next = new Set(this.disabled);
+    for (const i of indices) {
+      if (on) next.delete(i);
+      else next.add(i);
+    }
+    this.setDisabled(next);
+  };
+
+  /** Only `index` stays on, of `count` elements. */
+  only = (index: number, count: number) => {
+    this.setDisabled(
+      new Set(Array.from({ length: count }, (_, i) => i).filter((i) => i !== index))
+    );
+  };
+
+  /** Everything on again. */
+  allOn = () => this.setDisabled(new Set());
+
+  /** For the player: told when the switched-off elements change. */
+  subscribeDisabled = (listener: Listener) => {
+    this.disabledListeners.add(listener);
+    return () => this.disabledListeners.delete(listener);
   };
 
   /** Snapshots of a converted segment; a seek's segments replace what they overlap. */

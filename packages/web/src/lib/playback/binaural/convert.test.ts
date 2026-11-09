@@ -550,8 +550,10 @@ describe.skipIf(!ffmpeg || !haveWasm || !haveLibav || !existsSync(nativePath))(
   'E-AC-3 with the libav.js core decoder',
   () => {
     it('renders 5.1 E-AC-3 as the native renderer does', async () => {
+      // quiet enough that the output stays under the limiters with the Movie profile's volmax:
+      // their attack would magnify the two decoders' last-bit differences
       const tones = [220, 330, 440, 550, 60, 770]
-        .map((f) => `0.3*sin(2*PI*${f}*t)`)
+        .map((f) => `0.05*sin(2*PI*${f}*t)`)
         .join('|');
       const src = join(dir, 'src-eac3.mkv');
       execFileSync('ffmpeg', [

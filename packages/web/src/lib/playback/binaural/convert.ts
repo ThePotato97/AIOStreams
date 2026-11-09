@@ -29,6 +29,11 @@ export interface OutputPlan {
   /** The speaker version's layout, the transcoder's for this track and output. */
   layout: SpeakerLayout;
   contents: OutputContents;
+  /**
+   * Elements switched off in the debug view (indices in the snapshots' order), rendered as
+   * silence in the binaural render; the speaker version isn't object-based and keeps them all.
+   */
+  disabled?: number[];
 }
 
 /** FLAC's most channels. */
@@ -52,6 +57,7 @@ export interface RendererExports {
   ): number;
   ar_output(session: number): number;
   ar_debug(session: number, on: number): void;
+  ar_disable(session: number, ptr: number, len: number): void;
   ar_debug_len(session: number): number;
   ar_debug_data(session: number): number;
   ar_speakers_len(session: number): number;
@@ -131,6 +137,14 @@ export class BinauralConverter {
     this.outPos = at;
     this.sessionStart = at;
     this.r.ar_debug(this.session, 1);
+    const off = this.plan.disabled ?? [];
+    if (off.length) {
+      const bytes = off.length * 4;
+      const ptr = this.r.ar_alloc(bytes);
+      new Uint32Array(this.r.memory.buffer, ptr, off.length).set(off);
+      this.r.ar_disable(this.session, ptr, off.length);
+      this.r.ar_free(ptr, bytes);
+    }
     this.carry = new Float32Array(0);
   }
 

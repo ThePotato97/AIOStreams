@@ -26,6 +26,7 @@ import {
   surroundOutput,
   type HeadphoneMode,
 } from '../playback/binaural/local-audio';
+import { sceneStore } from '../playback/binaural/objects';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
 import { sleep, whenReady } from './ready';
@@ -612,6 +613,18 @@ export function guestEngine(
     let askedHeadphones: boolean | null = null;
     let askedMode: HeadphoneMode | null = null;
     let unwatch: (() => void) | null = null;
+    // The debug view's switched-off elements: the page renders them as silence, so a change
+    // converts again from the same job's segments, once the clicks settle.
+    let unwatchDisabled: (() => void) | null = null;
+    let disabledTimer: ReturnType<typeof setTimeout> | undefined;
+    const watchDisabled = () => {
+      unwatchDisabled ??= sceneStore.subscribeDisabled(() => {
+        clearTimeout(disabledTimer);
+        disabledTimer = setTimeout(() => {
+          if (playback?.clientBinaural && !preparing) void prepare(position());
+        }, 600);
+      });
+    };
     const watch = () => {
       unwatch ??= watchHeadphones((now, mode) => {
         // the binaural render playing (or carried) is in another mode than the listener's now
@@ -674,6 +687,10 @@ export function guestEngine(
       load(next) {
         startHeartbeat();
         watch();
+        watchDisabled();
+        // another title's elements; the prepare below converts it with them all on
+        sceneStore.allOn();
+        clearTimeout(disabledTimer);
         playback = null;
         file = next;
         force = false;
@@ -747,6 +764,9 @@ export function guestEngine(
         const next = Number(id);
         if (audio === next) return;
         audio = next;
+        // another track's elements; the prepare below converts it with them all on
+        sceneStore.allOn();
+        clearTimeout(disabledTimer);
         void prepare(position());
       },
       setSubtitle(id) {
@@ -764,6 +784,9 @@ export function guestEngine(
         clearInterval(heartbeat);
         unwatch?.();
         unwatch = null;
+        clearTimeout(disabledTimer);
+        unwatchDisabled?.();
+        unwatchDisabled = null;
         // Nothing to release before a playback was ever prepared.
         if (playback?.lease)
           void api
