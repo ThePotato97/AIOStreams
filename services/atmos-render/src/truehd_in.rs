@@ -23,6 +23,8 @@ pub struct TrueHd {
     scene: Scene,
     /// Where a channel presentation's channels (no OAMD) are placed.
     channel_beds: Vec<Static>,
+    /// Their Windows slots (`channels::windows_slots_of`).
+    channel_slots: Vec<Option<u16>>,
     atmos: Option<bool>,
     /// Dialnorm per presentation (2, 6, 8 and 16 channels), from the last major sync.
     dialnorm: [u8; 4],
@@ -118,6 +120,7 @@ impl TrueHd {
             decoder: Decoder::default(),
             scene: Scene::new(modes),
             channel_beds: Vec::new(),
+            channel_slots: Vec::new(),
             atmos: None,
             dialnorm: [0; 4],
             samples: 0,
@@ -174,7 +177,8 @@ impl TrueHd {
             self.scene.update(p, self.samples);
         }
         if self.atmos == Some(false) && self.channel_beds.len() != ch {
-            let statics = decoded.channel_labels.iter().map(|&l| label_static(l)).collect();
+            let statics: Vec<Static> = decoded.channel_labels.iter().map(|&l| label_static(l)).collect();
+            self.channel_slots = channels::windows_slots_of(statics.clone());
             self.channel_beds = channels::routed(statics, self.scene.modes, self.scene.speakers);
         }
         // The Reference Player's dialnorm (both loudness settings: Windows doesn't decode TrueHD):
@@ -290,7 +294,7 @@ impl Feed for TrueHd {
         if self.atmos == Some(true) {
             self.scene.windows_slots()
         } else {
-            channels::windows_slots(&self.channel_beds)
+            self.channel_slots.clone()
         }
     }
 

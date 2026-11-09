@@ -143,6 +143,13 @@ pub fn windows_slots(statics: &[Static]) -> Vec<Option<u16>> {
         .collect()
 }
 
+/// The Windows slots of a channel stream's statics, from the decoder's layout (before `routed`):
+/// as Windows routes it, whatever mode this renders in. Windows never moves 5.1 surrounds to the
+/// rear corners, and a stereo stream takes its stereo-bypass pair.
+pub fn windows_slots_of(statics: Vec<Static>) -> Vec<Option<u16>> {
+    windows_slots(&routed(statics, Modes::Windows, false))
+}
+
 /// What a static input is, for the debug view.
 pub fn element(s: Static) -> crate::input::Element {
     use crate::input::Element;
@@ -278,5 +285,16 @@ mod tests {
         assert_eq!(Channel::BackCentre.position(), [0.5, 1.0, 0.0]);
         assert_eq!(wav_mask(0x40)[0], Static::Channel(Channel::FrontLeftOfCentre));
         assert_eq!(wav_mask(0x10000)[0], Static::Channel(Channel::TopBackCentre));
+    }
+
+    #[test]
+    fn the_windows_slots_ignore_this_renderers_mode() {
+        // E-AC-3 5.1 (FFmpeg gives it side bits): "as mixed" moves the surrounds to the rear
+        // corners, Windows types them SideLeft/SideRight
+        let five_one = wav_mask(0x60F);
+        assert_eq!(routed(five_one.clone(), Modes::Stream, false)[4], Static::Bed(7));
+        assert_eq!(windows_slots_of(five_one), [0, 1, 2, 3, 4, 5].map(Some).to_vec());
+        // stereo in stream mode renders as two beds here; Windows takes the bypass
+        assert_eq!(windows_slots_of(wav_mask(0x3)), vec![Some(17), Some(18)]);
     }
 }

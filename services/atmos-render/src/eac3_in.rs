@@ -54,6 +54,8 @@ pub struct Eac3 {
     samples: u64,
     /// Bed channel IDs of the core channels (no JOC), None = LFE.
     core_beds: Vec<Static>,
+    /// The core's Windows slots (`channels::windows_slots_of`).
+    core_slots: Vec<Option<u16>>,
 }
 
 
@@ -163,6 +165,7 @@ impl Eac3 {
             atmos: None,
             samples: 0,
             core_beds: Vec::new(),
+            core_slots: Vec::new(),
         }
     }
 
@@ -170,6 +173,7 @@ impl Eac3 {
         if self.layout != Some((channels, mask)) {
             self.layout = Some((channels, mask));
             self.core_beds = channels::routed(channels::wav_mask(mask), self.scene.modes, self.scene.speakers);
+            self.core_slots = channels::windows_slots_of(channels::wav_mask(mask));
         }
     }
 
@@ -402,7 +406,7 @@ impl Feed for Eac3 {
         if self.atmos == Some(true) {
             self.scene.windows_slots()
         } else {
-            channels::windows_slots(&self.core_beds)
+            self.core_slots.clone()
         }
     }
 
