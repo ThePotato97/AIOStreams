@@ -32,7 +32,7 @@ const RF_OFFSET: f64 = 16.0 * 0.11457825;
 /// A DRC word's gain: (1 + frac x) 2^floor x.
 pub fn word_gain(x: f64) -> f64 {
     let f = x.floor();
-    (1.0 + (x - f)) * 2f64.powf(f)
+    (1.0 + (x - f)) * libm::pow(2.0, f)
 }
 
 /// FFmpeg's arguments for the AC-3 / E-AC-3 decoder.
@@ -87,7 +87,7 @@ pub fn frame_compr(frame: &[u8]) -> Option<i8> {
 /// TrueHD dialnorm gain: DN - 31 dB, DN = 0 as 31.
 pub fn truehd_dialnorm(dn: u8) -> f32 {
     let dn = if dn == 0 { 31 } else { dn.min(31) };
-    10f32.powf((dn as f32 - 31.0) / 20.0)
+    libm::powf(10.0, (dn as f32 - 31.0) / 20.0)
 }
 
 #[cfg(test)]

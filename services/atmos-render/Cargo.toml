@@ -12,6 +12,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 anyhow = "1"
+libm = "0.2"
 oamd = "0.1"
 serde_json = "1"
 # The repository's truehd uses the oamd crate (the published 0.7.2 still has its own copy).

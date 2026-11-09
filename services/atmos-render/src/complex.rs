@@ -18,7 +18,7 @@ impl C32 {
         Self { re, im: 0.0 }
     }
     pub fn cis(phase: f32) -> Self {
-        let (s, c) = phase.sin_cos();
+        let (s, c) = (libm::sinf(phase), libm::cosf(phase));
         Self { re: c, im: s }
     }
     pub fn conj(self) -> Self {

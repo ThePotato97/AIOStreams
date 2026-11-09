@@ -23,10 +23,10 @@ impl Modulation {
         for sb in 0..SUBBANDS {
             for j in 0..DOUBLE {
                 let e = std::f64::consts::PI * (sb as f64 + 0.5) * (j as f64 - 0.5) / SUBBANDS as f64;
-                fwd[sb][j] = C32::new(e.cos() as f32, e.sin() as f32);
+                fwd[sb][j] = C32::new(libm::cos(e) as f32, libm::sin(e) as f32);
                 let e = std::f64::consts::PI * (sb as f64 + 0.5) * (j as f64 - DOUBLE as f64 + 0.5)
                     / SUBBANDS as f64;
-                inv[sb][j] = C32::new((e.cos() / SUBBANDS as f64) as f32, (e.sin() / SUBBANDS as f64) as f32);
+                inv[sb][j] = C32::new((libm::cos(e) / SUBBANDS as f64) as f32, (libm::sin(e) / SUBBANDS as f64) as f32);
             }
         }
         Self { fwd, inv }

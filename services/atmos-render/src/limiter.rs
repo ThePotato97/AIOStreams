@@ -180,8 +180,8 @@ impl EngineLimiter {
             step: 0.0,
             peak: ENGINE_CEILING,
             ramp: 0,
-            release: x.exp(),
-            decay: (-x).exp(),
+            release: libm::exp(x),
+            decay: libm::exp(-x),
             silenced: false,
         }
     }

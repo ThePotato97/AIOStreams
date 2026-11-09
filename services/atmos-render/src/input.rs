@@ -139,6 +139,8 @@ pub struct Pipeline {
     emitted: u64,
     /// Kept only for the debug view (`debug`).
     pub snapshots: Option<Snapshots>,
+    /// The debug view's switched-off inputs (in `sources` order): rendered as silence.
+    disabled: Vec<bool>,
 }
 
 impl Pipeline {
@@ -151,12 +153,22 @@ impl Pipeline {
             Output::Binaural => Engine::Binaural(Renderer::new()?),
             Output::Speakers => Engine::Speakers(Box::new(SpeakerRenderer::new())),
         };
-        Ok(Self { renderer, pending: Vec::new(), at: 0, origin: None, taken: 0, rendered: 0, emitted: 0, snapshots: None })
+        Ok(Self { renderer, pending: Vec::new(), at: 0, origin: None, taken: 0, rendered: 0, emitted: 0, snapshots: None, disabled: Vec::new() })
     }
 
     /// Keeps snapshots of the scene for the debug view, or stops.
     pub fn debug(&mut self, on: bool) {
         self.snapshots = on.then(|| Snapshots { data: Vec::new(), open: None });
+    }
+
+    /// For the debug view: render these inputs (indices in `sources` order) as silence, every
+    /// other one as usual; an empty list renders them all. The snapshots keep every input's own
+    /// level.
+    pub fn disable(&mut self, inputs: &[usize]) {
+        self.disabled = vec![false; inputs.iter().max().map_or(0, |m| m + 1)];
+        for &i in inputs {
+            self.disabled[i] = true;
+        }
     }
 
     pub fn take(&mut self, feed: &mut dyn Feed, block: Block, emit: &mut dyn FnMut(&[f32], &[f32])) {
@@ -210,6 +222,9 @@ impl Pipeline {
                 }
                 o.count += SLOT;
             }
+            const SILENCE: [f32; SLOT] = [0.0; SLOT];
+            let refs: Vec<&[f32]> =
+                refs.iter().enumerate().map(|(i, r)| if self.disabled.get(i).copied().unwrap_or(false) { &SILENCE[..] } else { *r }).collect();
             self.renderer.slot(&refs, &mut l, &mut r);
             // output sample k of this slot is input sample (rendered + k - latency)
             for k in 0..SLOT {
@@ -311,5 +326,30 @@ mod snapshot_tests {
         assert!((l[8] - 1.25).abs() < 1e-6 && (r[8] - 0.5).abs() < 1e-6, "{} {}", l[8], r[8]);
         // drawn where E puts the pair, with no render mode
         assert_eq!((l[2], l[4], r[4]), (-1.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn a_disabled_input_renders_as_silence_and_keeps_its_level() {
+        let n = 8192;
+        let run = |off: &[usize], second: f32| {
+            let mut p = Pipeline::new().unwrap();
+            p.debug(true);
+            p.disable(off);
+            let block = Block { start: 0, samples: vec![vec![0.5; n], vec![second; n]] };
+            let mut out = Vec::new();
+            p.take(&mut Two, block, &mut |l, r| out.extend([l[0], r[0]]));
+            (out, p.snapshots.as_ref().unwrap().data.clone())
+        };
+        // switching the LFE off is the same as feeding it silence
+        let (off, snap_off) = run(&[1], -0.25);
+        let (silent, _) = run(&[], 0.0);
+        assert_eq!(off, silent);
+        // and the snapshots still show its own level
+        let (_, snap_on) = run(&[], -0.25);
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&snap_off), bits(&snap_on));
+        // everything off: nothing out
+        let (none, _) = run(&[0, 1], -0.25);
+        assert!(none.iter().all(|v| *v == 0.0));
     }
 }

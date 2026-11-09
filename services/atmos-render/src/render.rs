@@ -183,8 +183,9 @@ impl Renderer {
         let (db, _) = self.leveler.process(&p);
         self.leveled_db = db;
         // [I]: DAP converts with its own 2^x (sub_18000E770); this is the exact power
-        let gain: [f32; NB] = std::array::from_fn(|b| 10f32.powf(db[b] as f32 / 20.0));
-        let scale = OUTPUT_SCALE * POST_CHAIN_GAIN * 10f32.powf(VOLMAX_DB / 20.0);
+        // libm: the same bits natively and in WebAssembly
+        let gain: [f32; NB] = std::array::from_fn(|b| libm::powf(10.0, db[b] as f32 / 20.0));
+        let scale = OUTPUT_SCALE * POST_CHAIN_GAIN * libm::powf(10.0, VOLMAX_DB / 20.0);
         for (k, slot) in held.iter_mut().enumerate() {
             for ear in 0..2 {
                 for (bin, x) in slot[ear].iter_mut().enumerate() {

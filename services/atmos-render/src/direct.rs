@@ -204,7 +204,7 @@ pub fn input_gains(t: &Tuning, pos: [f32; 3], mode: Mode, gain: f32) -> InputGai
         let m0 = &t.modes[0];
         let u = (m0.p6 * (1.0 - 2.0 * pos[0]) * m0.lat_scale).clamp(-1.0, 1.0);
         let theta = std::f32::consts::FRAC_PI_4 * (1.0 + u);
-        let (l, r) = (g * theta.sin().max(0.0), g * theta.cos().max(0.0));
+        let (l, r) = (g * libm::sinf(theta).max(0.0), g * libm::cosf(theta).max(0.0));
         for b in 0..BANDS {
             out.ears[0][b] = C32::real(l);
             out.ears[1][b] = C32::real(r);

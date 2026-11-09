@@ -66,7 +66,7 @@ impl Fft {
         let tw = (0..n / 2)
             .map(|k| {
                 let a = -2.0 * std::f64::consts::PI * k as f64 / n as f64;
-                C32::new(a.cos() as f32, a.sin() as f32)
+                C32::new(libm::cos(a) as f32, libm::sin(a) as f32)
             })
             .collect();
         Self { n, tw, rev }

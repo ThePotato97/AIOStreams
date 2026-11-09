@@ -23,7 +23,7 @@ impl C64 {
         Self { re, im }
     }
     fn cis(phase: f64) -> Self {
-        Self::new(phase.cos(), phase.sin())
+        Self::new(libm::cos(phase), libm::sin(phase))
     }
     fn conj(self) -> Self {
         Self::new(self.re, -self.im)
@@ -67,7 +67,7 @@ fn head_model(angle: i32, fs: u32) -> [f64; 5] {
     let v4 = (fs >> 1) as f64;
     // theta / 4
     let th = a * 0.004363323;
-    let s = (th * 4.0).sin();
+    let s = libm::sin(th * 4.0);
     // Woodworth, a = 9 cm: (0.09/343)(theta + sin theta) fs
     let tau = (0.25 * s + th) * (v4 * 0.0020991254);
     // (343/0.09)/(4 fs): the bilinear head shadow's corner
@@ -112,7 +112,7 @@ fn log2_poly(x: f64) -> f64 {
     if x == 0.0 || !x.is_finite() {
         return f64::NEG_INFINITY;
     }
-    let mut e = x.abs().log2().floor() as i32 + 1;
+    let mut e = libm::log2(x.abs()).floor() as i32 + 1;
     let mut m = x / 2f64.powi(e);
     // frexp's mantissa is in [0.5, 1)
     if m >= 1.0 {

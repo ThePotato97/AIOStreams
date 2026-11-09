@@ -3,7 +3,10 @@
 //! the trace's per-block port (`leveler.py::DVLeveler`, from R `dv_leveler_main` 0x18001A610 and
 //! its callees; leveler.md sections 1-7 and 12) for engine A (`DolbyAudioProcessing.dll`): A's boost
 //! cap (0.030068714) and no silence-hold reset. The tables are R's (`R_dv_tables.json`), which are
-//! byte-identical in A. Like the port, it runs in f64 where the DLL uses f32.
+//! byte-identical in A. Like the port, it runs in f64 where the DLL uses f32. Its transcendental
+//! functions come from the `libm` crate, so the native and WebAssembly builds compute the same
+//! bits (the platforms' own maths libraries differ in the last place, and the leveler's
+//! thresholds and feedback carry that into the output).
 //!
 //! Per 256-sample block: the band powers of every rendered channel (`band_powers`) go in, one
 //! gain per DAP band comes out, applied to every hybrid bin of the band for the whole block.
@@ -126,7 +129,7 @@ fn logadd_vec(a: &[f64; NB], b: &[f64; NB]) -> [f64; NB] {
 fn pow2a(x: f64) -> f64 {
     let f = x.floor();
     let r = x - f;
-    (1.0 + r * 0.6862793 + r * r * 0.25482178 + r * r * r * 0.058898926) * 2f64.powi(f as i32)
+    libm::ldexp(1.0 + r * 0.6862793 + r * r * 0.25482178 + r * r * r * 0.058898926, f as i32)
 }
 
 /// sub_180034280: the leveler's static curve, `t` an 18-field table row.
@@ -266,7 +269,7 @@ impl Rhythm {
         // the traced constant (A and R), not exactly pi/8
         #[allow(clippy::approx_constant)]
         let ph = (v - k) * 0.3926991 * 4.0;
-        (k as usize, ph.cos(), ph.sin())
+        (k as usize, libm::cos(ph), libm::sin(ph))
     }
 
     fn update(&mut self, inc: f64, l: f64, aw: f64) {
@@ -478,8 +481,8 @@ impl Leveler {
         let a6core = -0.18509077;
         let reference = (-0.2769231f64).max(0.0) + a6core + self.t.det_const;
         std::array::from_fn(|b| {
-            let pw = p.iter().map(|c| c[b]).sum::<f64>() * 2f64.powi(-6);
-            let l = if pw > 0.0 { 10.0 * pw.log10() / 130.0 } else { -1.3846154 };
+            let pw = p.iter().map(|c| c[b]).sum::<f64>() / 64.0;
+            let l = if pw > 0.0 { 10.0 * libm::log10(pw) / 130.0 } else { -1.3846154 };
             (l - reference).clamp(-1.0, 0.23076923)
         })
     }
@@ -636,7 +639,10 @@ impl Leveler {
         } else if lg < 0.24094655 {
             0.0
         } else {
-            ((lg - 0.24094655) * 0.5845423 * 4.0).powi(5)
+            {
+                let v = (lg - 0.24094655) * 0.5845423 * 4.0;
+                v * (v * v) * (v * v)
+            }
         };
         // 3A930
         let mg_ = self.b_tot[gi].min(self.s656[gi]);
@@ -787,7 +793,10 @@ impl Leveler {
             } else {
                 for b in 0..NB {
                     let v45 = (v16[b] - vg[b]).abs() + (v16[b] - v21).abs();
-                    w[g][b] = if v45 < 0.024999997 { (ONE - (32.0 * v45 + 8.0 * v45)).powi(2) } else { 0.0 };
+                    w[g][b] = if v45 < 0.024999997 { {
+                        let v = ONE - (32.0 * v45 + 8.0 * v45);
+                        v * v
+                    } } else { 0.0 };
                 }
             }
         }

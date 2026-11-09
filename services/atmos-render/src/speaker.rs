@@ -56,8 +56,8 @@ fn axis(positions: &[f32], v: f32, out: &mut [f32]) {
         let (a, b) = (positions[i], positions[i + 1]);
         if v >= a && v <= b {
             let t = (v - a) / (b - a);
-            out[i] = (t * std::f32::consts::FRAC_PI_2).cos();
-            out[i + 1] = (t * std::f32::consts::FRAC_PI_2).sin();
+            out[i] = libm::cosf(t * std::f32::consts::FRAC_PI_2);
+            out[i + 1] = libm::sinf(t * std::f32::consts::FRAC_PI_2);
             return;
         }
     }
@@ -124,11 +124,11 @@ pub fn pan(pos: [f32; 3], zone: u8) -> [f32; CHANNELS] {
     }
     let theta = z * std::f32::consts::FRAC_PI_2;
     // at the top (floor(z 32768) >= 0x7FFF) only the ceiling
-    let (wf, wc) = if (z * 32768.0).floor() >= 32767.0 { (0.0, 1.0) } else { (theta.cos(), theta.sin()) };
+    let (wf, wc) = if (z * 32768.0).floor() >= 32767.0 { (0.0, 1.0) } else { (libm::cosf(theta), libm::sinf(theta)) };
     // the automatic trim, weighted by the object's own y and z
     let clamp = |v: f32| v.clamp(0.0, 1.0);
     let w = clamp(clamp(y / 0.6) + clamp((z0 - 0.2) / 0.8));
-    let trim = 10f32.powf(w * TRIM_DB / 20.0);
+    let trim = libm::powf(10.0, w * TRIM_DB / 20.0);
     let mut out = [0.0; CHANNELS];
     for ch in 0..CHANNELS {
         out[ch] = (wf * fl[ch] + wc * ce[ch]) * trim;

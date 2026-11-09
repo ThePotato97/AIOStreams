@@ -138,7 +138,7 @@ fn isf_position(count: usize, i: usize) -> [f32; 3] {
 }
 
 fn db_to_gain(db: i8) -> f32 {
-    if db == oamd::GAIN_MINUS_INFINITY { 0.0 } else { 10f32.powf(db as f32 / 20.0) }
+    if db == oamd::GAIN_MINUS_INFINITY { 0.0 } else { libm::powf(10.0, db as f32 / 20.0) }
 }
 
 #[derive(Default)]

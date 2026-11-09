@@ -205,6 +205,20 @@ pub extern "C" fn ar_debug(session: *mut Session, on: bool) {
     unsafe { (*session).pipeline.debug(on) }
 }
 
+/// For the debug view: render the `len` inputs listed at `ptr` (u32 indices in the snapshots'
+/// order) as silence; `len` 0 renders them all.
+#[unsafe(no_mangle)]
+pub extern "C" fn ar_disable(session: *mut Session, ptr: *const u32, len: usize) {
+    let list: Vec<usize> = if len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: the caller's `len` u32s at `ptr`.
+        unsafe { std::slice::from_raw_parts(ptr, len) }.iter().map(|&i| i as usize).collect()
+    };
+    // SAFETY: a live session.
+    unsafe { (*session).pipeline.disable(&list) }
+}
+
 /// How many f64 `ar_debug_data` holds.
 #[unsafe(no_mangle)]
 pub extern "C" fn ar_debug_len(session: *mut Session) -> usize {
