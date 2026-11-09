@@ -111,6 +111,48 @@ pub fn ramp_coefficient(ramp: i64, a5: i64) -> f32 {
 
 /// Dolby channel ID of a bed bit (`hpv_bedmask_bit_to_channel_id`: bit i -> ID i + 1); LFE and
 /// LFE2 go to the LFE path.
+/// The E slot of a bed channel with a Windows AudioObjectType (FrontLeft .. TopBackRight, slots
+/// 0-11), by Dolby channel ID; parameters doc 12.8.
+pub fn windows_bed_slot(id: u32) -> Option<u16> {
+    match id {
+        1..=10 => Some(id as u16 - 1),
+        13 => Some(10),
+        14 => Some(11),
+        _ => None,
+    }
+}
+
+/// Where each OAMD element lands in Windows' renderer (E, `DolbyHrtfEnc.dll`), from a fresh
+/// spatial engine with one app playing (parameters doc 12.9): a bed channel with a Windows type at
+/// its fixed slot (LFE at 3); every dynamic-typed element, which takes in Ltm/Rtm and Lw/Rw (the
+/// decoder sends them as Dynamic, having no static type for them), at 19 + d, d the dynamic-typed
+/// elements before it in OAMD order (E hands out the lowest free slot, in the order objects first
+/// arrive, which is OAMD order); LFE2 and ISF elements nowhere (dropped). After a seek the
+/// renderer's objects are re-created without being ended, so their slots can shift [I].
+fn windows_slots(bed_bits: &[usize], isf: std::ops::Range<usize>, count: usize) -> Vec<Option<u16>> {
+    let mut dynamic = 0u16;
+    let mut next = || {
+        // E's 128 dynamic slots, 19-146
+        let slot = (dynamic < 128).then_some(19 + dynamic);
+        dynamic += 1;
+        slot
+    };
+    (0..count)
+        .map(|i| match bed_bits.get(i) {
+            Some(&bit) => match SpeakerLabels::from_u8(bit as u8) {
+                Some(SpeakerLabels::LFE) => Some(3),
+                Some(SpeakerLabels::LFE2) | None => None,
+                Some(_) => match bit as u32 + 1 {
+                    11 | 12 | 15 | 16 => next(),
+                    id => windows_bed_slot(id),
+                },
+            },
+            None if isf.contains(&i) => None,
+            None => next(),
+        })
+        .collect()
+}
+
 fn channel_id(bit: usize) -> Option<u32> {
     match SpeakerLabels::from_u8(bit as u8) {
         Some(SpeakerLabels::LFE) | Some(SpeakerLabels::LFE2) | None => None,
@@ -151,6 +193,8 @@ pub struct Scene {
     pub speakers: bool,
     pub inputs: Vec<Input>,
     pending: Vec<Update>,
+    /// Each input's slot in Windows' renderer (`windows_slots`).
+    slots: Vec<Option<u16>>,
 }
 
 impl Scene {
@@ -171,6 +215,7 @@ impl Scene {
         let retype = !self.speakers && self.modes.retypes() && has(5) && has(6) && !has(7) && !has(8);
         let isf = bed_bits.len()..bed_bits.len() + prog.num_isf_objects;
         if self.inputs.len() != count {
+            self.slots = windows_slots(&bed_bits, isf.clone(), count);
             self.inputs = (0..count)
                 .map(|i| {
                     let (kind, pos) = if let Some(id) = ids.get(i) {
@@ -269,6 +314,11 @@ impl Scene {
             .collect()
     }
 
+    /// Each input's slot in Windows' renderer, in `sources` order (`windows_slots`).
+    pub fn windows_slots(&self) -> Vec<Option<u16>> {
+        self.slots.clone()
+    }
+
     /// The renderer's sources for the current block (after `advance`).
     pub fn sources(&self) -> Vec<crate::render::Source> {
         use crate::render::Source;
@@ -338,6 +388,32 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_slots_follow_the_traced_rule() {
+        // a DD+ JOC stream: the LFE bed, then 15 dynamic objects
+        let lfe = 3;
+        let slots = windows_slots(&[lfe], 1..1, 16);
+        assert_eq!(slots[0], Some(3));
+        assert!((1..16).all(|i| slots[i] == Some(18 + i as u16)));
+        // a 7.1.4 bed with top middles and wides: fixed slots, the four untyped beds dynamic in
+        // order ahead of the objects; an ISF element and LFE2 nowhere
+        let bits: Vec<usize> = (0..16).collect();
+        let lfe2 = (0..32).find(|&b| SpeakerLabels::from_u8(b) == Some(SpeakerLabels::LFE2)).unwrap() as usize;
+        let mut with_lfe2 = bits.clone();
+        with_lfe2.push(lfe2);
+        let slots = windows_slots(&with_lfe2, 17..18, 19);
+        let want: Vec<Option<u16>> = vec![
+            Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7), Some(8), Some(9),
+            Some(19), Some(20), // Ltm, Rtm
+            Some(10), Some(11),
+            Some(21), Some(22), // Lw, Rw
+            None,               // LFE2
+            None,               // ISF
+            Some(23),           // the first object
+        ];
+        assert_eq!(slots, want);
+    }
 
     #[test]
     fn ramp_coefficients_follow_the_traced_table() {

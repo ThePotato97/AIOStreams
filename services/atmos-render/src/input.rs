@@ -38,6 +38,11 @@ pub trait Feed {
     fn elements(&self) -> Vec<Element> {
         Vec::new()
     }
+    /// Each input's slot in Windows' renderer, in `sources` order, for the debug view (nothing
+    /// without one).
+    fn windows_slots(&self) -> Vec<Option<u16>> {
+        Vec::new()
+    }
     /// Per input, in `sources` order: whether E folds it into the stereo-bypass pair, which gets
     /// neither its -3 dB headroom nor its clip (those belong to `SetAudioObject` alone:
     /// stereo_bypass.md section 1.3). Inputs past the end get both.
@@ -59,13 +64,14 @@ struct Open {
     sample: u64,
     sources: Vec<Source>,
     elements: Vec<Element>,
+    slots: Vec<Option<u16>>,
     sums: Vec<f64>,
     count: usize,
 }
 
 /// Blocks between snapshots: 1024 samples, about 47 a second.
 const EVERY: u64 = 4;
-pub const SNAPSHOT_FIELDS: usize = 9;
+pub const SNAPSHOT_FIELDS: usize = 10;
 
 impl Snapshots {
     fn close(&mut self) {
@@ -76,8 +82,9 @@ impl Snapshots {
         self.data.push(o.sample as f64);
         self.data.push(o.sources.len() as f64);
         for (i, s) in o.sources.iter().enumerate() {
-            // kind (0 object, 1 bed, 2 LFE, 3 ISF, -1 unknown), bed ID, render mode (Off 0,
-            // Near 1, Far 2, Mid 3; -1 none), active, x, y, z (NaN: none), metadata gain, RMS level
+            // kind (0 object, 1 bed, 2 LFE, 3 ISF, 4 stereo bypass, -1 unknown), bed ID (bypass:
+            // side), render mode (Off 0, Near 1, Far 2, Mid 3; -1 none), active, x, y, z (NaN:
+            // none), metadata gain, RMS level, Windows slot (-1 none)
             let (kind, bed) = match o.elements.get(i) {
                 Some(Element::Object) => (0.0, 0.0),
                 Some(Element::Bed(id)) => (1.0, *id as f64),
@@ -94,7 +101,8 @@ impl Snapshots {
                 Source::Bypass { gain, .. } => (-1.0, 1.0, [f64::NAN; 3], gain as f64),
                 Source::Silent => (-1.0, 0.0, [f64::NAN; 3], 0.0),
             };
-            self.data.extend_from_slice(&[kind, bed, mode, active, pos[0], pos[1], pos[2], gain, level]);
+            let slot = o.slots.get(i).copied().flatten().map_or(-1.0, f64::from);
+            self.data.extend_from_slice(&[kind, bed, mode, active, pos[0], pos[1], pos[2], gain, level, slot]);
         }
     }
 }
@@ -215,7 +223,14 @@ impl Pipeline {
                     snap.close();
                     if ((sample - origin) / BLOCK as u64) % EVERY == 0 {
                         let n = self.pending.len();
-                        snap.open = Some(Open { sample: sample - origin, elements: feed.elements(), sources, sums: vec![0.0; n], count: 0 });
+                        snap.open = Some(Open {
+                            sample: sample - origin,
+                            elements: feed.elements(),
+                            slots: feed.windows_slots(),
+                            sources,
+                            sums: vec![0.0; n],
+                            count: 0,
+                        });
                     }
                 }
             }
@@ -292,7 +307,8 @@ mod snapshot_tests {
         let second = &d[size..2 * size];
         assert_eq!(second[0], 1024.0);
         assert_eq!(second[1], 2.0);
-        let (object, lfe) = (&second[2..11], &second[11..20]);
+        let f = SNAPSHOT_FIELDS;
+        let (object, lfe) = (&second[2..2 + f], &second[2 + f..2 + 2 * f]);
         // object, Near, active, at (0, 0, 0); its level after the input headroom
         assert_eq!(&object[..8], &[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
         assert!((object[8] - 0.5 * crate::tuning::INPUT_HEADROOM as f64).abs() < 1e-6);
@@ -326,7 +342,8 @@ mod snapshot_tests {
         p.take(&mut Stereo, block, &mut |_, _| {});
         let d = &p.snapshots.as_ref().unwrap().data;
         let size = 2 + 2 * SNAPSHOT_FIELDS;
-        let (l, r) = (&d[size + 2..size + 11], &d[size + 11..size + 20]);
+        let f = SNAPSHOT_FIELDS;
+        let (l, r) = (&d[size + 2..size + 2 + f], &d[size + 2 + f..size + 2 + 2 * f]);
         assert!((l[8] - 1.25).abs() < 1e-6 && (r[8] - 0.5).abs() < 1e-6, "{} {}", l[8], r[8]);
         // the bypass pair, left then right, with no render mode and no position
         assert_eq!((l[0], l[1], r[0], r[1], l[2]), (4.0, 0.0, 4.0, 1.0, -1.0));

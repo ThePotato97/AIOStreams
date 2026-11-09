@@ -398,6 +398,14 @@ impl Feed for Eac3 {
         }
     }
 
+    fn windows_slots(&self) -> Vec<Option<u16>> {
+        if self.atmos == Some(true) {
+            self.scene.windows_slots()
+        } else {
+            channels::windows_slots(&self.core_beds)
+        }
+    }
+
     fn bypassed(&self) -> Vec<bool> {
         if self.atmos == Some(true) {
             Vec::new()

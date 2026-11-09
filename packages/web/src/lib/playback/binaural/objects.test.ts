@@ -16,6 +16,7 @@ const snap = (time: number, levels: number[]): SceneSnapshot => ({
     pos: [0, 0, 0],
     gain: 1,
     level,
+    slot: null,
   })),
 });
 
@@ -73,14 +74,39 @@ describe('switched-off elements', () => {
 describe('snapshots from the renderer', () => {
   it('read the stereo-bypass pair as such, with no place in the room', () => {
     // one snapshot at sample 0 with two elements: kind 4 (bypass), side, no mode, active,
-    // no position, gain, level
+    // no position, gain, level, Windows slot
     const n = NaN;
-    const data = new Float64Array([0, 2, 4, 0, -1, 1, n, n, n, 1, 0.5, 4, 1, -1, 1, n, n, n, 1, 0.25]);
+    const data = new Float64Array([
+      0,
+      2,
+      4,
+      0,
+      -1,
+      1,
+      n,
+      n,
+      n,
+      1,
+      0.5,
+      17,
+      4,
+      1,
+      -1,
+      1,
+      n,
+      n,
+      n,
+      1,
+      0.25,
+      -1,
+    ]);
     const [snapshot] = readSnapshots(data, 10, 48000);
     expect(snapshot.time).toBe(10);
-    expect(snapshot.elements.map((e) => [e.kind, e.bed, e.pos, e.mode])).toEqual([
-      ['bypass', 0, null, null],
-      ['bypass', 1, null, null],
+    expect(
+      snapshot.elements.map((e) => [e.kind, e.bed, e.pos, e.mode, e.slot])
+    ).toEqual([
+      ['bypass', 0, null, null, 17],
+      ['bypass', 1, null, null, null],
     ]);
   });
 });

@@ -5,7 +5,8 @@
  * browser has them; the server's binaural audio arrives as stereo.
  */
 
-export type ElementKind = 'object' | 'bed' | 'lfe' | 'isf' | 'bypass' | 'unknown';
+export type ElementKind =
+  'object' | 'bed' | 'lfe' | 'isf' | 'bypass' | 'unknown';
 export type RenderMode = 'off' | 'near' | 'far' | 'mid';
 
 export interface SceneElement {
@@ -21,6 +22,11 @@ export interface SceneElement {
   gain: number;
   /** The input's RMS level over the snapshot's block, linear (after the input headroom). */
   level: number;
+  /**
+   * Its slot in Windows' renderer (E), as from a fresh start with one app playing; none where
+   * Windows drops it or has no type for it. Can shift after a seek [inferred].
+   */
+  slot: number | null;
 }
 
 export interface SceneSnapshot {
@@ -42,7 +48,7 @@ const MODES: Record<number, RenderMode> = {
   2: 'far',
   3: 'mid',
 };
-const FIELDS = 9;
+const FIELDS = 10;
 
 /** Reads `ar_debug_data`'s layout (atmos-render's `input::Snapshots`). */
 export function readSnapshots(
@@ -63,10 +69,8 @@ export function readSnapshots(
       i < count && at + FIELDS <= data.length;
       i++, at += FIELDS
     ) {
-      const [kind, bed, mode, active, x, y, z, gain, level] = data.subarray(
-        at,
-        at + FIELDS
-      );
+      const [kind, bed, mode, active, x, y, z, gain, level, slot] =
+        data.subarray(at, at + FIELDS);
       elements.push({
         kind: KINDS[kind] ?? 'unknown',
         bed: kind === 1 || kind === 4 ? bed : undefined,
@@ -75,6 +79,7 @@ export function readSnapshots(
         pos: Number.isNaN(x) ? null : [x, y, z],
         gain,
         level,
+        slot: slot >= 0 ? slot : null,
       });
     }
     out.push({ time, elements });
@@ -223,7 +228,9 @@ class SceneStore {
   /** Only `index` stays on, of `count` elements. */
   only = (index: number, count: number) => {
     this.setDisabled(
-      new Set(Array.from({ length: count }, (_, i) => i).filter((i) => i !== index))
+      new Set(
+        Array.from({ length: count }, (_, i) => i).filter((i) => i !== index)
+      )
     );
   };
 

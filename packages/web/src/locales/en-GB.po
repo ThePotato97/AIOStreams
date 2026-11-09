@@ -2093,6 +2093,10 @@ msgstr "It will be undone unless you keep it."
 msgid "Its Metal and AVFoundation video outputs."
 msgstr "Its Metal and AVFoundation video outputs."
 
+#: src/components/player/scene-overlay.tsx
+msgid "Its slot in Windows' renderer, as from a fresh start: it can shift after a seek"
+msgstr "Its slot in Windows' renderer, as from a fresh start: it can shift after a seek"
+
 #: src/pages/settings/about.tsx
 msgid "Jellyfin API"
 msgstr "Jellyfin API"
@@ -4266,6 +4270,10 @@ msgstr "Skipped segment"
 #: src/pages/settings/playback.tsx
 msgid "Skipping"
 msgstr "Skipping"
+
+#: src/components/player/scene-overlay.tsx
+msgid "Slot"
+msgstr "Slot"
 
 #: src/components/party/reaction-setting.tsx
 msgid "Slot {n}: {emoji}"

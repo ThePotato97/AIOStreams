@@ -99,6 +99,24 @@ pub fn routed(statics: Vec<Static>, modes: Modes, speakers: bool) -> Vec<Static>
     }
 }
 
+/// Where each channel input lands in Windows' renderer (E): a channel with a Windows
+/// AudioObjectType at that type's static slot, as Virtual Surround types it (beds 0-11, the first
+/// LFE 3, back centre 16), the stereo-bypass pair at 17/18. Channels with no Windows type have none
+/// (a stream carrying one doesn't qualify for Virtual Surround, DEVIATIONS.md 10b).
+pub fn windows_slots(statics: &[Static]) -> Vec<Option<u16>> {
+    let mut lfe = false;
+    statics
+        .iter()
+        .map(|&s| match s {
+            Static::Bed(id) => crate::objects::windows_bed_slot(id),
+            Static::Lfe => (!std::mem::replace(&mut lfe, true)).then_some(3),
+            Static::At(pos) if pos == BACK_CENTRE => Some(16),
+            Static::At(_) => None,
+            Static::Bypass(side) => Some(17 + side as u16),
+        })
+        .collect()
+}
+
 /// What a static input is, for the debug view.
 pub fn element(s: Static) -> crate::input::Element {
     use crate::input::Element;
@@ -194,5 +212,17 @@ mod tests {
         // every bit up to top back right is in the table, in order
         assert!(WAV.windows(2).all(|w| w[1].0 == w[0].0 << 1));
         assert_eq!(wav_mask(0x3FFFF).len(), 18);
+    }
+
+    #[test]
+    fn channel_input_lands_in_the_typed_slots() {
+        // 7.1: FL FR FC LFE BL BR SL SR
+        assert_eq!(
+            windows_slots(&wav_mask(0x63F)),
+            [0, 1, 2, 3, 6, 7, 4, 5].map(Some).to_vec()
+        );
+        // back centre at 16, a front left of centre nowhere, a second LFE nowhere
+        assert_eq!(windows_slots(&[Static::At(BACK_CENTRE), Static::At([0.25, 0.0, 0.0]), Static::Lfe, Static::Lfe]), vec![Some(16), None, Some(3), None]);
+        assert_eq!(windows_slots(&[Static::Bypass(0), Static::Bypass(1)]), vec![Some(17), Some(18)]);
     }
 }

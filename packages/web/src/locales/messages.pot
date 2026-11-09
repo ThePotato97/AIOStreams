@@ -2092,6 +2092,10 @@ msgstr ""
 msgid "Its Metal and AVFoundation video outputs."
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Its slot in Windows' renderer, as from a fresh start: it can shift after a seek"
+msgstr ""
+
 #: src/pages/settings/about.tsx
 msgid "Jellyfin API"
 msgstr ""
@@ -4264,6 +4268,10 @@ msgstr ""
 
 #: src/pages/settings/playback.tsx
 msgid "Skipping"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Slot"
 msgstr ""
 
 #: src/components/party/reaction-setting.tsx

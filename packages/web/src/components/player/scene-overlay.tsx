@@ -104,18 +104,37 @@ function projector(yaw: number, pitch: number) {
     const y2 = Y * cb - z1 * sb;
     const z2 = Y * sb + z1 * cb;
     const depth = DISTANCE - z2;
-    return { x: W / 2 + (FOCAL * x1) / depth, y: H / 2 - (FOCAL * y2) / depth, depth };
+    return {
+      x: W / 2 + (FOCAL * x1) / depth,
+      y: H / 2 - (FOCAL * y2) / depth,
+      depth,
+    };
   };
 }
 
 const CORNERS: [number, number, number][] = [
-  [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-  [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+  [0, 0, 0],
+  [1, 0, 0],
+  [1, 1, 0],
+  [0, 1, 0],
+  [0, 0, 1],
+  [1, 0, 1],
+  [1, 1, 1],
+  [0, 1, 1],
 ];
 const EDGES: [number, number][] = [
-  [0, 1], [1, 2], [2, 3], [3, 0],
-  [4, 5], [5, 6], [6, 7], [7, 4],
-  [0, 4], [1, 5], [2, 6], [3, 7],
+  [0, 1],
+  [1, 2],
+  [2, 3],
+  [3, 0],
+  [4, 5],
+  [5, 6],
+  [6, 7],
+  [7, 4],
+  [0, 4],
+  [1, 5],
+  [2, 6],
+  [3, 7],
 ];
 /** The front wall's edges (y = 0), drawn brighter. */
 const FRONT = new Set(['0-1', '4-5', '0-4', '1-5']);
@@ -194,7 +213,8 @@ function Room3D({
         const d = drag.current;
         drag.current = null;
         // a click, not a drag, on a dot: switch that element on or off
-        if (d && !d.moved && d.element != null) sceneStore.toggleElement(d.element);
+        if (d && !d.moved && d.element != null)
+          sceneStore.toggleElement(d.element);
       }}
       onDoubleClick={() => setView(VIEW)}
     >
@@ -253,7 +273,13 @@ function Room3D({
               strokeOpacity={0.3}
               strokeDasharray="2 2"
             />
-            <circle cx={floor.x} cy={floor.y} r={1.2} fill={colour} fillOpacity={0.4} />
+            <circle
+              cx={floor.x}
+              cy={floor.y}
+              r={1.2}
+              fill={colour}
+              fillOpacity={0.4}
+            />
             <circle
               cx={p!.x}
               cy={p!.y}
@@ -317,6 +343,12 @@ function Scene({
               <th className="font-normal">
                 <span className="sr-only">{t`On`}</span>
               </th>
+              <th
+                className="font-normal"
+                title={t`Its slot in Windows' renderer, as from a fresh start: it can shift after a seek`}
+              >
+                {t`Slot`}
+              </th>
               <th className="text-start font-normal">{t`Input`}</th>
               <th className="text-start font-normal">{t`Mode`}</th>
               <th className="font-normal">x</th>
@@ -356,13 +388,16 @@ function Scene({
                       aria-label={t`Render ${label}`}
                     />
                   </td>
+                  <td>{e.slot ?? '–'}</td>
                   <td className="whitespace-nowrap text-start">
                     <span
                       className={cn(
                         'me-1 inline-block size-2 rounded-full',
                         look !== 'on' && 'opacity-40'
                       )}
-                      style={{ background: look === 'off' ? OFF : COLOURS[e.kind] }}
+                      style={{
+                        background: look === 'off' ? OFF : COLOURS[e.kind],
+                      }}
                     />
                     {label}
                   </td>
