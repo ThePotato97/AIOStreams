@@ -505,10 +505,12 @@ export function SceneOverlay({
   }, [live, shown, video]);
   if (!live || !shown) return null;
   return (
+    // Above the player's controls (z-10, rendered after it), whose gesture layer covers the
+    // screen and would take its clicks; under their menus (portalled, z-50).
     <section
       data-ui="player-scene"
       aria-label={t`Audio objects`}
-      className="fixed end-[calc(1rem+env(safe-area-inset-right))] top-[calc(4.5rem+env(safe-area-inset-top))] flex max-h-[calc(100vh-9rem)] w-[30rem] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg bg-black/75 px-3 py-2 font-mono text-xs leading-relaxed text-white/90"
+      className="fixed end-[calc(1rem+env(safe-area-inset-right))] top-[calc(4.5rem+env(safe-area-inset-top))] z-20 flex max-h-[calc(100vh-9rem)] w-[30rem] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg bg-black/75 px-3 py-2 font-mono text-xs leading-relaxed text-white/90"
     >
       <h2 className="mb-1 font-sans text-sm font-medium">
         {t`Audio objects`}
