@@ -80,6 +80,8 @@ impl Snapshots {
             let (mode, active, pos, gain) = match *s {
                 Source::Positioned { pos, mode, gain, active, .. } => (mode as i32 as f64, active as u8 as f64, pos.map(f64::from), gain as f64),
                 Source::Lfe { gain } => (-1.0, 1.0, [f64::NAN; 3], gain as f64),
+                // drawn where E places the pair (x 0/1), with no render mode
+                Source::Bypass { side, gain } => (-1.0, 1.0, [side as f64, 0.0, 0.0], gain as f64),
                 Source::Silent => (-1.0, 0.0, [f64::NAN; 3], 0.0),
             };
             self.data.extend_from_slice(&[kind, bed, mode, active, pos[0], pos[1], pos[2], gain, level]);

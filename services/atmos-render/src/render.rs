@@ -34,6 +34,11 @@ pub enum Source {
     /// an object's zone constraint index (0: none; only the speaker renderer reads it).
     Positioned { pos: [f32; 3], mode: Mode, gain: f32, active: bool, ramp: u32, zone: u8 },
     Lfe { gain: f32 },
+    /// One of the two stereo-bypass inputs (side 0 left, 1 right): A's bypass list (slots 17/18,
+    /// `dapvr_prepare_impl` +0x32C8 = 2, routing +0x32D0) with `stereo_cp_bypass_mode` 1. Not
+    /// panned, no HRTF, no room, no upmix, no virtualizer: analysed, x2^-3 like the render, the
+    /// same content processing as the main mix, then summed into output L/R (A 0x18000AEC8).
+    Bypass { side: usize, gain: f32 },
     Silent,
 }
 
@@ -46,6 +51,8 @@ pub struct Renderer {
     gains: Vec<InputGains>,
     holds_room: bool,
     sends: Vec<bool>,
+    /// Per input: Some((side, gain)) for a stereo-bypass input.
+    bypass: Vec<Option<(usize, f32)>>,
     dolby_limiter: DolbyLimiter,
     engine_limiter: EngineLimiter,
 }
@@ -63,6 +70,7 @@ impl Renderer {
             gains: Vec::new(),
             holds_room: false,
             sends: Vec::new(),
+            bypass: Vec::new(),
             dolby_limiter: DolbyLimiter::new(),
             engine_limiter: EngineLimiter::new(48000.0),
         })
@@ -75,12 +83,18 @@ impl Renderer {
         }
         self.gains.clear();
         self.sends.clear();
+        self.bypass.clear();
         self.holds_room = false;
         for s in sources {
+            self.bypass.push(match *s {
+                Source::Bypass { side, gain } => Some((side, gain)),
+                _ => None,
+            });
             let g = match *s {
                 Source::Positioned { pos, mode, gain, .. } => input_gains(&self.t, pos, mode, gain),
                 Source::Lfe { gain } => lfe_gains(gain),
-                Source::Silent => lfe_gains(0.0),
+                // added after the render (`slot`)
+                Source::Bypass { .. } | Source::Silent => lfe_gains(0.0),
             };
             // Any active Mid/Far element that isn't the LFE resets the room's hold, whatever its
             // gain or position.
@@ -95,11 +109,18 @@ impl Renderer {
     pub fn slot(&mut self, inputs: &[&[f32]], left: &mut [f32], right: &mut [f32]) {
         let mut ears = [[C32::ZERO; BANDS]; 2];
         let mut send = vec![[C32::ZERO; 4]; BANDS];
+        let mut bypass = [[C32::ZERO; BANDS]; 2];
         while self.analyses.len() < inputs.len() {
             self.analyses.push(Analysis::new());
         }
         for (i, x) in inputs.iter().enumerate() {
             let h = self.analyses[i].process(&self.fb, x);
+            if let Some(&Some((side, gain))) = self.bypass.get(i) {
+                for b in 0..BANDS {
+                    bypass[side][b] += h[b].scale(gain);
+                }
+                continue;
+            }
             // an input without state for this block (metadata not yet seen) is silent
             let Some(g) = self.gains.get(i) else { continue };
             for b in 0..BANDS {
@@ -115,6 +136,12 @@ impl Renderer {
             }
         }
         self.room.process(&self.t, &send, self.holds_room, &mut ears);
+        // the stereo-bypass pair into output L/R; the x2^-3 and the post chain below apply to both
+        for (ear, b) in ears.iter_mut().zip(bypass.iter()) {
+            for (e, v) in ear.iter_mut().zip(b.iter()) {
+                *e += *v;
+            }
+        }
         self.synth[0].process(&self.fb, &ears[0], left);
         self.synth[1].process(&self.fb, &ears[1], right);
         for v in left.iter_mut().chain(right.iter_mut()) {
@@ -194,6 +221,25 @@ mod tests {
         // the room follows the direct sound
         let tail = e(&l[start + 2000..start + 6000]);
         assert!(tail > 0.0 && tail < e(dl));
+    }
+
+    #[test]
+    fn the_stereo_bypass_reaches_its_ear_without_hrtf_or_room() {
+        // a 1 kHz sine into the left bypass: the output chain's net x1.0005 in the left ear only
+        let n = 400;
+        let x: Vec<f32> = (0..n * SLOT).map(|i| 0.1 * ((i as f32) * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin()).collect();
+        let mut r = Renderer::new().unwrap();
+        let (mut l, mut rr) = (vec![0f32; n * SLOT], vec![0f32; n * SLOT]);
+        for s in 0..n {
+            if s % 4 == 0 {
+                r.set_block(&[Source::Bypass { side: 0, gain: 1.0 }]);
+            }
+            let (a, b) = (s * SLOT, s * SLOT + SLOT);
+            r.slot(&[&x[a..b]], &mut l[a..b], &mut rr[a..b]);
+        }
+        let peak = |v: &[f32]| v[200 * SLOT..].iter().fold(0f32, |m, s| m.max(s.abs())) / 0.1;
+        assert!((peak(&l) - 1.0005).abs() < 3e-3, "left {}", peak(&l));
+        assert!(peak(&rr) < 1e-4, "right {}", peak(&rr));
     }
 
     #[test]

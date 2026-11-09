@@ -169,7 +169,7 @@ impl Eac3 {
     fn set_layout(&mut self, channels: usize, mask: u32) {
         if self.layout != Some((channels, mask)) {
             self.layout = Some((channels, mask));
-            self.core_beds = channels::retyped(channels::wav_mask(mask), self.scene.modes, self.scene.speakers);
+            self.core_beds = channels::routed(channels::wav_mask(mask), self.scene.modes, self.scene.speakers);
         }
     }
 

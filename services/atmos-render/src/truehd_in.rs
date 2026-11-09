@@ -175,7 +175,7 @@ impl TrueHd {
         }
         if self.atmos == Some(false) && self.channel_beds.len() != ch {
             let statics = decoded.channel_labels.iter().map(|&l| label_static(l)).collect();
-            self.channel_beds = channels::retyped(statics, self.scene.modes, self.scene.speakers);
+            self.channel_beds = channels::routed(statics, self.scene.modes, self.scene.speakers);
         }
         // The Reference Player's dialnorm (both loudness settings: Windows doesn't decode TrueHD):
         // the decoded presentation's, DN - 31 dB.

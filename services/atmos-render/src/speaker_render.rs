@@ -9,6 +9,8 @@
 //! (heard at 30 degrees), the surround pair and the top pair (90 degrees), all over two speakers
 //! at 10 degrees, the profile's angle; Dolby Access's 8->2 matrix; the two outputs through the
 //! synthesis filterbank, then the same gain chain and limiters as headphones.
+//! A stereo stream's bypass pair (`Source::Bypass`) skips the panner and the virtualizer and is
+//! added to L/R after it (post-chain step 6).
 //!
 //! The profiles' post-processing (surround boost, dialogue enhancer, IEQ, regulator, graphic EQ,
 //! media intelligence) isn't applied, as for headphones (DEVIATIONS.md 1); the height filter is
@@ -47,6 +49,9 @@ pub struct SpeakerRenderer {
     /// front (0/1), surround (4/5), top (6/7)
     pairs: [Pair; 3],
     ramps: Vec<Ramp>,
+    /// Per input: Some((side, gain)) for a stereo-bypass input; their analyses (L, R).
+    bypass: Vec<Option<(usize, f32)>>,
+    bypass_analyses: [Analysis; 2],
     dolby_limiter: DolbyLimiter,
     engine_limiter: EngineLimiter,
 }
@@ -63,6 +68,8 @@ impl SpeakerRenderer {
                 Pair::new(90, SPEAKER_ANGLE),
             ],
             ramps: Vec::new(),
+            bypass: Vec::new(),
+            bypass_analyses: [Analysis::new(), Analysis::new()],
             dolby_limiter: DolbyLimiter::new(),
             engine_limiter: EngineLimiter::new(48000.0),
         }
@@ -74,6 +81,15 @@ impl SpeakerRenderer {
         if self.ramps.len() != sources.len() {
             self.ramps = vec![Ramp::default(); sources.len()];
         }
+        // the bypass list is a routing, copied without a gain ramp (A_18002CF70: copy, analysis,
+        // x2^-3)
+        self.bypass = sources
+            .iter()
+            .map(|s| match *s {
+                Source::Bypass { side, gain } => Some((side, gain)),
+                _ => None,
+            })
+            .collect();
         for (ramp, s) in self.ramps.iter_mut().zip(sources) {
             let target = match *s {
                 Source::Positioned { pos, gain, active: true, zone, .. } => pan(pos, zone).map(|g| g * gain),
@@ -106,7 +122,14 @@ impl SpeakerRenderer {
     /// One slot: `inputs[i]` holds 64 samples of input i; writes 64 samples per speaker.
     pub fn slot(&mut self, inputs: &[&[f32]], left: &mut [f32], right: &mut [f32]) {
         let mut mix = [[0f32; SLOT]; CHANNELS];
+        let mut bypass = [[0f32; SLOT]; 2];
         for (i, x) in inputs.iter().enumerate() {
+            if let Some(&Some((side, gain))) = self.bypass.get(i) {
+                for (m, v) in bypass[side].iter_mut().zip(x.iter()) {
+                    *m += gain * v;
+                }
+                continue;
+            }
             let Some(ramp) = self.ramps.get_mut(i) else { continue };
             // a gain per slot, constant within it
             if ramp.left > 0 {
@@ -133,6 +156,14 @@ impl SpeakerRenderer {
         surround.process(&mut ls[0], &mut rs[0]);
         let (ltm, rtm) = tops.split_at_mut(RTM - LTM);
         top.process(&mut ltm[0], &mut rtm[0]);
+        // post-chain step 6: the stereo-bypass pair added to L/R after the virtualizer (Dolby
+        // Access's matrix then takes L and R to their speakers at 1.0)
+        for (side, ch) in [(0, L), (1, R)] {
+            let b = self.bypass_analyses[side].process(&self.fb, &bypass[side]);
+            for (h, v) in h[ch].iter_mut().zip(b.iter()) {
+                *h += *v;
+            }
+        }
         let mut out = [[C32::ZERO; BANDS]; 2];
         for b in 0..BANDS {
             let shared = h[C][b].scale(MIX_C) + h[LFE][b].scale(MIX_LFE);
@@ -234,6 +265,15 @@ mod tests {
             sr.slot(&[&silence], &mut l, &mut r);
         }
         assert_eq!(sr.ramps[0].cur[C], 1.0);
+    }
+
+    #[test]
+    fn the_stereo_bypass_reaches_its_speaker_unvirtualized() {
+        // after the virtualizer: the net chain alone (0.99995), nothing in the other speaker
+        let (l, r) = level(&[Source::Bypass { side: 0, gain: 1.0 }], 0.1);
+        assert!((l - 0.99995).abs() < 2e-3 && r < 1e-4, "{l} {r}");
+        let (l, r) = level(&[Source::Bypass { side: 1, gain: 1.0 }], 0.1);
+        assert!((r - 0.99995).abs() < 2e-3 && l < 1e-4, "{l} {r}");
     }
 
     #[test]
