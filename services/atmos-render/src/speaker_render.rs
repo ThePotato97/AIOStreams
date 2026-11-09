@@ -12,14 +12,14 @@
 //! A stereo stream's bypass pair (`Source::Bypass`) skips the panner and the virtualizer and is
 //! added to L/R after it (post-chain step 6).
 //!
-//! The profiles' post-processing (surround boost, dialogue enhancer, IEQ, regulator, graphic EQ,
-//! media intelligence) isn't applied, as for headphones (DEVIATIONS.md 1); the height filter is
-//! off in every speaker profile.
+//! None of the speaker profiles' post-processing is applied: Movie's dialogue enhancer isn't
+//! traced, nor surround boost's dB reference (DEVIATIONS.md 1d). The leveler is off in every
+//! speaker profile, and the height filter too.
 
 use crate::complex::C32;
 use crate::filterbank::{Analysis, Synthesis, Tables};
 use crate::limiter::{DolbyLimiter, EngineLimiter};
-use crate::render::{SLOT, Source};
+use crate::render::{BLOCK, SLOT, Source};
 use crate::speaker::{C, CHANNELS, L, LFE, LS, LTM, R, RS, RTM, pan};
 use crate::spkvirt::Pair;
 use crate::tuning::{BANDS, OUTPUT_SCALE, POST_CHAIN_GAIN};
@@ -52,6 +52,10 @@ pub struct SpeakerRenderer {
     /// Per input: Some((side, gain)) for a stereo-bypass input; their analyses (L, R).
     bypass: Vec<Option<(usize, f32)>>,
     bypass_analyses: [Analysis; 2],
+    /// One block of delay, as the headphone renderer holds a block for its post-processing (the
+    /// speaker profiles' leveler is off), so both have the pipeline's latency.
+    delay: [[f32; BLOCK]; 2],
+    delay_at: usize,
     dolby_limiter: DolbyLimiter,
     engine_limiter: EngineLimiter,
 }
@@ -70,6 +74,8 @@ impl SpeakerRenderer {
             ramps: Vec::new(),
             bypass: Vec::new(),
             bypass_analyses: [Analysis::new(), Analysis::new()],
+            delay: [[0.0; BLOCK]; 2],
+            delay_at: 0,
             dolby_limiter: DolbyLimiter::new(),
             engine_limiter: EngineLimiter::new(48000.0),
         }
@@ -181,6 +187,11 @@ impl SpeakerRenderer {
             (*l, *r) = self.engine_limiter.frame(*l, *r);
         }
         self.engine_limiter.end_buffer();
+        let at = self.delay_at;
+        for (d, out) in self.delay.iter_mut().zip([left, right]) {
+            d[at..at + SLOT].swap_with_slice(out);
+        }
+        self.delay_at = (at + SLOT) % BLOCK;
     }
 }
 
@@ -278,7 +289,8 @@ mod tests {
 
     #[test]
     fn same_latency_as_headphones() {
-        // nothing in the virtualizer delays; the filterbank and limiters are the same
-        assert_eq!(Renderer::latency(), crate::filterbank::LATENCY + crate::limiter::DOLBY_BLOCK + 64);
+        // nothing in the virtualizer delays; the filterbank, the held block and the limiters are
+        // the same
+        assert_eq!(Renderer::latency(), crate::filterbank::LATENCY + BLOCK + crate::limiter::DOLBY_BLOCK + 64);
     }
 }

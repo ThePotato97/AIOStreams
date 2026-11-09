@@ -8,10 +8,16 @@
 //! make-up (x40.09) brings it back to x1.0005 under a ceiling of 0.99987. Windows' audio-engine
 //! limiter (0.985) follows, as on every Windows output device.
 //! (The encoder's input headroom is applied to the samples in `input.rs`.)
+//!
+//! Post-processing: the headphone Movie profile's (`profile_rtp_by_profile.csv`), which is the
+//! volume leveler at amount 4 and, with it, volmax (+4 dB) before the peak limiter (`leveler.rs`).
+//! DAP processes a block at a time: the leveler measures a block's band powers and its gains apply
+//! to that same block, so the renderer holds one block of QMF before synthesis.
 
 use crate::complex::C32;
 use crate::direct::{InputGains, Mode, input_gains, lfe_gains};
 use crate::filterbank::{Analysis, LATENCY, Synthesis, Tables};
+use crate::leveler::{Leveler, NB, VOLMAX_DB, band_of_bin, band_powers};
 use crate::room::Room;
 use crate::limiter::{DOLBY_BLOCK, DolbyLimiter, EngineLimiter};
 use crate::tuning::{BANDS, OUTPUT_SCALE, POST_CHAIN_GAIN, Tuning};
@@ -53,6 +59,14 @@ pub struct Renderer {
     sends: Vec<bool>,
     /// Per input: Some((side, gain)) for a stereo-bypass input.
     bypass: Vec<Option<(usize, f32)>>,
+    leveler: Leveler,
+    /// The leveler's band gains for the last block finished, dB.
+    leveled_db: [f64; NB],
+    band_of: [usize; BANDS],
+    /// This block's rendered QMF slots, per ear.
+    held: Vec<[[C32; BANDS]; 2]>,
+    /// The previous block's output, handed out a slot at a time.
+    ready: [[f32; BLOCK]; 2],
     dolby_limiter: DolbyLimiter,
     engine_limiter: EngineLimiter,
 }
@@ -71,6 +85,11 @@ impl Renderer {
             holds_room: false,
             sends: Vec::new(),
             bypass: Vec::new(),
+            leveler: Leveler::movie(),
+            leveled_db: [0.0; NB],
+            band_of: band_of_bin(),
+            held: Vec::with_capacity(BLOCK / SLOT),
+            ready: [[0.0; BLOCK]; 2],
             dolby_limiter: DolbyLimiter::new(),
             engine_limiter: EngineLimiter::new(48000.0),
         })
@@ -105,7 +124,8 @@ impl Renderer {
         }
     }
 
-    /// One slot: `inputs[i]` holds 64 samples of input i; writes 64 samples per ear.
+    /// One slot: `inputs[i]` holds 64 samples of input i; writes 64 samples per ear, a block
+    /// later (`latency`). Slots come four to a block, the first after `set_block`.
     pub fn slot(&mut self, inputs: &[&[f32]], left: &mut [f32], right: &mut [f32]) {
         let mut ears = [[C32::ZERO; BANDS]; 2];
         let mut send = vec![[C32::ZERO; 4]; BANDS];
@@ -142,23 +162,62 @@ impl Renderer {
                 *e += *v;
             }
         }
-        self.synth[0].process(&self.fb, &ears[0], left);
-        self.synth[1].process(&self.fb, &ears[1], right);
-        for v in left.iter_mut().chain(right.iter_mut()) {
-            *v = *v * OUTPUT_SCALE * POST_CHAIN_GAIN;
+        let k = self.held.len();
+        left.copy_from_slice(&self.ready[0][k * SLOT..(k + 1) * SLOT]);
+        right.copy_from_slice(&self.ready[1][k * SLOT..(k + 1) * SLOT]);
+        self.held.push(ears);
+        if self.held.len() == BLOCK / SLOT {
+            self.finish_block();
         }
-        // A slot is one of the limiter's 64-frame blocks.
-        self.dolby_limiter.block(left, right);
-        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
-            (*l, *r) = self.engine_limiter.frame(*l, *r);
-        }
-        self.engine_limiter.end_buffer();
     }
 
-    /// The filterbank's latency, then one block for Dolby's limiter and 64 frames for the
-    /// engine limiter (at 48 kHz).
+    /// The block's post-processing and output: the leveler on both ears' band powers (one group),
+    /// its gains on every hybrid bin of each band for the whole block, synthesis, the x2^-3, the
+    /// post chain's -14 dB, volmax, then the limiters.
+    fn finish_block(&mut self) {
+        let mut held = std::mem::take(&mut self.held);
+        let p: [[f64; NB]; 2] = std::array::from_fn(|ear| {
+            let slots: Vec<[C32; BANDS]> = held.iter().map(|s| s[ear]).collect();
+            band_powers(&slots)
+        });
+        let (db, _) = self.leveler.process(&p);
+        self.leveled_db = db;
+        // [I]: DAP converts with its own 2^x (sub_18000E770); this is the exact power
+        let gain: [f32; NB] = std::array::from_fn(|b| 10f32.powf(db[b] as f32 / 20.0));
+        let scale = OUTPUT_SCALE * POST_CHAIN_GAIN * 10f32.powf(VOLMAX_DB / 20.0);
+        for (k, slot) in held.iter_mut().enumerate() {
+            for ear in 0..2 {
+                for (bin, x) in slot[ear].iter_mut().enumerate() {
+                    *x = x.scale(gain[self.band_of[bin]]);
+                }
+            }
+            let (l, r) = self.ready.split_at_mut(1);
+            let (left, right) = (&mut l[0][k * SLOT..(k + 1) * SLOT], &mut r[0][k * SLOT..(k + 1) * SLOT]);
+            self.synth[0].process(&self.fb, &slot[0], left);
+            self.synth[1].process(&self.fb, &slot[1], right);
+            for v in left.iter_mut().chain(right.iter_mut()) {
+                *v *= scale;
+            }
+            // A slot is one of the limiter's 64-frame blocks.
+            self.dolby_limiter.block(left, right);
+            for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                (*l, *r) = self.engine_limiter.frame(*l, *r);
+            }
+            self.engine_limiter.end_buffer();
+        }
+        held.clear();
+        self.held = held;
+    }
+
+    /// The leveler's band gains for the last block finished, dB (DAP bands, `leveler::EDGES`).
+    pub fn leveled_db(&self) -> [f64; NB] {
+        self.leveled_db
+    }
+
+    /// The filterbank's latency, one block held for the post-processing, then one block for
+    /// Dolby's limiter and 64 frames for the engine limiter (at 48 kHz).
     pub const fn latency() -> usize {
-        LATENCY + DOLBY_BLOCK + 64
+        LATENCY + BLOCK + DOLBY_BLOCK + 64
     }
 }
 
@@ -223,49 +282,59 @@ mod tests {
         assert!(tail > 0.0 && tail < e(dl));
     }
 
-    #[test]
-    fn the_stereo_bypass_reaches_its_ear_without_hrtf_or_room() {
-        // a 1 kHz sine into the left bypass: the output chain's net x1.0005 in the left ear only
-        let n = 400;
-        let x: Vec<f32> = (0..n * SLOT).map(|i| 0.1 * ((i as f32) * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin()).collect();
+    /// Runs one input as `source` for `n` slots; the output and the leveler's gain in `band`
+    /// for each block, dB.
+    fn run(source: Source, x: &[f32], band: usize) -> (Vec<f32>, Vec<f32>, Vec<f64>) {
+        let n = x.len() / SLOT;
         let mut r = Renderer::new().unwrap();
         let (mut l, mut rr) = (vec![0f32; n * SLOT], vec![0f32; n * SLOT]);
+        let mut gains = Vec::new();
         for s in 0..n {
             if s % 4 == 0 {
-                r.set_block(&[Source::Bypass { side: 0, gain: 1.0 }]);
+                r.set_block(&[source]);
             }
             let (a, b) = (s * SLOT, s * SLOT + SLOT);
             r.slot(&[&x[a..b]], &mut l[a..b], &mut rr[a..b]);
+            if s % 4 == 3 {
+                gains.push(r.leveled_db()[band]);
+            }
         }
-        let peak = |v: &[f32]| v[200 * SLOT..].iter().fold(0f32, |m, s| m.max(s.abs())) / 0.1;
-        assert!((peak(&l) - 1.0005).abs() < 3e-3, "left {}", peak(&l));
-        assert!(peak(&rr) < 1e-4, "right {}", peak(&rr));
+        (l, rr, gains)
+    }
+
+    fn sine(f: f32, amp: f32, n: usize) -> Vec<f32> {
+        (0..n * SLOT).map(|i| amp * ((i as f32) * 2.0 * std::f32::consts::PI * f / 48000.0).sin()).collect()
+    }
+
+    #[test]
+    fn the_stereo_bypass_reaches_its_ear_without_hrtf_or_room() {
+        // a sine at the centre of DAP band 9 (QMF band 4, 1687.5 Hz) into the left bypass: in the
+        // left ear only, at the chain's net x1.0005 times the leveler's gain for that band and
+        // volmax; 4 s, so the leveler has settled
+        let n = 3000;
+        let (l, rr, gains) = run(Source::Bypass { side: 0, gain: 1.0 }, &sine(1687.5, 0.1, n), 9);
+        let tail = &l[(n - 200) * SLOT..];
+        let peak = tail.iter().fold(0f32, |m, s| m.max(s.abs())) / 0.1;
+        let g = gains[gains.len() - 60..].iter().sum::<f64>() / 60.0;
+        let want = 1.0005 * 10f64.powf((g + crate::leveler::VOLMAX_DB as f64) / 20.0);
+        assert!(gains[gains.len() - 60..].iter().all(|v| (v - g).abs() < 0.05), "the leveler hasn't settled");
+        assert!((peak as f64 / want - 1.0).abs() < 0.012, "left {peak} vs {want} (leveler {g:.2} dB)");
+        let right = rr[(n - 200) * SLOT..].iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(right < 1e-5, "right {right}");
     }
 
     #[test]
     fn the_lfe_stays_low() {
-        let mut r = Renderer::new().unwrap();
+        // at -20 dB, below the limiters' ceilings even with the LFE's +7 dB and volmax
         let n = 300;
-        // at -20 dB, below the limiters' ceilings even with the LFE's +7 dB
-        let x: Vec<f32> = (0..n * SLOT).map(|i| 0.1 * ((i as f32) * 2.0 * std::f32::consts::PI * 5000.0 / 48000.0).sin()).collect();
-        let lo: Vec<f32> = (0..n * SLOT).map(|i| 0.1 * ((i as f32) * 2.0 * std::f32::consts::PI * 50.0 / 48000.0).sin()).collect();
-        let run = |r: &mut Renderer, x: &[f32]| {
-            let (mut l, mut rr) = (vec![0f32; n * SLOT], vec![0f32; n * SLOT]);
-            for s in 0..n {
-                if s % 4 == 0 {
-                    r.set_block(&[Source::Lfe { gain: 1.0 }]);
-                }
-                let (a, b) = (s * SLOT, s * SLOT + SLOT);
-                r.slot(&[&x[a..b]], &mut l[a..b], &mut rr[a..b]);
-            }
-            l[100 * SLOT..].iter().map(|s| s * s).sum::<f32>() / (n - 100) as f32 / SLOT as f32
-        };
-        let high = run(&mut r, &x);
-        let mut r2 = Renderer::new().unwrap();
-        let low = run(&mut r2, &lo);
-        // ~+7 dB plateau at 50 Hz, at the output's net x1.0005; nothing at 5 kHz
-        let low_db = 10.0 * (low / 0.005).log10();
-        assert!((low_db - 7.0).abs() < 1.0, "50 Hz {low_db:.1} dB");
-        assert!(high < low * 1e-4, "5 kHz leaks");
+        let (high, ..) = run(Source::Lfe { gain: 1.0 }, &sine(5000.0, 0.1, n), 0);
+        let (low, _, gains) = run(Source::Lfe { gain: 1.0 }, &sine(50.0, 0.1, n), 0);
+        let power = |v: &[f32]| v[100 * SLOT..].iter().map(|s| s * s).sum::<f32>() / ((n - 100) * SLOT) as f32;
+        // ~+7 dB plateau at 50 Hz at the output's net x1.0005, plus band 0's leveler gain and
+        // volmax; nothing at 5 kHz
+        let g = gains[gains.len() - 20..].iter().sum::<f64>() / 20.0;
+        let low_db = 10.0 * (power(&low) / 0.005).log10() as f64 - g - crate::leveler::VOLMAX_DB as f64;
+        assert!((low_db - 7.0).abs() < 1.0, "50 Hz {low_db:.1} dB (leveler {g:.2} dB)");
+        assert!(power(&high) < power(&low) * 1e-4, "5 kHz leaks");
     }
 }

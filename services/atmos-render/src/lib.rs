@@ -10,6 +10,7 @@ pub mod eac3_in;
 pub mod filterbank;
 pub mod input;
 pub mod joc;
+pub mod leveler;
 pub mod limiter;
 pub mod loudness;
 mod joc_tables;
