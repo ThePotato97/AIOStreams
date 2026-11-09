@@ -398,6 +398,14 @@ impl Feed for Eac3 {
         }
     }
 
+    fn bypassed(&self) -> Vec<bool> {
+        if self.atmos == Some(true) {
+            Vec::new()
+        } else {
+            self.core_beds.iter().map(|s| matches!(s, Static::Bypass(_))).collect()
+        }
+    }
+
     fn sources(&mut self, sample: u64) -> Vec<Source> {
         if self.atmos == Some(true) {
             self.scene.advance(sample);

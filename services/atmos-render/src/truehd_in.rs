@@ -286,6 +286,14 @@ impl Feed for TrueHd {
         }
     }
 
+    fn bypassed(&self) -> Vec<bool> {
+        if self.atmos == Some(true) {
+            Vec::new()
+        } else {
+            self.channel_beds.iter().map(|s| matches!(s, Static::Bypass(_))).collect()
+        }
+    }
+
     fn sources(&mut self, sample: u64) -> Vec<Source> {
         if self.atmos == Some(true) {
             self.scene.advance(sample);

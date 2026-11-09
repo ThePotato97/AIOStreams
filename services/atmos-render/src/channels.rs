@@ -112,9 +112,9 @@ pub fn element(s: Static) -> crate::input::Element {
 
 /// The renderer source of a static at unity gain. Windows renders every static Near; the stream
 /// carries no headphone element for channel-based audio, so stream mode renders it Mid.
-/// The stereo bypass at unity: the bed volume (`MixChannelBed` a5) and the bypass objects' +196
-/// (`MixStaticObject`) aren't traced, and its samples get the same input headroom as every
-/// other input (`input.rs`) although the bed path doesn't call `SetAudioObject` (DEVIATIONS.md 10).
+/// The stereo bypass at unity: ASAR's bed volume is 1.0 (AudioEng 0x1800FA429), the fold takes FL
+/// and FR at 1.0 and the bypass objects' +196 is always 1.0; it gets neither the -3 dB nor the clip
+/// (`Feed::bypassed`; stereo_bypass.md section 1).
 pub fn source(s: Static, modes: Modes) -> Source {
     let mode = match modes {
         Modes::Windows => Mode::Near,

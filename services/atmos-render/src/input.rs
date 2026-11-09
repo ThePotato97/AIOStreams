@@ -35,6 +35,12 @@ pub trait Feed {
     fn elements(&self) -> Vec<Element> {
         Vec::new()
     }
+    /// Per input, in `sources` order: whether E folds it into the stereo-bypass pair, which gets
+    /// neither its -3 dB headroom nor its clip (those belong to `SetAudioObject` alone:
+    /// stereo_bypass.md section 1.3). Inputs past the end get both.
+    fn bypassed(&self) -> Vec<bool> {
+        Vec::new()
+    }
 }
 
 /// Snapshots of the scene as rendered, for the browser's debug view: every `EVERY` blocks, each
@@ -164,9 +170,15 @@ impl Pipeline {
             let have = self.pending.first().map(|p| p.len()).unwrap_or(0);
             self.pending = vec![vec![0.0; have]; block.samples.len()];
         }
-        // The Windows encoder's input headroom, then its clip to +/-1, on every sample.
-        for (p, s) in self.pending.iter_mut().zip(block.samples) {
-            p.extend(s.into_iter().map(|v| (v * INPUT_HEADROOM).clamp(-1.0, 1.0)));
+        // The Windows encoder's input headroom, then its clip to +/-1 (`SetAudioObject`), on every
+        // sample of every input but the stereo-bypass pair, which E's bed fold mixes in at 1.0.
+        let bypassed = feed.bypassed();
+        for (i, (p, s)) in self.pending.iter_mut().zip(block.samples).enumerate() {
+            if bypassed.get(i).copied().unwrap_or(false) {
+                p.extend(s);
+            } else {
+                p.extend(s.into_iter().map(|v| (v * INPUT_HEADROOM).clamp(-1.0, 1.0)));
+            }
         }
         self.taken += n as u64;
         self.render(feed, emit);
@@ -269,5 +281,35 @@ mod snapshot_tests {
         assert_eq!(lfe[2], -1.0);
         assert!(lfe[4].is_nan());
         assert!((lfe[8] - 0.25 * crate::tuning::INPUT_HEADROOM as f64).abs() < 1e-6);
+    }
+
+    /// A stereo stream on the bypass pair.
+    struct Stereo;
+    impl Feed for Stereo {
+        fn push(&mut self, _: &[u8], _: &mut dyn FnMut(Block)) {}
+        fn sources(&mut self, _: u64) -> Vec<Source> {
+            vec![Source::Bypass { side: 0, gain: 1.0 }, Source::Bypass { side: 1, gain: 1.0 }]
+        }
+        fn elements(&self) -> Vec<Element> {
+            vec![Element::Bed(1), Element::Bed(2)]
+        }
+        fn bypassed(&self) -> Vec<bool> {
+            vec![true, true]
+        }
+    }
+
+    #[test]
+    fn the_bypass_pair_gets_neither_headroom_nor_clip() {
+        let mut p = Pipeline::new().unwrap();
+        p.debug(true);
+        // above full scale: E's bed fold doesn't clip
+        let block = Block { start: 0, samples: vec![vec![1.25; 4096], vec![-0.5; 4096]] };
+        p.take(&mut Stereo, block, &mut |_, _| {});
+        let d = &p.snapshots.as_ref().unwrap().data;
+        let size = 2 + 2 * SNAPSHOT_FIELDS;
+        let (l, r) = (&d[size + 2..size + 11], &d[size + 11..size + 20]);
+        assert!((l[8] - 1.25).abs() < 1e-6 && (r[8] - 0.5).abs() < 1e-6, "{} {}", l[8], r[8]);
+        // drawn where E puts the pair, with no render mode
+        assert_eq!((l[2], l[4], r[4]), (-1.0, 0.0, 1.0));
     }
 }
