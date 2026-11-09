@@ -165,6 +165,43 @@ describe('convertingEngine', () => {
     expect(converting.loads).toHaveLength(1);
   });
 
+  it('blames a failed source on the source, and offers other versions, not the same download', async () => {
+    answers = [
+      {
+        status: 502,
+        body: {
+          error: 'The download failed; pick another source',
+          code: 'source_failed',
+        },
+      },
+    ];
+    const { engine, failure } = engineUnderTest();
+    engine.load(file());
+    await settle();
+    // not "this browser can't play this file's audio"
+    expect(failure()?.error).toBe('The download failed; pick another source');
+    expect(failure()?.transcoder).toBe(false);
+    // the same download would fail again: the screen leads with other versions
+    expect(failure()?.retry).toBeUndefined();
+  });
+
+  it('offers to try an unreachable source again', async () => {
+    answers = [
+      {
+        status: 502,
+        body: {
+          error: 'The source could not be reached',
+          code: 'source_unreachable',
+        },
+      },
+    ];
+    const { engine, failure } = engineUnderTest();
+    engine.load(file());
+    await settle();
+    expect(failure()?.error).toBe('The source could not be reached');
+    expect(failure()?.retry?.label).toBe('Try again');
+  });
+
   it('reports a stream that fails before it plays', async () => {
     const { engine, converting, failure } = engineUnderTest();
     engine.load(file());

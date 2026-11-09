@@ -953,8 +953,16 @@ async function openSource(
   }
   return openUpstream(source, method, range);
 }
+/**
+ * Why a source didn't play, for the player: `source_failed` won't change on a retry (pick another
+ * version); `source_unreachable` might (the host was down or answered an error).
+ */
+type SourceCode = 'source_failed' | 'source_unreachable';
 /** AIOStreams' own "downloading" / error clips, which players are sent instead of a file. */
-const PLACEHOLDERS: Record<string, { status: number; message: string }> = {
+const PLACEHOLDERS: Record<
+  string,
+  { status: number; message: string; code?: SourceCode }
+> = {
   [StaticFiles.DOWNLOADING]: {
     status: 425,
     message: 'The file is still downloading',
@@ -962,10 +970,12 @@ const PLACEHOLDERS: Record<string, { status: number; message: string }> = {
   [StaticFiles.DOWNLOAD_FAILED]: {
     status: 502,
     message: 'The download failed; pick another source',
+    code: 'source_failed',
   },
   [StaticFiles.NO_MATCHING_FILE]: {
     status: 502,
     message: 'No matching file in that release; pick another source',
+    code: 'source_failed',
   },
   [StaticFiles.TOO_MANY_REQUESTS]: {
     status: 503,
@@ -978,10 +988,12 @@ const PLACEHOLDERS: Record<string, { status: number; message: string }> = {
   [StaticFiles.STORE_LIMIT_EXCEEDED]: {
     status: 502,
     message: 'The debrid storage limit is reached',
+    code: 'source_failed',
   },
   [StaticFiles.PAYMENT_REQUIRED]: {
     status: 502,
     message: 'The debrid subscription needs renewing',
+    code: 'source_failed',
   },
   [StaticFiles.UNAUTHORIZED]: {
     status: 502,
@@ -1013,10 +1025,11 @@ function placeholderOf(url: URL) {
   const file = /\/static\/([\w.-]+)$/.exec(url.pathname)?.[1];
   return file && origins.includes(url.origin) ? PLACEHOLDERS[file] : undefined;
 }
-const sourceError = (status: number, message: string) =>
+const sourceError = (status: number, message: string, code?: SourceCode) =>
   Object.assign(new Error(message), {
     status,
     retryAfter: RETRY_AFTER[status],
+    code,
   });
 /**
  * Opens a little of the source before it is probed or played: a link that
@@ -1033,11 +1046,13 @@ async function checkSource(source: Source): Promise<void> {
   } catch (error) {
     if (typeof (error as { status?: number }).status === 'number') throw error;
     logger.warn({ cause: errorCause(error) }, 'guest source unreachable');
+    const blocked = errorCause(error) === 'EBLOCKED';
     throw sourceError(
       502,
-      errorCause(error) === 'EBLOCKED'
+      blocked
         ? 'The source points at a private address'
-        : 'The source could not be reached'
+        : 'The source could not be reached',
+      blocked ? 'source_failed' : 'source_unreachable'
     );
   }
   const { upstream, url } = opened;
@@ -1050,14 +1065,22 @@ async function checkSource(source: Source): Promise<void> {
       { file: url.pathname.split('/').pop(), status: placeholder.status },
       'guest source is a placeholder'
     );
-    throw sourceError(placeholder.status, placeholder.message);
+    throw sourceError(
+      placeholder.status,
+      placeholder.message,
+      placeholder.code
+    );
   }
   if (upstream.statusCode >= 400) {
     logger.warn(
       { status: upstream.statusCode, host: url.hostname },
       'guest source returned an error'
     );
-    throw sourceError(502, `The source answered ${upstream.statusCode}`);
+    throw sourceError(
+      502,
+      `The source answered ${upstream.statusCode}`,
+      'source_unreachable'
+    );
   }
   const type = String(upstream.headers['content-type'] ?? '');
   if (/^(text\/|image\/|application\/(json|xml|xhtml))/i.test(type)) {
@@ -1065,7 +1088,11 @@ async function checkSource(source: Source): Promise<void> {
       { type: type.split(';')[0], host: url.hostname },
       'guest source is not media'
     );
-    throw sourceError(502, "The source didn't return a media file");
+    throw sourceError(
+      502,
+      "The source didn't return a media file",
+      'source_failed'
+    );
   }
 }
 /** Probe failures a second try can get past: a slow or dropped connection. */
@@ -1102,7 +1129,11 @@ async function forward(source: Source, req: Request, res: Response) {
       { file: next.pathname.split('/').pop(), status: placeholder.status },
       'guest source turned into a placeholder'
     );
-    throw sourceError(placeholder.status, placeholder.message);
+    throw sourceError(
+      placeholder.status,
+      placeholder.message,
+      placeholder.code
+    );
   }
   if (upstream.statusCode >= 400)
     logger.warn(

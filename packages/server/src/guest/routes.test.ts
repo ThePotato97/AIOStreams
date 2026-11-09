@@ -651,9 +651,11 @@ describe('guest playback authorization', () => {
       const token = await joined();
       const response = await api('/current', token);
       expect(response.status).toBe(502);
-      expect(await errorOf(response)).toBe(
-        'The download failed; pick another source'
-      );
+      // won't change on a retry: the player offers other versions
+      expect(await response.json()).toMatchObject({
+        error: 'The download failed; pick another source',
+        code: 'source_failed',
+      });
       expect(fixture.probes).toBe(0);
     });
     it('refuses a page that is not media', async () => {
@@ -661,16 +663,21 @@ describe('guest playback authorization', () => {
       const token = await joined();
       const response = await api('/current', token);
       expect(response.status).toBe(502);
-      expect(await errorOf(response)).toBe(
-        "The source didn't return a media file"
-      );
+      expect(await response.json()).toMatchObject({
+        error: "The source didn't return a media file",
+        code: 'source_failed',
+      });
     });
     it('reports a source that answers with an error', async () => {
       fixture.sourcePath = '/missing';
       const token = await joined();
       const response = await api('/current', token);
       expect(response.status).toBe(502);
-      expect(await errorOf(response)).toBe('The source answered 404');
+      // might work on a retry
+      expect(await response.json()).toMatchObject({
+        error: 'The source answered 404',
+        code: 'source_unreachable',
+      });
     });
     it('stops following a source that redirects forever', async () => {
       fixture.sourcePath = '/loop';

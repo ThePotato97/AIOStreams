@@ -155,7 +155,12 @@ export function convertingEngine(
       reason?: string,
       transcoder?: boolean,
       /** The converted stream failed playing (the reason says why), or couldn't be made. */
-      stage: 'play' | 'convert' = 'convert'
+      stage: 'play' | 'convert' = 'convert',
+      /**
+       * The server's code for a source that didn't play: `source_failed` won't change on a retry,
+       * `source_unreachable` might.
+       */
+      code?: string
     ) => {
       const reopen = () => {
         opened = '';
@@ -171,13 +176,22 @@ export function convertingEngine(
       }
       converting.close();
       const why = reason ?? t`conversion is unavailable on this server`;
+      // The file itself didn't play (a failed debrid download, an unreachable host): that's
+      // this version's fault, not the browser's or the conversion's.
+      const source = code?.startsWith('source_');
       emit({
         type: 'failed',
-        error:
-          stage === 'play' && reason
+        // "Playback failed: The download failed; pick another source"
+        error: source
+          ? why
+          : stage === 'play' && reason
             ? reason
             : t`This browser can't play this file's audio, and it couldn't be converted: ${why}`,
-        retry: { label: t`Try again`, run: reopen },
+        // trying the same failed download again doesn't help: other versions do
+        retry:
+          code === 'source_failed'
+            ? undefined
+            : { label: t`Try again`, run: reopen },
         transcoder,
       });
     };
@@ -219,7 +233,9 @@ export function convertingEngine(
             failAudio(
               next,
               plan.reason,
-              status === 503 || !!code?.startsWith('transcoder_')
+              status === 503 || !!code?.startsWith('transcoder_'),
+              'convert',
+              code
             );
             return false;
           }
