@@ -1542,6 +1542,10 @@ msgstr ""
 msgid "Drop to add subtitles"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Dynamic {n}"
+msgstr ""
+
 #. An episode number, as in E04
 #: src/lib/format.ts
 msgid "E{e}"
@@ -2828,10 +2832,6 @@ msgstr ""
 
 #: src/components/player/subtitle-sync.tsx
 msgid "Now: {shown}"
-msgstr ""
-
-#: src/components/player/scene-overlay.tsx
-msgid "Object {n}"
 msgstr ""
 
 #: src/pages/settings/theme.tsx

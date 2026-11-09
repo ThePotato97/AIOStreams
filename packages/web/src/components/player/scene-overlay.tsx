@@ -50,7 +50,7 @@ const COLOURS: Record<SceneElement['kind'], string> = {
 };
 const OFF = '#737373';
 
-/** Every element's name, in stream order: bed labels, then Object 1, 2, … */
+/** Every element's name, in stream order: bed and channel labels, then Dynamic 1, 2, … */
 function names(elements: SceneElement[]): string[] {
   const counts = new Map<string, number>();
   return elements.map((e, i) => {
@@ -75,7 +75,10 @@ function names(elements: SceneElement[]): string[] {
       return e.bed === 1 ? t`Stereo bypass R` : t`Stereo bypass L`;
     const n = (counts.get(e.kind) ?? 0) + 1;
     counts.set(e.kind, n);
-    if (e.kind === 'object') return t`Object ${n}`;
+    // every OAMD object is a dynamic object by type, even one parked at a speaker position: the
+    // stream doesn't mark which are used as beds, and a mix moves any of them (Windows types
+    // them all Dynamic, slots 19 on)
+    if (e.kind === 'object') return t`Dynamic ${n}`;
     if (e.kind === 'isf') return t`ISF ${n}`;
     const input = i + 1;
     return t`Input ${input}`;
