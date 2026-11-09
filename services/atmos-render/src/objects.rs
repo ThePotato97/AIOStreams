@@ -122,13 +122,16 @@ pub fn windows_bed_slot(id: u32) -> Option<u16> {
     }
 }
 
-/// Where each OAMD element lands in Windows' renderer (E, `DolbyHrtfEnc.dll`), from a fresh
-/// spatial engine with one app playing (parameters doc 12.9): a bed channel with a Windows type at
+/// Where each OAMD element lands in Windows' renderer (E, `DolbyHrtfEnc.dll`) with one app playing
+/// spatial audio (parameters doc 12.9): a bed channel with a Windows type at
 /// its fixed slot (LFE at 3); every dynamic-typed element, which takes in Ltm/Rtm and Lw/Rw (the
 /// decoder sends them as Dynamic, having no static type for them), at 19 + d, d the dynamic-typed
 /// elements before it in OAMD order (E hands out the lowest free slot, in the order objects first
-/// arrive, which is OAMD order); LFE2 and ISF elements nowhere (dropped). After a seek the
-/// renderer's objects are re-created without being ended, so their slots can shift [I].
+/// arrive, which is OAMD order); LFE2 and ISF elements nowhere (dropped). Seeking and pausing
+/// don't move them: measured on Windows 10.0.26200 with DolbyHrtfEnc 1.0.2403.20001 and Dolby
+/// Access's own 1080p demo (11 objects in 19-29), each seek and each pause frees every dynamic
+/// slot, and the re-created objects take the same slots again. Another app's spatial objects on
+/// the same device, created first, would take the lower slots.
 fn windows_slots(bed_bits: &[usize], isf: std::ops::Range<usize>, count: usize) -> Vec<Option<u16>> {
     let mut dynamic = 0u16;
     let mut next = || {

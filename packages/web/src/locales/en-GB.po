@@ -2094,8 +2094,8 @@ msgid "Its Metal and AVFoundation video outputs."
 msgstr "Its Metal and AVFoundation video outputs."
 
 #: src/components/player/scene-overlay.tsx
-msgid "Its slot in Windows' renderer, as from a fresh start: it can shift after a seek"
-msgstr "Its slot in Windows' renderer, as from a fresh start: it can shift after a seek"
+msgid "Its slot in Windows' renderer with only this player using spatial audio"
+msgstr "Its slot in Windows' renderer with only this player using spatial audio"
 
 #: src/pages/settings/about.tsx
 msgid "Jellyfin API"

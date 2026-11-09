@@ -2093,7 +2093,7 @@ msgid "Its Metal and AVFoundation video outputs."
 msgstr ""
 
 #: src/components/player/scene-overlay.tsx
-msgid "Its slot in Windows' renderer, as from a fresh start: it can shift after a seek"
+msgid "Its slot in Windows' renderer with only this player using spatial audio"
 msgstr ""
 
 #: src/pages/settings/about.tsx

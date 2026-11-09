@@ -23,8 +23,9 @@ export interface SceneElement {
   /** The input's RMS level over the snapshot's block, linear (after the input headroom). */
   level: number;
   /**
-   * Its slot in Windows' renderer (E), as from a fresh start with one app playing; none where
-   * Windows drops it or has no type for it. Can shift after a seek [inferred].
+   * Its slot in Windows' renderer (E) with one app playing spatial audio; none where
+   * Windows drops it or has no type for it. Seeks and pauses keep it (measured); another app's
+   * spatial objects on the same device would move it.
    */
   slot: number | null;
 }

@@ -345,7 +345,7 @@ function Scene({
               </th>
               <th
                 className="font-normal"
-                title={t`Its slot in Windows' renderer, as from a fresh start: it can shift after a seek`}
+                title={t`Its slot in Windows' renderer with only this player using spatial audio`}
               >
                 {t`Slot`}
               </th>
