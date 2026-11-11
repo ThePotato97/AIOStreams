@@ -23,6 +23,47 @@ import { PlayerControls } from '../components/player/controls';
 import { PartySheet, openPartySheet } from '../components/party/party-sheet';
 import type { BaseItemDto, SourceInfo } from '../lib/types';
 
+/** The invitation in the page's address: its party code and secret. */
+function invitation() {
+  const hash = new URLSearchParams(window.location.hash.slice(1));
+  return { code: hash.get('code') ?? '', secret: hash.get('secret') ?? '' };
+}
+
+/**
+ * The guest's place in the party, kept in this tab (sessionStorage: a reload keeps it, another
+ * tab joins on its own): the guest session, its seat key and name.
+ */
+interface KeptSeat {
+  code: string;
+  token: string;
+  name: string;
+  seat: string | null;
+}
+const SEAT_KEY = 'aiostreams-web-guest-seat';
+function keptSeat(): KeptSeat | null {
+  try {
+    return JSON.parse(
+      sessionStorage.getItem(SEAT_KEY) ?? 'null'
+    ) as KeptSeat | null;
+  } catch {
+    return null;
+  }
+}
+function keepSeat(seat: KeptSeat) {
+  try {
+    sessionStorage.setItem(SEAT_KEY, JSON.stringify(seat));
+  } catch {
+    /* private windows and blocked site data: a reload joins again */
+  }
+}
+function forgetSeat() {
+  try {
+    sessionStorage.removeItem(SEAT_KEY);
+  } catch {
+    /* as above */
+  }
+}
+
 export function GuestPage() {
   const [name, setName] = React.useState('');
   const [joining, setJoining] = React.useState(false);
@@ -32,15 +73,59 @@ export function GuestPage() {
   } | null>(null);
   const [error, setError] = React.useState('');
   const [ended, setEnded] = React.useState(false);
+  /** Taking a reloaded page's seat back: its failure shows the form, not an ending. */
+  const resuming = React.useRef(false);
   usePartyEvent((event) => {
     if (event.type === 'ended') {
+      forgetSeat();
+      if (resuming.current) return;
       setEnded(true);
       setError(event.reason);
     }
   });
   const leave = React.useCallback(() => {
+    forgetSeat();
     party.leave();
     setEnded(true);
+  }, []);
+  const enter = async (
+    code: string,
+    displayName: string,
+    token: string,
+    seat?: string
+  ) => {
+    const base = guestBase(),
+      relay = base.replace(/\/party\/guest$/, '');
+    await party.join(
+      { relay, code },
+      {
+        name: displayName,
+        avatar: null,
+        server: relay,
+        userId: 'guest',
+        token,
+        seat,
+      }
+    );
+    keepSeat({ code, token, name: displayName, seat: party.seat() });
+    setJoined({ api: new GuestApi(base, token), name: displayName });
+  };
+  // A reloaded page takes its seat back, as the same member with the same guest session,
+  // rather than joining again beside the one it left (shown away until it's given up).
+  React.useEffect(() => {
+    const kept = keptSeat();
+    if (!kept?.seat || kept.code !== invitation().code) return;
+    resuming.current = true;
+    setJoining(true);
+    setName(kept.name);
+    enter(kept.code, kept.name, kept.token, kept.seat)
+      .catch(() => forgetSeat())
+      .finally(() => {
+        resuming.current = false;
+        setJoining(false);
+      });
+    // Once, as the page opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const join = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -48,30 +133,14 @@ export function GuestPage() {
     setJoining(true);
     setError('');
     try {
-      const hash = new URLSearchParams(window.location.hash.slice(1));
-      const code = hash.get('code') ?? '',
-        secret = hash.get('secret') ?? '';
+      const { code, secret } = invitation();
       if (!/^[0-9A-Z]{10}$/.test(code) || !/^[A-Za-z0-9_-]{43}$/.test(secret))
         throw Error(t`This guest invitation is incomplete`);
-      const base = guestBase(),
-        relay = base.replace(/\/party\/guest$/, '');
       const keys = await partyKeys(code);
-      const result = await new GuestApi(base, '').request<{ token: string }>(
-        '/exchange',
-        { party: keys.id, secret }
-      );
-      const displayName = name.trim().slice(0, 60) || t`Guest`;
-      await party.join(
-        { relay, code },
-        {
-          name: displayName,
-          avatar: null,
-          server: relay,
-          userId: 'guest',
-          token: result.token,
-        }
-      );
-      setJoined({ api: new GuestApi(base, result.token), name: displayName });
+      const result = await new GuestApi(guestBase(), '').request<{
+        token: string;
+      }>('/exchange', { party: keys.id, secret });
+      await enter(code, name.trim().slice(0, 60) || t`Guest`, result.token);
     } catch (error) {
       setError((error as Error).message);
     } finally {
