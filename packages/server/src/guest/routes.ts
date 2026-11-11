@@ -130,8 +130,8 @@ const transcoderReady = () =>
   (config.party.transcoderSecret?.length ?? 0) >= 32 &&
   !!config.party.internalUrl;
 const enabled = () => config.party.guestStreaming && transcoderReady();
-function fail(status: number, message: string): never {
-  throw Object.assign(new Error(message), { status });
+function fail(status: number, message: string, code?: string): never {
+  throw Object.assign(new Error(message), { status, code });
 }
 function limit(req: Request) {
   const id = `${req.ip}:${Math.floor(Date.now() / 60000)}`;
@@ -579,8 +579,10 @@ router.get('/current', async (req, res) => {
 router.post('/prepare', async (req, res) => {
   const body = playbackSchema.parse(req.body);
   const { source, session, media } = await current(req);
+  // The track numbers and capabilities sent belong to the file the guest has open: the party
+  // moved on since, and the guest's page picks the new title up on its next look.
   if (body.revision !== source.revision)
-    fail(409, 'The party has changed titles');
+    fail(409, 'The party has changed titles', 'title_changed');
   const generation = (session.generation ?? 0) + 1;
   session.generation = generation;
   const lease = randomSecret();
@@ -604,7 +606,11 @@ router.post('/prepare', async (req, res) => {
         viewer: lease,
         release: true,
       });
-    fail(409, 'The party has changed titles');
+    // Another prepare from this guest started since (a seek, or the page they reloaded from,
+    // whose request runs on here): the newest wins. A page still waiting on this one asks again.
+    if (session.generation !== generation)
+      fail(409, 'A newer request replaced this one', 'superseded');
+    fail(409, 'The party has changed titles', 'title_changed');
   }
   if (session.job && session.job !== result.id) await release(session);
   session.job = result.id;

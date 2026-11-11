@@ -148,6 +148,8 @@ export function guestEngine(
     let playback: GuestPlayback | null = null;
     let file: EngineFile | null = null;
     let generation = 0;
+    /** Prepares asked again because another of this guest's requests won (see prepare). */
+    let supersededTries = 0;
     let controller: AbortController | undefined;
     let player: ShakaPlayer | undefined;
     /** The manifest the player plays, for reloading it. */
@@ -651,6 +653,7 @@ export function guestEngine(
           controller.signal
         );
         if (at !== generation) return;
+        supersededTries = 0;
         playback = result;
         onMode(result.mode);
         // What the page's conversion of TrueHD or E-AC-3 makes, where the server copied it
@@ -696,6 +699,25 @@ export function guestEngine(
               if (at === generation) void prepare(positionMs, waitedMs + ms);
             })
             .catch(() => {});
+          return;
+        }
+        // Another request from this guest won on the server: from a page reloaded away from, which
+        // keeps running there. This page asks again, and its request is then the newest.
+        if (status === 409 && code === 'superseded' && supersededTries < 2) {
+          supersededTries++;
+          preparing = false;
+          void prepare(positionMs);
+          return;
+        }
+        // The host moved to another title: the page loads it on its next look (every 2 s).
+        if (status === 409 && code === 'title_changed') {
+          emit({
+            type: 'state',
+            state: {
+              waiting: true,
+              waitingFor: t`Loading what the host is playing…`,
+            },
+          });
           return;
         }
         if (sessionGone(status)) expired(message);

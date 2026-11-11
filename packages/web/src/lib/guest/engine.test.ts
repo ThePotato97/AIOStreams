@@ -805,6 +805,38 @@ describe('heartbeats', () => {
   });
 });
 
+describe('a prepare the server turned down as stale', () => {
+  const conflict = (code: string) =>
+    Object.assign(new Error('stale'), { status: 409, code });
+  it('asks again where another request of this guest won, without failing', async () => {
+    const { engine, api, failures } = setup();
+    vi.mocked(api.prepare).mockRejectedValueOnce(conflict('superseded'));
+    await start(engine);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.prepare).toHaveBeenCalledTimes(2);
+    expect(failures()).toHaveLength(0);
+  });
+  it('gives up asking again after twice', async () => {
+    const { engine, api, failures } = setup();
+    vi.mocked(api.prepare).mockRejectedValue(conflict('superseded'));
+    await start(engine);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.prepare).toHaveBeenCalledTimes(3);
+    expect(failures()).toHaveLength(1);
+  });
+  it('waits for the title the host moved to, without failing', async () => {
+    const { engine, api, events, failures } = setup();
+    vi.mocked(api.prepare).mockRejectedValueOnce(conflict('title_changed'));
+    await start(engine);
+    expect(api.prepare).toHaveBeenCalledTimes(1);
+    expect(failures()).toHaveLength(0);
+    expect(events.at(-1)).toEqual({
+      type: 'state',
+      state: { waiting: true, waitingFor: 'Loading what the host is playing…' },
+    });
+  });
+});
+
 describe('a full transcoder', () => {
   const full = (retryAfter?: number) =>
     Object.assign(new Error('Conversion capacity reached'), {

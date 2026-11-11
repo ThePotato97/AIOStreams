@@ -2323,6 +2323,10 @@ msgstr "Load your own HRIR…"
 msgid "Loading"
 msgstr "Loading"
 
+#: src/lib/guest/engine.ts
+msgid "Loading what the host is playing…"
+msgstr "Loading what the host is playing…"
+
 #: src/components/version-settings.tsx
 msgid "Loading…"
 msgstr "Loading…"

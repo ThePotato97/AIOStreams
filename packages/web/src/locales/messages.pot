@@ -2322,6 +2322,10 @@ msgstr ""
 msgid "Loading"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "Loading what the host is playing…"
+msgstr ""
+
 #: src/components/version-settings.tsx
 msgid "Loading…"
 msgstr ""
