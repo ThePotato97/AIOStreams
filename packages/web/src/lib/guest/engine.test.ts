@@ -350,9 +350,50 @@ describe('buffering', () => {
     buffering(true);
     buffering(false);
     expect(events.slice(-2)).toEqual([
-      { type: 'state', state: { waiting: true } },
-      { type: 'state', state: { waiting: false } },
+      // nothing here to tell why
+      { type: 'state', state: { waiting: true, waitingFor: null } },
+      { type: 'state', state: { waiting: false, waitingFor: null } },
     ]);
+  });
+  it('says why, where the server has not converted that far yet', async () => {
+    const { engine, events } = setup();
+    await start(engine);
+    el.currentTime = 30;
+    player().maxSegmentEnd = 31;
+    player().dispatchEvent(
+      Object.assign(new Event('buffering'), { buffering: true })
+    );
+    expect(events.at(-1)).toEqual({
+      type: 'state',
+      state: {
+        waiting: true,
+        waitingFor:
+          "Waiting for the server, which hasn't converted this far yet",
+      },
+    });
+    // and again while it waits, until it plays on
+    player().maxSegmentEnd = 90;
+    (player() as unknown as { getStats(): object }).getStats = () => ({
+      estimatedBandwidth: 2e7,
+      streamBandwidth: 8e7,
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(events.at(-1)).toEqual({
+      type: 'state',
+      state: {
+        waiting: true,
+        waitingFor:
+          'Your connection (20 Mb/s) is slower than this stream (80 Mb/s): try a lower quality',
+      },
+    });
+    player().dispatchEvent(
+      Object.assign(new Event('buffering'), { buffering: false })
+    );
+    const count = events.length;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(
+      events.slice(count).some((e) => JSON.stringify(e).includes('waitingFor'))
+    ).toBe(false);
   });
   it('passes a rate of 0 on for the original file', async () => {
     mode = 'direct';

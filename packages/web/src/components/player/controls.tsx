@@ -576,6 +576,9 @@ export function PlayerControls({
       {!touch && <div className="contents max-lg:hidden">{flash}</div>}
       {seekFlash}
       {notice ||
+        (state.waiting && !state.error && state.waitingFor && (
+          <Notice text={state.waitingFor} />
+        )) ||
         (player.autoSync?.waiting && <Notice text={t`Syncing subtitles…`} />)}
       {scrub && !tv && (
         <ScrubReadout

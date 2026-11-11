@@ -70,6 +70,8 @@ export interface RendererExports {
 
 export class BinauralConverter {
   private timescale = FLAC_RATE;
+  /** Seconds of the source the last segment held: for how fast the conversion runs. */
+  lastSeconds = 0;
   private session = 0;
   /** The next source sample expected (48 kHz), if a session is running. */
   private expected: number | null = null;
@@ -187,6 +189,7 @@ export class BinauralConverter {
   segment(data: Uint8Array): Uint8Array {
     const rendered: Float32Array[] = [];
     let first: number | null = null;
+    this.lastSeconds = 0;
     for (const fragment of readFragments(data)) {
       const start = Math.round((fragment.start * FLAC_RATE) / this.timescale);
       if (this.expected === null || Math.abs(start - this.expected) > 1) {
@@ -201,6 +204,7 @@ export class BinauralConverter {
         new Uint8Array(this.r.memory.buffer, at, s.data.length).set(s.data);
         at += s.data.length;
         duration += s.duration;
+        this.lastSeconds += s.duration / this.timescale;
       }
       const units = fragment.samples.map((s) => s.data);
       // Decoded codecs: the speaker version first, so it's queued before the render it goes with

@@ -20,8 +20,10 @@ import { DoviCapture } from '../playback/dovi/capture';
 import { DoviView } from '../playback/dovi/view';
 import {
   registerBinauralTransmuxer,
+  renderSpeed,
   TRANSMUXING_FAILED,
 } from '../playback/binaural/transmuxer';
+import { bufferReason } from './buffering';
 import { watchHeadphones } from '../playback/headphone-setting';
 import {
   localAudio,
@@ -60,6 +62,8 @@ interface ShakaPlayer extends EventTarget {
   getNetworkingEngine?(): {
     registerResponseFilter(filter: DoviCapture['filter']): void;
   } | null;
+  /** The connection's estimate and the playing stream's bitrate, in bits a second. */
+  getStats?(): { estimatedBandwidth?: number; streamBandwidth?: number };
 }
 type Shaka = {
   Player: { new (): ShakaPlayer; isBrowserSupported(): boolean };
@@ -70,6 +74,8 @@ const isShakaError = (error: unknown): error is ShakaError =>
   typeof (error as ShakaError)?.code === 'number';
 /** How long a media failure waits for the element's own error (the browser's reason). */
 const ELEMENT_ERROR_WAIT_MS = 1000;
+/** How often the reason a converted stream is buffering is worked out again, while it is. */
+const REASON_MS = 2000;
 /** Retries for one manifest or segment request, before the player reports it. */
 const RETRY = {
   maxAttempts: 4,
@@ -412,7 +418,45 @@ export function guestEngine(
       if (event.type === 'loaded') listTracks();
       emit(event);
     };
+    /** Refreshes why a converted stream is buffering, while it is. */
+    let reasonTimer: ReturnType<typeof setInterval> | undefined;
+    const waitingReason = (shaka: ShakaPlayer): string | null => {
+      const el = video.current;
+      const now = el?.currentTime ?? 0;
+      let bufferedEnd: number | null = null;
+      if (el?.buffered)
+        for (let i = 0; i < el.buffered.length; i++)
+          if (el.buffered.start(i) <= now + 0.5 && el.buffered.end(i) >= now)
+            bufferedEnd = el.buffered.end(i);
+      const stats = shaka.getStats?.();
+      const reason = bufferReason({
+        bufferedEnd: bufferedEnd ?? now,
+        writtenEnd:
+          shaka.getManifest()?.presentationTimeline?.getMaxSegmentEndTime() ??
+          null,
+        estimatedBps: stats?.estimatedBandwidth,
+        streamBps: stats?.streamBandwidth,
+        renderSpeed: playback?.clientBinaural ? renderSpeed() : null,
+      });
+      const mbps = (bps: number) => (bps / 1e6).toFixed(bps < 1e7 ? 1 : 0);
+      switch (reason?.kind) {
+        case 'server':
+          return t`Waiting for the server, which hasn't converted this far yet`;
+        case 'device': {
+          const speed = reason.speed.toFixed(1);
+          return t`This device converts the audio slower than it plays (${speed}× real time)`;
+        }
+        case 'network': {
+          const have = mbps(reason.haveBps);
+          const need = mbps(reason.needBps);
+          return t`Your connection (${have} Mb/s) is slower than this stream (${need} Mb/s): try a lower quality`;
+        }
+        default:
+          return null;
+      }
+    };
     const stop = () => {
+      clearInterval(reasonTimer);
       const old = player;
       player = undefined;
       doviView?.destroy();
@@ -473,7 +517,27 @@ export function guestEngine(
         next.addEventListener('buffering', (event) => {
           if (at !== generation || player !== next) return;
           const { buffering } = event as Event & { buffering?: boolean };
-          emit({ type: 'state', state: { waiting: !!buffering } });
+          // why, while it lasts: what holds it up can change as it waits
+          clearInterval(reasonTimer);
+          const tell = () => {
+            if (at !== generation || player !== next) {
+              clearInterval(reasonTimer);
+              return;
+            }
+            emit({
+              type: 'state',
+              state: { waiting: true, waitingFor: waitingReason(next) },
+            });
+          };
+          if (!buffering) {
+            emit({
+              type: 'state',
+              state: { waiting: false, waitingFor: null },
+            });
+            return;
+          }
+          tell();
+          reasonTimer = setInterval(tell, REASON_MS);
         });
         // Recoveries are counted again once the stream plays on.
         next.addEventListener('segmentappended', () => {

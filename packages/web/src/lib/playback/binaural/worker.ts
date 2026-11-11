@@ -78,11 +78,17 @@ self.onmessage = async (event: MessageEvent<Request>) => {
     const conv = converter ?? (await loading);
     if (!conv) throw new Error('The binaural renderer was not loaded');
     const bytes = new Uint8Array(message.data);
+    const began = performance.now();
     const out =
       message.type === 'init' ? conv.init(bytes) : conv.segment(bytes);
+    // how long this segment's audio took to convert, for how the player says it's buffering
+    const timing =
+      message.type === 'segment'
+        ? { seconds: conv.lastSeconds, ms: performance.now() - began }
+        : undefined;
     // the scene as rendered, for the player's debug view
     const snapshots = conv.takeSnapshots();
-    self.postMessage({ id: message.id, data: out.buffer, snapshots }, [
+    self.postMessage({ id: message.id, data: out.buffer, snapshots, timing }, [
       out.buffer,
     ]);
   } catch (error) {

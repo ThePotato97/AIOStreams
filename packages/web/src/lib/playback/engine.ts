@@ -62,6 +62,7 @@ export type EngineState = Partial<
     | 'loaded'
     | 'paused'
     | 'waiting'
+    | 'waitingFor'
     | 'durationMs'
     | 'volume'
     | 'maxVolume'

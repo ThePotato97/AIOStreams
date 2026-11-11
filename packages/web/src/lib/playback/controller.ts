@@ -31,6 +31,8 @@ export interface PlayerState {
   loaded: boolean;
   paused: boolean;
   waiting: boolean;
+  /** Why it's waiting, where the engine can tell. */
+  waitingFor?: string | null;
   durationMs: number;
   volume: number;
   /** Above 1 where the player can boost past the file's own level. */

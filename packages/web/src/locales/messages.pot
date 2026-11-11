@@ -4945,6 +4945,10 @@ msgstr ""
 msgid "This copy does not update itself."
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "This device converts the audio slower than it plays ({speed}× real time)"
+msgstr ""
+
 #: src/lib/party/follow.ts
 msgid "This device couldn't read what the party is playing."
 msgstr ""
@@ -5422,6 +5426,10 @@ msgstr ""
 msgid "Waiting for the renderer…"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "Waiting for the server, which hasn't converted this far yet"
+msgstr ""
+
 #: src/lib/playback/convert.ts
 msgid "Waiting for the transcoder to come back…"
 msgstr ""
@@ -5701,6 +5709,10 @@ msgstr ""
 
 #: src/lib/guest/explain.ts
 msgid "Your browser couldn't decode the video ({codecs})"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Your connection ({have} Mb/s) is slower than this stream ({need} Mb/s): try a lower quality"
 msgstr ""
 
 #: src/pages/guest.tsx

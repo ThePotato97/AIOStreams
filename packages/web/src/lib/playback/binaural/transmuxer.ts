@@ -73,6 +73,26 @@ export function clientBinauralCodecs(): Codec[] {
 interface Reply {
   data?: ArrayBuffer;
   snapshots?: SceneSnapshot[];
+  /** A media segment's: its seconds of audio, and the milliseconds converting it took. */
+  timing?: { seconds: number; ms: number };
+}
+
+/** The last segments' conversion times, for how fast this browser converts the audio. */
+const timings: { seconds: number; ms: number; at: number }[] = [];
+const TIMED = 4;
+/** Older than this, the conversion isn't running: no speed to report. */
+const STALE_MS = 30_000;
+
+/**
+ * Seconds of audio this browser converts per second of work, over its last few segments; null
+ * when it hasn't converted any lately.
+ */
+export function renderSpeed(): number | null {
+  const now = Date.now();
+  const recent = timings.filter((t) => now - t.at < STALE_MS);
+  const ms = recent.reduce((n, t) => n + t.ms, 0);
+  const seconds = recent.reduce((n, t) => n + t.seconds, 0);
+  return recent.length && ms > 0 ? seconds / (ms / 1000) : null;
 }
 
 /** Makes the error Shaka reports for a segment that couldn't be converted. */
@@ -170,6 +190,10 @@ class BinauralTransmuxer {
         [copy]
       );
       if (out.snapshots) sceneStore.add(out.snapshots);
+      if (out.timing?.seconds) {
+        timings.push({ ...out.timing, at: Date.now() });
+        timings.splice(0, Math.max(0, timings.length - TIMED));
+      }
       return new Uint8Array(out.data ?? new ArrayBuffer(0));
     } catch (error) {
       // Shaka's TRANSMUXING_FAILED, which the guest engine answers with server rendering.
@@ -178,6 +202,7 @@ class BinauralTransmuxer {
   }
 
   destroy() {
+    timings.length = 0;
     if (this.worker) sceneStore.stopped();
     if (this.plan) localAudio.stopped(this.plan);
     this.worker?.terminate();
