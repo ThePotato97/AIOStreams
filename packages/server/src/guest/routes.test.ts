@@ -1065,6 +1065,20 @@ describe('own playback and a full transcoder', () => {
       (await api('/own/touch', token, { positionMs: 2000, lease })).status
     ).toBe(200);
   });
+  it('keeps the playing job until its replacement has started', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-playing' };
+    const { token, revision } = await open();
+    expect((await prepare(token, revision)).status).toBe(200);
+    // the next one fails (a source slow to open, a full transcoder): the playing job stays watched
+    fixture.full = true;
+    expect((await prepare(token, revision)).status).toBe(503);
+    expect(fixture.releases).not.toContain('job-playing');
+    // and goes once one has started
+    fixture.full = false;
+    fixture.prepared = { mode: 'audio', id: 'job-next' };
+    expect((await prepare(token, revision)).status).toBe(200);
+    expect(fixture.releases).toContain('job-playing');
+  });
   it('releases the earlier playback of the same item when it opens again', async () => {
     fixture.prepared = { mode: 'audio', id: 'job-first' };
     const first = await open();

@@ -473,9 +473,13 @@ export function stoppedEarly(job) {
   const total = job.meta?.durationMs;
   return total > 0 && (job.producedMs ?? 0) < total - END_MARGIN_MS;
 }
-async function prepare(body) {
+/**
+ * A playback's job: an existing one that covers the position, or a new one, with the viewer
+ * added. Run one at a time (the job limit); the source is probed before, and the wait for the
+ * job's first segments comes after (`whenReady`), so a source slow to open holds up nobody else.
+ */
+async function admit(body, meta) {
   const input = inputUrl(body.input);
-  const meta = await probe(input);
   const request = body.request ?? {};
   if (
     !['original', '1080p', '720p'].includes(request.quality) ||
@@ -565,6 +569,10 @@ async function prepare(body) {
     job.child?.kill('SIGCONT');
     job.paused = false;
   }
+  return { job, meta };
+}
+/** Waits for a job's first segments (30 s at most), then what the player needs from it. */
+async function whenReady(job, meta) {
   for (let i = 0; i < 300; i++) {
     if (job.error) throw Error(job.error);
     const mpd = await readFile(`${job.dir}/manifest.mpd`, 'utf8').catch(
@@ -584,6 +592,9 @@ async function prepare(body) {
   if (!job.ready) {
     const error = Error('Conversion is still starting; retry shortly');
     error.status = 503;
+    // The player waits and asks again (the same job, still starting) rather than failing: a
+    // source can take longer than this wait to open.
+    error.retryAfter = 2;
     throw error;
   }
   // Shaka plays the source's own timestamps: the player needs no offset.
@@ -700,15 +711,21 @@ export function createServer() {
       }
       if (req.method === 'POST' && url.pathname === '/prepare') {
         const body = await json(req);
-        // Serialize admission so simultaneous requests cannot exceed the job limit.
+        const meta = await probe(inputUrl(body.input));
+        // Serialize admission so simultaneous requests cannot exceed the job limit; only
+        // admission: the wait for a job's first segments runs alongside others.
         const previous = pending.get('prepare') ?? Promise.resolve();
-        const task = previous.catch(() => {}).then(() => prepare(body));
+        const task = previous.catch(() => {}).then(() => admit(body, meta));
         pending.set('prepare', task);
+        let admitted;
         try {
-          return send(await task);
+          admitted = await task;
         } finally {
           if (pending.get('prepare') === task) pending.delete('prepare');
         }
+        return send(
+          admitted.job ? await whenReady(admitted.job, admitted.meta) : admitted
+        );
       }
       const match = /^\/jobs\/([A-Za-z0-9_-]+)(?:\/([\w.-]+))?$/.exec(
         url.pathname

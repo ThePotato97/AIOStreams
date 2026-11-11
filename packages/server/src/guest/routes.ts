@@ -617,7 +617,9 @@ router.post('/prepare', async (req, res) => {
   const generation = (session.generation ?? 0) + 1;
   session.generation = generation;
   const lease = randomSecret();
-  await release(session);
+  // The job playing now is released only once its replacement has started (below): released
+  // first, a request that then fails (a source slow to open) or is replaced would leave the
+  // stream still playing with no viewer, which the transcoder drops as soon as any job starts.
   const result = await worker('/prepare', {
     input: input(source),
     viewer: lease,
@@ -652,7 +654,8 @@ router.post('/prepare', async (req, res) => {
     // Another prepare from this guest started since (a seek): the newest wins.
     fail(409, 'A newer request replaced this one', 'superseded');
   }
-  if (session.job && session.job !== result.id) await release(session);
+  // The earlier job's lease goes now (the same job keeps this request's).
+  if (session.job) await release(session);
   session.job = result.id;
   session.lease = lease;
   session.offsetMs = result.offsetMs ?? 0;
@@ -787,7 +790,7 @@ router.post('/own/prepare', async (req, res) => {
   const generation = (session.generation ?? 0) + 1;
   session.generation = generation;
   const lease = randomSecret();
-  await release(session);
+  // Released once the new job has started, as for guests (below).
   const result = await worker('/prepare', {
     input: input(session.stream),
     viewer: lease,
@@ -802,6 +805,7 @@ router.post('/own/prepare', async (req, res) => {
       }).catch(() => {});
     fail(409, 'Playback changed');
   }
+  if (session.job) await release(session);
   session.job = result.id;
   session.lease = lease;
   session.offsetMs = result.offsetMs ?? 0;
