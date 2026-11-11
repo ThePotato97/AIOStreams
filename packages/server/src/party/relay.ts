@@ -1,7 +1,7 @@
 import { guestSessions } from '../guest/sessions.js';
 import type { IncomingMessage, Server as HttpServer } from 'http';
 import type { Duplex } from 'stream';
-import { createHmac, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import proxyaddr from 'proxy-addr';
 import { ipKeyGenerator } from 'express-rate-limit';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
@@ -85,8 +85,6 @@ interface Seat {
   key: string;
   name: string;
   avatar?: string;
-  /** Its address, keyed, for bans. */
-  address: string;
   /** The replica holding its connection; null while it is away. */
   at: string | null;
   /** Its connection's id; one taking the seat over closes the older. */
@@ -105,7 +103,6 @@ interface Party {
   lock: PartyLock;
   home: Home | null;
   seats: Map<string, Seat>;
-  banned: string[];
   lastActivity: number;
 }
 
@@ -180,19 +177,6 @@ let stopping = false;
 let current:
   { party: Party; tx: SharedTx; by?: string; chat?: PartyChat[] } | undefined;
 
-let addressKey: Buffer | undefined;
-/** An address as a party keeps it, so the store holds no addresses. */
-const keyedAddress = (address: string) =>
-  createHmac(
-    'sha256',
-    (addressKey ??= Buffer.from(
-      `party-address:${appConfig.bootstrap.secretKey}`
-    ))
-  )
-    .update(address)
-    .digest('base64url')
-    .slice(0, 22);
-
 const ticketOf = (party: Party) => ticketFor(party.id, party.expiresAt);
 const hostTicketOf = (party: Party) =>
   ticketFor(party.id, party.expiresAt, 'host');
@@ -204,7 +188,6 @@ function saveParty(party: Party): SavedParty {
     lock: party.lock,
     home: party.home,
     seats: [...party.seats.values()],
-    banned: party.banned,
     lastActivity: party.lastActivity,
     group: party.group.save(),
   };
@@ -514,7 +497,6 @@ function newSeat(
     key: key(),
     name,
     avatar,
-    address: keyedAddress(conn.address),
     at: store.replica,
     conn: conn.id,
   };
@@ -534,7 +516,6 @@ function newParty(
     lock: { control: false, joins: false },
     home,
     seats: new Map([[seat.id, seat]]),
-    banned: [],
     lastActivity: Date.now(),
   };
 }
@@ -732,7 +713,7 @@ async function join(
               { chat }
             );
           }
-          const barred = barredIn(party, conn, m.t === 'resume');
+          const barred = barredIn(party, m.t === 'resume');
           if (barred) return barred;
           if (party.seats.size >= PARTY_LIMITS.members) return 'full';
           return changing(
@@ -786,15 +767,7 @@ async function settled<T>(
 }
 
 /** Why someone new may not join the party as it is. */
-function barredIn(
-  party: Party,
-  conn: Conn,
-  member: boolean
-): PartyErrorCode | null {
-  const address = keyedAddress(conn.address);
-  // Never the host's own address, which a kick of their own other session once banned.
-  const host = party.seats.get(party.host)?.address;
-  if (address !== host && party.banned.includes(address)) return 'denied';
+function barredIn(party: Party, member: boolean): PartyErrorCode | null {
   if (party.lock.joins && !member) return 'locked';
   return null;
 }
@@ -815,7 +788,7 @@ async function barredFrom(
     !(await userOf(token))
   )
     return 'denied';
-  return barredIn(party, conn, member);
+  return barredIn(party, member);
 }
 
 async function peek(
@@ -989,11 +962,9 @@ function inParty(conn: Conn, m: PartyClientMessage): void {
               encode({ t: 'closed', reason: 'removed' }),
               RESEAT
             );
-            // A kicked member can't join again from where they were, unless that's where the
-            // host is too: then it's most likely the host's own other session (a page left
-            // open, another device), and a ban would lock the host's own network out.
-            if (target.address !== seat.address)
-              party.banned.push(target.address);
+            // Removed, not banned: banning their address locked out everyone on their
+            // network, the host's too when it was the host's own other session. Locking
+            // joins keeps people out.
             removeSeat(party, tx, target);
           });
         })
