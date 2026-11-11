@@ -791,7 +791,10 @@ function barredIn(
   conn: Conn,
   member: boolean
 ): PartyErrorCode | null {
-  if (party.banned.includes(keyedAddress(conn.address))) return 'denied';
+  const address = keyedAddress(conn.address);
+  // Never the host's own address, which a kick of their own other session once banned.
+  const host = party.seats.get(party.host)?.address;
+  if (address !== host && party.banned.includes(address)) return 'denied';
   if (party.lock.joins && !member) return 'locked';
   return null;
 }
@@ -986,7 +989,11 @@ function inParty(conn: Conn, m: PartyClientMessage): void {
               encode({ t: 'closed', reason: 'removed' }),
               RESEAT
             );
-            party.banned.push(target.address);
+            // A kicked member can't join again from where they were, unless that's where the
+            // host is too: then it's most likely the host's own other session (a page left
+            // open, another device), and a ban would lock the host's own network out.
+            if (target.address !== seat.address)
+              party.banned.push(target.address);
             removeSeat(party, tx, target);
           });
         })
