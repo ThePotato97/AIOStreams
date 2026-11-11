@@ -581,8 +581,13 @@ router.post('/prepare', async (req, res) => {
   const { source, session, media } = await current(req);
   // The track numbers and capabilities sent belong to the file the guest has open: the party
   // moved on since, and the guest's page picks the new title up on its next look.
-  if (body.revision !== source.revision)
+  if (body.revision !== source.revision) {
+    logger.info(
+      { party: session.party },
+      'guest prepare for a title the party has left'
+    );
     fail(409, 'The party has changed titles', 'title_changed');
+  }
   const generation = (session.generation ?? 0) + 1;
   session.generation = generation;
   const lease = randomSecret();
@@ -593,24 +598,33 @@ router.post('/prepare', async (req, res) => {
     request: body,
   });
   // A seek or episode change can finish while FFmpeg is starting.
-  let valid = false;
-  try {
-    const latest = await current(req);
-    valid =
-      latest.source.revision === source.revision &&
-      session.generation === generation;
-  } catch {}
-  if (!valid) {
+  const drop = async () => {
     if (result.id)
       await worker(`/jobs/${result.id}/touch`, {
         viewer: lease,
         release: true,
-      });
-    // Another prepare from this guest started since (a seek, or the page they reloaded from,
-    // whose request runs on here): the newest wins. A page still waiting on this one asks again.
-    if (session.generation !== generation)
-      fail(409, 'A newer request replaced this one', 'superseded');
+      }).catch(() => {});
+  };
+  let latest: Awaited<ReturnType<typeof current>>;
+  try {
+    latest = await current(req);
+  } catch (error) {
+    // What's wrong now (the source failing, the host's session ending), not a title change.
+    await drop();
+    throw error;
+  }
+  if (latest.source.revision !== source.revision) {
+    await drop();
+    logger.info(
+      { party: latest.session.party },
+      'guest prepare outrun by a title change'
+    );
     fail(409, 'The party has changed titles', 'title_changed');
+  }
+  if (session.generation !== generation) {
+    await drop();
+    // Another prepare from this guest started since (a seek): the newest wins.
+    fail(409, 'A newer request replaced this one', 'superseded');
   }
   if (session.job && session.job !== result.id) await release(session);
   session.job = result.id;

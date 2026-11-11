@@ -512,7 +512,32 @@ describe('guest playback authorization', () => {
     fixture.prepares[1].resolve();
     expect((await second).status).toBe(200);
     fixture.prepares[0].resolve();
-    expect((await first).status).toBe(409);
+    const lost = await first;
+    expect(lost.status).toBe(409);
+    expect(((await lost.json()) as { code?: string }).code).toBe('superseded');
+  });
+  it('reports what went wrong while it started, not a title change', async () => {
+    const secret = await invitation(),
+      token = await guest(secret);
+    join(token);
+    const current = (await (await api('/current', token)).json()) as {
+      revision: string;
+    };
+    fixture.slow = true;
+    const pending = api('/prepare', token, {
+      revision: current.revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: true, container: true, hdr: false },
+    });
+    await vi.waitFor(() => expect(fixture.prepares.length).toBe(1));
+    fixture.enabled = false;
+    fixture.prepares[0].resolve();
+    const res = await pending;
+    expect(res.status).toBe(410);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'Guest streaming is disabled'
+    );
   });
   it('does not re-resolve a failed source on every poll', async () => {
     fixture.noSources = true;
