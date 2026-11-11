@@ -145,6 +145,12 @@ export function usePlayer(
   }));
   // Engines report several things in one go, before the page draws again.
   const live = React.useRef({ ...state, tracks: [] as EngineTrack[] });
+  /**
+   * The open file's tracks were picked from the user's settings. Once per file: an engine that
+   * loads again (a converting one does for every track switch and seek) keeps what the user
+   * chose since.
+   */
+  const picked = React.useRef(false);
   const patch = React.useCallback((next: Partial<PlayerState>) => {
     live.current = { ...live.current, ...next };
     setState((s) => ({ ...s, ...next }));
@@ -240,6 +246,8 @@ export function usePlayer(
       case 'loaded': {
         patch({ loaded: true, error: null });
         setRetry(undefined);
+        if (picked.current) return;
+        picked.current = true;
         const { tracks, audio, subtitle } = live.current;
         const shown = shownSubtitle(tracks, subtitle, retimed);
         const picks = chooseTracks(
@@ -363,6 +371,7 @@ export function usePlayer(
     setRetimed({});
     const file = latestFile.current(startMs);
     if (file.volume) patch(file.volume);
+    picked.current = false;
     engine.load(file);
     return () => engine.close();
     // Reloading restarts playback, so only a new url or start does it.
