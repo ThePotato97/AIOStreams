@@ -797,17 +797,22 @@ export function guestEngine(
     const startHeartbeat = () => {
       clearInterval(heartbeat);
       heartbeat = setInterval(() => {
-        if (playback)
-          void api
-            .request('/touch', {
-              positionMs: position(),
-              lease: playback.lease,
-            })
-            // A blip misses one heartbeat, which the next makes up for;
-            // only a playback the server has dropped stops here.
-            .catch((error: Error & { status?: number }) => {
-              if (sessionGone(error.status)) expired(error.message);
-            });
+        if (!playback) return;
+        const lease = playback.lease;
+        void api
+          .request('/touch', { positionMs: position(), lease })
+          // A blip misses one heartbeat, which the next makes up for; a playback the server
+          // has dropped stops here, and a stream the transcoder no longer has starts again
+          // from where it was (nothing more of it will come).
+          .catch((error: Error & { status?: number; code?: string }) => {
+            if (sessionGone(error.status)) expired(error.message);
+            else if (
+              error.code === 'stream_gone' &&
+              !preparing &&
+              playback?.lease === lease
+            )
+              void prepare(position());
+          });
       }, 10000);
     };
     return {

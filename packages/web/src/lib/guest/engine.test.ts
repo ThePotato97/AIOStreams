@@ -803,6 +803,21 @@ describe('heartbeats', () => {
       { type: 'failed', error: 'This guest session has expired' },
     ]);
   });
+  it('starts the stream again, from where it was, once the transcoder no longer has it', async () => {
+    const { engine, failures } = setup();
+    await start(engine, 30_000);
+    el.currentTime = 95;
+    touch = async () => {
+      throw Object.assign(new Error('This stream ended on the server'), {
+        status: 409,
+        code: 'stream_gone',
+      });
+    };
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(prepares).toHaveLength(2);
+    expect(prepares[1]).toMatchObject({ positionMs: 95_000 });
+    expect(failures()).toHaveLength(0);
+  });
 });
 
 describe('a prepare the server turned down as stale', () => {

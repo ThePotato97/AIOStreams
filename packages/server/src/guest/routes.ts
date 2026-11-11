@@ -13,6 +13,8 @@ import {
   type GuestMedia,
   type GuestPlayback,
   type MediaSourceRecord,
+  type PlaybackMemo,
+  isMemoFresh,
 } from '@aiostreams/core';
 import {
   userForToken,
@@ -172,6 +174,8 @@ async function worker(path: string, body?: unknown): Promise<any> {
       );
       throw Object.assign(new Error(error.error ?? 'Transcoder unavailable'), {
         status: res.status === 503 ? 503 : 502,
+        // What the transcoder answered, for callers that read it (a job it no longer has).
+        workerStatus: res.status,
         // The transcoder's own condition (busy, misconfigured), or a conversion
         // that failed, which can be the file's.
         code:
@@ -296,13 +300,35 @@ async function lookupRecord(
   } finally {
     req.jf = old;
   }
-  const memo = loc && (await ensureMemo(loc, { current: true }));
-  const playable = memo?.sources.filter(
-    (s) => !s.notice && s.needs !== 'youtube'
-  );
+  // A named version keeps the list it was picked from, as the rest of the server's playback
+  // does: its link plays as long as that list is kept, and a list run again may not have it
+  // (an addon that timed out, results in another order). Only a version missing from it, or
+  // no choice at all, runs the addons again.
+  const find = (memo: PlaybackMemo | null) => {
+    const playable = memo?.sources.filter(
+      (s) => !s.notice && s.needs !== 'youtube'
+    );
+    const named =
+      playable?.find((s) => s.msid === entry.sourceId) ??
+      playable?.find((s) => entry.filename && s.filename === entry.filename);
+    return { playable, named };
+  };
+  let kept: PlaybackMemo | null = null;
+  let found: ReturnType<typeof find> | undefined;
+  if (entry.sourceId && loc) {
+    kept = await ensureMemo(loc);
+    found = find(kept);
+  }
+  // Run again only for a list that has versions, not this one, and is past its reuse window:
+  // an empty list was just run again, and a fresh one would come back the same.
+  if (
+    !found ||
+    (!found.named && found.playable?.length && kept && !isMemoFresh(kept))
+  )
+    found = find(loc ? await ensureMemo(loc, { current: true }) : null);
+  const { playable, named } = found;
   const record =
-    playable?.find((s) => s.msid === entry.sourceId) ??
-    playable?.find((s) => entry.filename && s.filename === entry.filename) ??
+    named ??
     playable?.find(
       (s) => bingeGroup && s.extension.bingeGroup === bingeGroup
     ) ??
@@ -806,10 +832,25 @@ router.post(['/touch', '/own/touch'], async (req, res) => {
   if (body.lease !== session.lease) return void res.json({ ok: true });
   if (body.release) await release(session);
   else if (session.job)
-    await worker(`/jobs/${session.job}/touch`, {
-      viewer: session.lease,
-      positionMs: body.positionMs,
-    });
+    try {
+      await worker(`/jobs/${session.job}/touch`, {
+        viewer: session.lease,
+        positionMs: body.positionMs,
+      });
+    } catch (error) {
+      // The transcoder no longer has the job (it ended, failed or restarted), or no longer
+      // counts this viewer on it: its stream won't go on, so the player starts another.
+      const answered = (error as { workerStatus?: number }).workerStatus;
+      if (answered === 404 || answered === 403) {
+        logger.info(
+          { job: session.job, status: answered },
+          'guest stream gone from the transcoder; the player starts another'
+        );
+        session.job = undefined;
+        fail(409, 'This stream ended on the server', 'stream_gone');
+      }
+      throw error;
+    }
   res.json({ ok: true });
 });
 const CROSS_ORIGIN_HEADERS = new Set(['range', 'user-agent', 'accept']);

@@ -19,6 +19,8 @@ const fixture = vi.hoisted(() => ({
   slow: false,
   noSources: false,
   memoCalls: 0,
+  /** A list run again (`current`) comes back without the version picked from it. */
+  rerunLoses: false,
   workerDown: false,
   logs: [] as { level: string; data: unknown; message: string }[],
   // A fake source server, so the pre-probe check sees real HTTP answers.
@@ -46,6 +48,8 @@ const fixture = vi.hoisted(() => ({
   // What the transcoder answers: a full one, released jobs, extraction.
   full: false,
   releases: [] as string[],
+  /** What the transcoder answers a heartbeat with: 404 once it no longer has the job. */
+  touchStatus: 200,
   extraction: [] as { status: number; body: string }[],
   subtitleCodec: 'subrip',
 }));
@@ -109,23 +113,25 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
     fixture.scopes.push(req.jf?.scope?.()),
     {}
   ),
-  ensureMemo: async () => (
+  ensureMemo: async (_loc: unknown, opts?: { current?: boolean }) => (
     ++fixture.memoCalls,
     {
-      sources: fixture.noSources
-        ? []
-        : [
-            {
-              msid: 'source',
-              url: /^https?:/.test(fixture.sourcePath)
-                ? fixture.sourcePath
-                : `${fixture.upstream}${fixture.sourcePath}`,
-              filename: 'episode.mkv',
-              container: 'mkv',
-              subtitles: [],
-              extension: { bingeGroup: 'series' },
-            },
-          ],
+      // the addons run again no longer return the version (one timed out, say)
+      sources:
+        fixture.noSources || (fixture.rerunLoses && opts?.current)
+          ? []
+          : [
+              {
+                msid: 'source',
+                url: /^https?:/.test(fixture.sourcePath)
+                  ? fixture.sourcePath
+                  : `${fixture.upstream}${fixture.sourcePath}`,
+                filename: 'episode.mkv',
+                container: 'mkv',
+                subtitles: [],
+                extension: { bingeGroup: 'series' },
+              },
+            ],
     }
   ),
 }));
@@ -290,6 +296,8 @@ function spyFetch() {
         release?: boolean;
       };
       if (sent.release) fixture.releases.push(url.split('/').at(-2)!);
+      if (fixture.touchStatus !== 200)
+        return new Response(null, { status: fixture.touchStatus });
       return Response.json({ ok: true });
     }
     if (url.endsWith('/subtitle') || url.endsWith('/font')) {
@@ -373,6 +381,7 @@ beforeEach(() => {
   fixture.prepares = [];
   fixture.noSources = false;
   fixture.memoCalls = 0;
+  fixture.rerunLoses = false;
   fixture.workerDown = false;
   fixture.logs = [];
   fixture.sourcePath = '/media/private-token';
@@ -389,6 +398,7 @@ beforeEach(() => {
   fixture.segmentAborts = 0;
   fixture.full = false;
   fixture.releases = [];
+  fixture.touchStatus = 200;
   fixture.extraction = [];
   fixture.subtitleCodec = 'subrip';
   MEDIA_TIMEOUT.headersMs = 30_000;
@@ -1028,6 +1038,32 @@ describe('own playback and a full transcoder', () => {
     expect(
       ((await response.json()) as { retryAfter?: number }).retryAfter
     ).toBe(10);
+  });
+  it('plays a picked version from the list it was picked from, without running the addons again', async () => {
+    fixture.rerunLoses = true;
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    expect(opened.status).toBe(200);
+    expect(fixture.memoCalls).toBe(1);
+  });
+  it('tells the player when the transcoder no longer has its stream', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-gone' };
+    const { token, revision } = await open();
+    const prepared = await prepare(token, revision);
+    const { lease } = (await prepared.json()) as { lease: string };
+    fixture.touchStatus = 404;
+    const touched = await api('/own/touch', token, { positionMs: 1000, lease });
+    expect(touched.status).toBe(409);
+    expect(((await touched.json()) as { code?: string }).code).toBe(
+      'stream_gone'
+    );
+    // and stops asking the transcoder about it
+    fixture.touchStatus = 200;
+    expect(
+      (await api('/own/touch', token, { positionMs: 2000, lease })).status
+    ).toBe(200);
   });
   it('releases the earlier playback of the same item when it opens again', async () => {
     fixture.prepared = { mode: 'audio', id: 'job-first' };
