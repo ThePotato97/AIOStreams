@@ -105,6 +105,8 @@ vi.mock('../playback/media-errors', () => ({
   lastBufferError: () => buffers.failed,
 }));
 const toasts = vi.hoisted(() => ({ messages: [] as string[] }));
+// the track picker reads the user's settings, not the session behind them
+vi.mock('../session', () => ({ useSession: () => ({}) }));
 vi.mock('sonner', () => ({
   toast: { message: (m: string) => toasts.messages.push(m) },
 }));
@@ -455,6 +457,69 @@ describe('a stream that cannot be fetched', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(failures()).toHaveLength(0);
     expect(player().retryStreaming).not.toHaveBeenCalled();
+  });
+});
+
+describe('the tracks a file opens with', () => {
+  const tracks = [
+    { index: 0, type: 'video', codec: 'h264', title: 'Video' },
+    {
+      index: 1,
+      type: 'audio',
+      codec: 'ac3',
+      title: 'ita',
+      language: 'ita',
+      default: true,
+    },
+    { index: 2, type: 'audio', codec: 'eac3', title: 'eng', language: 'eng' },
+    {
+      index: 3,
+      type: 'subtitle',
+      codec: 'subrip',
+      title: 'ita',
+      language: 'ita',
+    },
+    {
+      index: 4,
+      type: 'subtitle',
+      codec: 'subrip',
+      title: 'eng',
+      language: 'eng',
+    },
+  ];
+  const open = async (prefs: object) => {
+    const saved = media.tracks;
+    media.tracks = tracks as typeof media.tracks;
+    try {
+      const { engine } = setup();
+      engine.load({
+        startMs: 0,
+        paused: false,
+        prefs,
+        source: {},
+        subtitles: [],
+      } as unknown as EngineFile);
+      await vi.advanceTimersByTimeAsync(0);
+      return prepares[0];
+    } finally {
+      media.tracks = saved;
+    }
+  };
+  it("are the user's language, not the file's default track", async () => {
+    const first = await open({
+      AudioLanguagePreference: 'eng',
+      PlayDefaultAudioTrack: false,
+      SubtitleLanguagePreference: 'eng',
+      SubtitleMode: 'Always',
+    });
+    expect(first).toMatchObject({ audio: 2, subtitle: 4 });
+  });
+  it("keep the file's default audio track where the user plays it whatever its language", async () => {
+    const first = await open({ AudioLanguagePreference: 'eng' });
+    expect(first).toMatchObject({ audio: 1 });
+  });
+  it("keep the file's default audio track without settings", async () => {
+    expect(await open({})).toMatchObject({ audio: 1 });
   });
 });
 

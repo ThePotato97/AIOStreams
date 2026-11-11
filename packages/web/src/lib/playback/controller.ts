@@ -208,7 +208,82 @@ export function trackLabel(stream: MediaStream, n: number): string {
 
 interface RowFacts extends SubtitleFacts {
   lang?: string | null;
+  /** The track's format, as ffprobe (and so Jellyfin) names it, where known. */
+  codec?: string | null;
+  profile?: string | null;
+  channels?: number | null;
+  /** ffprobe's channel layout name ("5.1(side)"), where known. */
+  layout?: string | null;
+  default?: boolean | null;
 }
+
+/* eslint-disable lingui/no-unlocalized-strings -- format names, the same in every language */
+const AUDIO_CODECS: Record<string, string> = {
+  truehd: 'TrueHD',
+  eac3: 'Dolby Digital+',
+  ac3: 'Dolby Digital',
+  dts: 'DTS',
+  aac: 'AAC',
+  flac: 'FLAC',
+  alac: 'ALAC',
+  opus: 'Opus',
+  vorbis: 'Vorbis',
+  mp3: 'MP3',
+  mp2: 'MP2',
+};
+const SUBTITLE_CODECS: Record<string, string> = {
+  subrip: 'SRT',
+  srt: 'SRT',
+  ass: 'ASS',
+  ssa: 'SSA',
+  hdmv_pgs_subtitle: 'PGS',
+  pgssub: 'PGS',
+  dvd_subtitle: 'VobSub',
+  dvdsub: 'VobSub',
+  dvb_subtitle: 'DVB',
+  mov_text: 'MP4 text',
+  webvtt: 'WebVTT',
+  vtt: 'WebVTT',
+};
+/** Layouts by channel count, where the layout's name isn't known. */
+const LAYOUTS: Record<number, string> = {
+  3: '2.1',
+  6: '5.1',
+  7: '6.1',
+  8: '7.1',
+};
+const PCM = 'PCM';
+const ATMOS = ' Atmos';
+/* eslint-enable lingui/no-unlocalized-strings */
+
+/**
+ * An audio track's format as players name it: its codec, with Atmos or the DTS profile (DTS-HD
+ * MA, DTS:X) where ffprobe's profile names one, then its channel layout.
+ */
+export function audioFormat(track: RowFacts): string | undefined {
+  const codec = track.codec?.toLowerCase() ?? '';
+  const profile = track.profile ?? '';
+  const name = codec.startsWith('pcm_')
+    ? PCM
+    : codec === 'dts' && /^DTS/.test(profile)
+      ? profile
+      : AUDIO_CODECS[codec] &&
+        AUDIO_CODECS[codec] + (/atmos/i.test(profile) ? ATMOS : '');
+  const layout = (track.layout ?? '').replace(/\(.*\)$/, '');
+  const count = track.channels;
+  const channels =
+    layout === 'mono' || (!layout && track.channels === 1)
+      ? t`Mono`
+      : layout === 'stereo' || (!layout && track.channels === 2)
+        ? t`Stereo`
+        : layout ||
+          (count ? (LAYOUTS[count] ?? t`${count} channels`) : undefined);
+  return [name, channels].filter(Boolean).join(' ') || undefined;
+}
+
+/** A subtitle track's format: SRT, ASS, PGS and so on. */
+export const subtitleFormat = (track: RowFacts) =>
+  SUBTITLE_CODECS[track.codec?.toLowerCase() ?? ''];
 
 export function trackRow(
   track: RowFacts,
@@ -235,11 +310,17 @@ export function trackRow(
           : type === 'commentary'
             ? t`Commentary`
             : undefined;
+  // The rest of what tells the file's tracks apart, as Jellyfin's own titles do: the title the
+  // file gives it, its format and whether it's the file's default.
+  const format = kind === 'audio' ? audioFormat(track) : subtitleFormat(track);
+  const detail = [own, format, track.default ? t`Default` : undefined]
+    .filter(Boolean)
+    .join(' · ');
   return {
     label: [language ?? t`Unknown language`, typeLabel]
       .filter(Boolean)
       .join(' · '),
-    detail: own ?? (language ? undefined : fallback),
+    detail: detail || (language ? undefined : fallback),
   };
 }
 

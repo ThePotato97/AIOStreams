@@ -72,6 +72,7 @@ const serverTrack = (s: ServerSubtitle): Track => ({
     {
       lang: s.stream.Language,
       title: s.stream.Title,
+      codec: s.stream.Codec,
       forced: s.stream.IsForced,
       hearingImpaired: s.stream.IsHearingImpaired,
     },

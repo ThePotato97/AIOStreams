@@ -16,6 +16,10 @@ export interface EngineTrack extends Track {
   type: 'audio' | 'subtitle';
   title?: string;
   codec?: string;
+  /** ffprobe's profile (Atmos, DTS-HD MA), channels and channel layout, where known. */
+  profile?: string;
+  channels?: number;
+  layout?: string;
   forced?: boolean;
   hearingImpaired?: boolean;
   visualImpaired?: boolean;

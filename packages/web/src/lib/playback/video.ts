@@ -4,7 +4,7 @@ import { checkSubtitleFile, readSubtitleFile } from '../subtitles/files';
 import { toast } from 'sonner';
 import { subtitleLine } from '../subtitles/style';
 import { corsFor, setServerBinaural, virtualSurround } from './headphones';
-import { ownTrackLabel } from './controller';
+import { ofType, ownTrackLabel } from './controller';
 import type {
   EngineFactory,
   EngineFile,
@@ -93,6 +93,10 @@ export function videoEngine(
     const listTracks = () => {
       const audio = video.current && audioTracksOf(video.current);
       const audioTracks = audio ? listed(audio) : [];
+      // The server's streams in the same order, where the browser lists as many: their format.
+      const streams = file ? ofType(file.source, 'Audio') : [];
+      const stream = (i: number) =>
+        streams.length === audioTracks.length ? streams[i] : undefined;
       const tracks: EngineTrack[] = [
         ...audioTracks.map((t, i) => ({
           id: String(i),
@@ -100,6 +104,11 @@ export function videoEngine(
           label: ownTrackLabel(t.label, t.language, i + 1),
           lang: t.language,
           title: t.label,
+          codec: stream(i)?.Codec ?? undefined,
+          profile: stream(i)?.Profile ?? undefined,
+          channels: stream(i)?.Channels ?? undefined,
+          layout: stream(i)?.ChannelLayout ?? undefined,
+          default: stream(i)?.IsDefault ?? undefined,
         })),
         ...files.map(({ id, label }) => ({
           id,

@@ -47,7 +47,11 @@ export function metadata(raw) {
         title:
           s.tags?.title ?? s.tags?.language ?? `${s.codec_type} ${s.index}`,
         language: s.tags?.language,
+        layout: s.channel_layout,
         default: !!s.disposition?.default,
+        forced: !!s.disposition?.forced,
+        hearingImpaired: !!s.disposition?.hearing_impaired,
+        visualImpaired: !!s.disposition?.visual_impaired,
       })),
     // Fonts attached to the file, which its ASS subtitles are styled with.
     fonts: streams.filter(isFont).map((s) => ({

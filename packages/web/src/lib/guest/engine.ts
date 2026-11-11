@@ -6,7 +6,9 @@ import type {
   EngineFactory,
   EngineFile,
   EngineEvent,
+  EngineTrack,
 } from '../playback/engine';
+import { chooseTracks } from '../playback/track-picks';
 import { videoEngine } from '../playback/video';
 import {
   clearBufferError,
@@ -168,16 +170,56 @@ export function guestEngine(
     let target = 0;
     const position = () =>
       (video.current?.currentTime ?? 0) * 1000 + (playback?.offsetMs ?? 0);
-    const listTracks = () => {
-      const tracks = current()
+    /** The file's audio and subtitle tracks, as the player lists them. */
+    const engineTracks = (): EngineTrack[] =>
+      current()
         .media.tracks.filter((t) => t.type === 'audio' || t.type === 'subtitle')
         .map((t) => ({
           id: String(t.index),
           type: t.type as 'audio' | 'subtitle',
           label: t.title,
+          title: t.title,
           codec: t.codec,
+          profile: t.profile,
+          channels: t.channels,
+          layout: t.layout,
           lang: t.language,
+          default: t.default,
+          forced: t.forced,
+          hearingImpaired: t.hearingImpaired,
+          visualImpaired: t.visualImpaired,
         }));
+    /**
+     * The tracks a file opens with, from the user's settings (languages, track types, the default
+     * track setting, subtitle mode) as the player picks them for any engine, starting from the
+     * file's default audio track. A server subtitle is left to the player, which adds it once
+     * the file plays.
+     */
+    const pickTracks = (next: EngineFile) => {
+      const tracks = engineTracks();
+      const audios = tracks.filter((t) => t.type === 'audio');
+      const fileDefault = (audios.find((t) => t.default) ?? audios[0])?.id;
+      const picks = chooseTracks(
+        tracks,
+        next.subtitles ?? [],
+        { audio: fileDefault ?? null, subtitle: null },
+        next.prefs ?? {},
+        next.source ?? {},
+        false
+      );
+      const own = (id: string | null, type: 'audio' | 'subtitle') =>
+        id != null && tracks.some((t) => t.type === type && t.id === id)
+          ? Number(id)
+          : undefined;
+      return {
+        audio:
+          own(picks.audio, 'audio') ??
+          (fileDefault == null ? undefined : Number(fileDefault)),
+        subtitle: own(picks.subtitle, 'subtitle'),
+      };
+    };
+    const listTracks = () => {
+      const tracks = engineTracks();
       emit({ type: 'tracks', tracks });
       emit({ type: 'chapters', chapters: current().media.chapters });
       emit({
@@ -702,11 +744,7 @@ export function guestEngine(
         noBinaural = false;
         noDovi = false;
         paused = next.paused ?? true;
-        const tracks = current().media.tracks;
-        audio =
-          tracks.find((t) => t.type === 'audio' && t.default)?.index ??
-          tracks.find((t) => t.type === 'audio')?.index;
-        subtitle = undefined;
+        ({ audio, subtitle } = pickTracks(next));
         void prepare(next.startMs);
       },
       seek(ms) {

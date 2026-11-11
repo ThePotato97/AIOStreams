@@ -14,7 +14,12 @@ export interface GuestTrack {
   hdr?: boolean;
   title: string;
   language?: string;
+  /** ffprobe's channel layout name ("5.1(side)"). */
+  layout?: string;
   default?: boolean;
+  forced?: boolean;
+  hearingImpaired?: boolean;
+  visualImpaired?: boolean;
 }
 export interface GuestMedia {
   durationMs: number;
