@@ -198,14 +198,23 @@ const binauralFailed = new Set();
 const binauralKey = (job, policy) => `${job.input}#${policy.audio?.index}`;
 /** How long a binaural conversion waits for its first audio packet. */
 const AUDIO_START_TIMEOUT_MS = 60_000;
+/** Kills a process started in its own group (`detached`) and everything in that group. */
+function killGroup(child) {
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
 /** Stops a binaural conversion's demuxer and renderer. */
 function killHelpers(job) {
   const helpers = job.helpers;
   if (!helpers) return;
   job.helpers = null;
   helpers.stopping = true;
-  for (const c of [helpers.demux, helpers.renderer])
-    if (running(c)) c.kill('SIGKILL');
+  if (running(helpers.demux)) helpers.demux.kill('SIGKILL');
+  // The renderer's whole group: its decoding FFmpeg would otherwise be orphaned.
+  if (running(helpers.renderer)) killGroup(helpers.renderer);
 }
 /**
  * Starts a job's conversion. A GPU conversion that fails before its first
@@ -243,6 +252,9 @@ function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
     rendererArgs(policy),
     {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Its own process group, with the FFmpeg it decodes E-AC-3, AC-3 and DTS with: stopping
+      // it stops that FFmpeg too (killHelpers).
+      detached: true,
     }
   );
   const helpers = { demux, renderer, stopping: false, failed: false };
