@@ -14,6 +14,7 @@ import {
   usePartyEvent,
 } from '../lib/party/party';
 import { usePartyPlayer } from '../lib/party/playback';
+import { guestPrefs, rememberingTracks } from '../lib/guest/track-memory';
 import { usePlayer } from '../lib/playback/use-player';
 import { GuestSessionProvider } from '../lib/session';
 import { JellyfinClient } from '../lib/client';
@@ -225,6 +226,8 @@ function GuestPlayer({
     url: current.revision,
     startMs,
     startPaused: true,
+    // the track languages this guest last picked, read as each file opens
+    prefs: guestPrefs(),
     onEnded: () => {
       const state = party.state();
       if (!state) return;
@@ -235,7 +238,11 @@ function GuestPlayer({
       );
     },
   });
-  const player = usePartyPlayer(own, current.playlistItemId);
+  const partyPlayer = usePartyPlayer(own, current.playlistItemId);
+  const player = React.useMemo(
+    () => rememberingTracks(partyPlayer),
+    [partyPlayer]
+  );
   const at = state?.playingIndex ?? 0;
   return (
     <main className="fixed inset-0 bg-black">
