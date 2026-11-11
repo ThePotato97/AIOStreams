@@ -17,6 +17,7 @@ import {
   manifestStart,
   subtitleKind,
   videoCodec,
+  initLayout,
   audioCodec,
   withAudioCodec,
   withFullDuration,
@@ -752,9 +753,25 @@ export function createServer() {
         });
         if (match[2] === 'manifest.mpd') {
           // The video is representation 0, its init segment written first.
-          job.videoCodec ??= videoCodec(
-            await readFile(`${job.dir}/init-0.m4s`).catch(() => Buffer.alloc(0))
-          );
+          if (job.videoCodec == null) {
+            const init = await readFile(`${job.dir}/init-0.m4s`).catch(() =>
+              Buffer.alloc(0)
+            );
+            job.videoCodec = videoCodec(init);
+            // Without it the browser gets FFmpeg's bare "hvc1" and may refuse the video: say
+            // what the init segment holds, once per job.
+            if (job.videoCodec == null && init.length && !job.loggedInit) {
+              job.loggedInit = true;
+              console.warn(
+                JSON.stringify({
+                  level: 'warn',
+                  msg: 'no codec string for the video',
+                  job: job.id,
+                  init: initLayout(init),
+                })
+              );
+            }
+          }
           const mpd = withFullDuration(
             withAudioCodec(
               withVideoCodec(await readFile(file, 'utf8'), job.videoCodec),

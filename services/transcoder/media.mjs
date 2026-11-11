@@ -650,6 +650,7 @@ function* boxes(data, from = 0, to = data.length) {
     const type = data.toString('latin1', at + 4, at + 8);
     let header = 8;
     if (size === 1) {
+      if (at + 16 > to) return;
       size = Number(data.readBigUInt64BE(at + 8));
       header = 16;
     } else if (size === 0) size = to - at;
@@ -695,7 +696,8 @@ export function videoCodec(init) {
   };
   if (type === 'hvc1' || type === 'hev1') {
     const c = config('hvcC');
-    if (!c) return null;
+    // An hvcC too short for its fixed fields (13 bytes) gives nothing to build from.
+    if (!c || c[2] - c[1] < 13) return null;
     const b = init.subarray(c[1], c[2]);
     const space = ['', 'A', 'B', 'C'][b[1] >> 6];
     const tier = b[1] & 0x20 ? 'H' : 'L';
@@ -719,14 +721,14 @@ export function videoCodec(init) {
   }
   if (type === 'avc1' || type === 'avc3') {
     const c = config('avcC');
-    if (!c) return null;
+    if (!c || c[2] - c[1] < 4) return null;
     return `${type}.${[1, 2, 3]
       .map((i) => init[c[1] + i].toString(16).padStart(2, '0'))
       .join('')}`;
   }
   if (type === 'av01') {
     const c = config('av1C');
-    if (!c) return null;
+    if (!c || c[2] - c[1] < 3) return null;
     const p = init[c[1] + 1],
       q = init[c[1] + 2];
     const depth = q & 0x40 ? (q & 0x20 ? 12 : 10) : 8;
@@ -734,7 +736,7 @@ export function videoCodec(init) {
   }
   if (type === 'vp09') {
     const c = config('vpcC');
-    if (!c) return null;
+    if (!c || c[2] - c[1] < 7) return null;
     // A full box: version and flags first.
     const [profile, level, bits] = [4, 5, 6].map((i) => init[c[1] + i]);
     return `vp09.${[profile, level, bits >> 4]
@@ -742,6 +744,25 @@ export function videoCodec(init) {
       .join('.')}`;
   }
   return null;
+}
+/**
+ * An init segment's boxes, as "type:size" down the path to its sample entry and that entry's
+ * own boxes: what a codec string couldn't be built from, for the log (no contents).
+ */
+export function initLayout(init) {
+  const out = [];
+  const walk = (from, to, depth) => {
+    for (const [type, start, end] of boxes(init, from, to)) {
+      out.push(`${'  '.repeat(depth)}${type}:${end - start}`);
+      if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(type))
+        walk(start, end, depth + 1);
+      else if (type === 'stsd') walk(start + 8, end, depth + 1);
+      // a visual sample entry: its configuration boxes after its 78 bytes of fields
+      else if (depth === 6) walk(start + 78, end, depth + 1);
+    }
+  };
+  walk(0, init.length, 0);
+  return out.join(' ');
 }
 /** Whether every stream in the manifest has a segment written. */
 export function manifestReady(mpd) {

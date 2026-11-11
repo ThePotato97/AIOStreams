@@ -13,6 +13,7 @@ import {
   manifestStart,
   subtitleKind,
   videoCodec,
+  initLayout,
   withFullDuration,
   withVideoCodec,
   nvdecDecodes,
@@ -937,6 +938,33 @@ test('manifest: the video gets its full codec string', () => {
   // Nothing to build from.
   assert.equal(videoCodec(Buffer.alloc(0)), null);
   assert.equal(videoCodec(Buffer.from('not an init segment')), null);
+});
+
+test('an init segment with an empty hvcC gives no codec string, not an error', () => {
+  const box = (type, ...content) => {
+    const body = Buffer.concat(content);
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(8 + body.length);
+    head.write(type, 4, 'latin1');
+    return Buffer.concat([head, body]);
+  };
+  // hvc1's 78 bytes of fields, then an hvcC with 2 bytes in it
+  const entry = box('hvc1', Buffer.alloc(78), box('hvcC', Buffer.alloc(2)));
+  const init = box(
+    'moov',
+    box(
+      'trak',
+      box('mdia', box('minf', box('stbl', box('stsd', Buffer.alloc(8), entry))))
+    )
+  );
+  assert.equal(videoCodec(init), null);
+  // what the log shows instead
+  assert.match(initLayout(init), /stsd:\d+ +hvc1:\d+ +hvcC:2/);
+  // a 64-bit size cut short ends the walk
+  const cut = Buffer.alloc(12);
+  cut.writeUInt32BE(1);
+  cut.write('moov', 4, 'latin1');
+  assert.equal(videoCodec(cut), null);
 });
 
 test('real FFmpeg: copied HEVC is tagged hvc1, with its full codec string', async () => {
