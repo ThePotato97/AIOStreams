@@ -377,33 +377,58 @@ function GuestPlayer({
     window.addEventListener('popstate', left);
     return () => window.removeEventListener('popstate', left);
   }, []);
+  // Made once per title, as the player page makes its engine once.
+  const [engine] = React.useState(
+    () => (ref: React.RefObject<HTMLVideoElement | null>) => {
+      video.current = ref;
+      const inner = guestEngine(ref, api, () => currentRef.current, setMode);
+      setEngineQuality.current = inner.setQuality;
+      // The engine takes a quality once the player page has made it, before it loads.
+      const withQuality: EngineFactory = (emit, opts) => {
+        const made = inner.factory(emit, opts);
+        inner.setQuality(quality);
+        return made;
+      };
+      return rememberingEngine(
+        withQuality,
+        () => currentRef.current,
+        () => setLoaded(true),
+        () =>
+          queryClient.setQueryData(
+            ['jf', client.base, GUEST_USER_ID, 'configuration'],
+            guestPrefs()
+          )
+      );
+    }
+  );
+  // Offered with the player's other options; Original says how this browser gets the file.
   const choice = React.useMemo(
     () => ({
-      engine(ref: React.RefObject<HTMLVideoElement | null>) {
-        video.current = ref;
-        const inner = guestEngine(ref, api, () => currentRef.current, setMode);
-        setEngineQuality.current = inner.setQuality;
-        // The engine takes a quality once the player page has made it, before it loads.
-        const withQuality: EngineFactory = (emit, opts) => {
-          const engine = inner.factory(emit, opts);
-          inner.setQuality(quality);
-          return engine;
-        };
-        return rememberingEngine(
-          withQuality,
-          () => currentRef.current,
-          () => setLoaded(true),
-          () =>
-            queryClient.setQueryData(
-              ['jf', client.base, GUEST_USER_ID, 'configuration'],
-              guestPrefs()
-            )
-        );
+      engine,
+      quality: {
+        value: quality,
+        options: [
+          {
+            id: 'original',
+            label: t`Original`,
+            detail:
+              mode === 'direct'
+                ? t`The file as it is`
+                : mode
+                  ? t`Converted where your browser needs it`
+                  : undefined,
+          },
+          { id: '1080p', label: '1080p' },
+          { id: '720p', label: '720p' },
+        ],
+        onChange(id: string) {
+          const next = id as GuestQuality;
+          onQuality(next);
+          setEngineQuality.current(next);
+        },
       },
     }),
-    // Made once per title, as the player page makes its engine once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
+    [engine, quality, mode, onQuality]
   );
   if (!bound) return null;
   return (
@@ -414,32 +439,6 @@ function GuestPlayer({
         startMs={startMs}
         mini={false}
       />
-      <div className="fixed left-1/2 top-[calc(1rem+env(safe-area-inset-top))] z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg bg-black/70 p-2 text-sm">
-        <label>
-          {t`Quality`}{' '}
-          <select
-            aria-label={t`Quality`}
-            className="rounded bg-neutral-800 p-1"
-            value={quality}
-            onChange={(event) => {
-              const next = event.target.value as GuestQuality;
-              onQuality(next);
-              setEngineQuality.current(next);
-            }}
-          >
-            <option value="original">{t`Original`}</option>
-            <option value="1080p">1080p</option>
-            <option value="720p">720p</option>
-          </select>
-        </label>
-        <span>
-          {mode === 'direct'
-            ? t`Original stream`
-            : mode
-              ? t`Optimized for your browser`
-              : ''}
-        </span>
-      </div>
       {!unlocked && loaded && (
         <div className="fixed inset-0 z-20 grid place-items-center bg-black/50">
           <Button

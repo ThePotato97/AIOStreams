@@ -23,6 +23,7 @@ import {
   LuListVideo,
   LuMaximize,
   LuMinimize,
+  LuMonitorPlay,
   LuMinus,
   LuPlus,
   LuRatio,
@@ -67,6 +68,7 @@ import {
 } from '../../lib/subtitles/style';
 import { splitByLanguage } from '../../lib/subtitles/tracks';
 import { subtitleLanguages, usePlaybackPrefs } from '../../lib/user-config';
+import { PlayerEngineOverride } from '../../lib/guest/player-engine';
 import { ControlButton } from './buttons';
 import { useSceneView } from './scene-overlay';
 import { useParty } from '../../lib/party/party';
@@ -677,6 +679,7 @@ export function OptionButtons({
   const tv = !!currentHost().tv;
   const unread = useParty()?.unread ?? 0;
   const scene = useSceneView();
+  const quality = React.useContext(PlayerEngineOverride)?.quality;
   const hidden = subtitles.hidden.length;
   // One at a time: a menu opened over another leaves the first open.
   const [openMenu, setOpenMenu] = React.useState<string | null>(null);
@@ -829,6 +832,17 @@ export function OptionButtons({
           value={String(state.rate)}
           onSelect={(id) => id && player.setRate?.(Number(id))}
           {...menuState('speed')}
+        />
+      )}
+      {quality && (
+        <Menu
+          name="quality"
+          label={t`Quality`}
+          icon={<LuMonitorPlay />}
+          options={quality.options}
+          value={quality.value}
+          onSelect={(id) => id && quality.onChange(id)}
+          {...menuState('quality')}
         />
       )}
       {player.fit && <FitButton notice={notice} />}

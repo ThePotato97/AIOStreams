@@ -1062,6 +1062,10 @@ msgstr "Controls"
 msgid "conversion is unavailable on this server"
 msgstr "conversion is unavailable on this server"
 
+#: src/pages/guest.tsx
+msgid "Converted where your browser needs it"
+msgstr "Converted where your browser needs it"
+
 #: src/components/version-settings.tsx
 msgid "Copied as JSON"
 msgstr "Copied as JSON"
@@ -3004,10 +3008,6 @@ msgstr "Opens versions in {target}, which brings you back here with your place s
 msgid "Opens versions in {target}. It can't tell this app where you stopped, so you mark what you watched yourself."
 msgstr "Opens versions in {target}. It can't tell this app where you stopped, so you mark what you watched yourself."
 
-#: src/pages/guest.tsx
-msgid "Optimized for your browser"
-msgstr "Optimized for your browser"
-
 #: src/components/send-report.tsx
 msgid "Optional."
 msgstr "Optional."
@@ -3051,10 +3051,6 @@ msgstr "Original"
 #: src/pages/settings/audio.tsx
 msgid "Original language"
 msgstr "Original language"
-
-#: src/pages/guest.tsx
-msgid "Original stream"
-msgstr "Original stream"
 
 #: src/lib/playback/player-choice.ts
 msgid "Other app"
@@ -3532,7 +3528,7 @@ msgstr "Puts every key back the way it came."
 msgid "QR code"
 msgstr "QR code"
 
-#: src/pages/guest.tsx
+#: src/components/player/options.tsx
 msgid "Quality"
 msgstr "Quality"
 
@@ -4763,6 +4759,10 @@ msgstr "The app's player"
 #: src/lib/hosts/jellyfin-android.ts
 msgid "The app's player and its options, such as starting videos in landscape."
 msgstr "The app's player and its options, such as starting videos in landscape."
+
+#: src/pages/guest.tsx
+msgid "The file as it is"
+msgstr "The file as it is"
 
 #: src/lib/party/party.ts
 msgid "The host removed you from the party."
