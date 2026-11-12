@@ -3733,6 +3733,7 @@ msgid "Report copied"
 msgstr "Report copied"
 
 #: src/lib/client.ts
+#: src/lib/guest/guest-client.ts
 msgid "Request failed ({status})"
 msgstr "Request failed ({status})"
 
@@ -5684,13 +5685,13 @@ msgstr "You"
 msgid "You left the party"
 msgstr "You left the party"
 
-#: src/pages/guest.tsx
-msgid "You left the party's playback."
-msgstr "You left the party's playback."
-
 #: src/lib/party/party.ts
 msgid "You left the party."
 msgstr "You left the party."
+
+#: src/pages/guest.tsx
+msgid "You left the party's playback."
+msgstr "You left the party's playback."
 
 #: src/pages/guest.tsx
 msgid "You're invited to watch together"
