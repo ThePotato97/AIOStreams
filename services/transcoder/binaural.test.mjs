@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import {
-  select,
+  playbackSpec,
+  modeOf,
   ffmpegArgs,
   demuxArgs,
   rendererArgs,
@@ -53,44 +54,49 @@ const request = (capabilities = {}, extra = {}) => ({
   ...extra,
 });
 
+/** Rendered to binaural on the server; copied (for the page, or as it is). */
+const rendered = (spec) => spec.audio?.where === 'server-render';
+const copied = (spec) =>
+  ['server-copy', 'page-original'].includes(spec.audio?.where);
+
 test('binaural: TrueHD, E-AC-3, AC-3 and DTS at 48 kHz, where the player asks', () => {
   const asked = request({ binaural: true });
   for (const codec of ['truehd', 'eac3', 'ac3', 'dts']) {
-    const policy = select(meta(codec), asked);
-    assert.equal(policy.binaural, true, codec);
+    const spec = playbackSpec(meta(codec), asked);
+    assert.equal(rendered(spec), true, codec);
     // the audio is converted even where the browser plays it
-    assert.equal(policy.copyAudio, false, codec);
-    assert.equal(policy.audioReason, 'binaural rendering', codec);
+    assert.equal(copied(spec), false, codec);
+    assert.equal(spec.audio.reason, 'binaural rendering', codec);
   }
-  assert.equal(select(meta('truehd'), request()).binaural, false);
+  assert.equal(rendered(playbackSpec(meta('truehd'), request())), false);
   // other surround is virtualised in the page
-  assert.equal(select(meta('aac'), asked).binaural, false);
-  assert.equal(select(meta('flac'), asked).binaural, false);
+  assert.equal(rendered(playbackSpec(meta('aac'), asked)), false);
+  assert.equal(rendered(playbackSpec(meta('flac'), asked)), false);
   // the renderer is 48 kHz only
   assert.equal(
-    select(meta('truehd', { sampleRate: 96000 }), asked).binaural,
+    rendered(playbackSpec(meta('truehd', { sampleRate: 96000 }), asked)),
     false
   );
 });
 
 test('client binaural: a track the player renders is copied, never played directly', () => {
   const asked = request({ binaural: true, clientBinaural: ['truehd'] });
-  const policy = select(meta('truehd'), asked);
-  assert.equal(policy.clientBinaural, true);
-  assert.equal(policy.binaural, false);
-  assert.equal(policy.copyAudio, true);
-  assert.equal(policy.audioReason, null);
+  const spec = playbackSpec(meta('truehd'), asked);
+  assert.equal(spec.audio.pageRenders, true);
+  assert.equal(rendered(spec), false);
+  assert.equal(copied(spec), true);
+  assert.equal(spec.audio.reason, null);
   // video and audio both copied: a remux, not the original file
-  assert.equal(policy.mode, 'remux');
-  assert.equal(audioCodec(policy), 'mlpa');
+  assert.equal(modeOf(spec), 'remux');
+  assert.equal(audioCodec(meta('truehd'), spec), 'mlpa');
   // a codec the player doesn't render itself is rendered here
-  const eac3 = select(meta('eac3'), asked);
-  assert.equal(eac3.clientBinaural, false);
-  assert.equal(eac3.binaural, true);
+  const eac3 = playbackSpec(meta('eac3'), asked);
+  assert.equal(eac3.audio.pageRenders, false);
+  assert.equal(rendered(eac3), true);
   // a retry after failed playback renders it here
-  const retry = select(meta('truehd'), { ...asked, force: true });
-  assert.equal(retry.clientBinaural, false);
-  assert.equal(retry.binaural, true);
+  const retry = playbackSpec(meta('truehd'), { ...asked, force: true });
+  assert.equal(retry.audio.pageRenders, false);
+  assert.equal(rendered(retry), true);
   // FFmpeg's flag for TrueHD in MP4
   const { args } = ffmpegArgs('in', meta('truehd'), asked, 'out');
   assert.equal(args[args.indexOf('-strict') + 1], 'experimental');
@@ -104,18 +110,20 @@ test('client binaural: AC-3 and DTS are copied for the player as E-AC-3 is', () 
     clientBinaural: ['eac3', 'ac3', 'dts'],
   });
   for (const codec of ['eac3', 'ac3', 'dts']) {
-    const policy = select(meta(codec), asked);
-    assert.equal(policy.clientBinaural, true, codec);
-    assert.equal(policy.binaural, false, codec);
-    assert.equal(policy.copyAudio, true, codec);
+    const spec = playbackSpec(meta(codec), asked);
+    assert.equal(spec.audio.pageRenders, true, codec);
+    assert.equal(rendered(spec), false, codec);
+    assert.equal(copied(spec), true, codec);
     const { args } = ffmpegArgs('in', meta(codec), asked, 'out');
     assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy', codec);
     assert.ok(!args.includes('-strict'), codec);
   }
   // FFmpeg names E-AC-3 and AC-3 in the manifest; DTS gets MP4's object type where it doesn't
-  assert.equal(audioCodec(select(meta('eac3'), asked)), null);
-  assert.equal(audioCodec(select(meta('ac3'), asked)), null);
-  assert.equal(audioCodec(select(meta('dts'), asked)), 'mp4a.a9');
+  const codecOf = (codec) =>
+    audioCodec(meta(codec), playbackSpec(meta(codec), asked));
+  assert.equal(codecOf('eac3'), null);
+  assert.equal(codecOf('ac3'), null);
+  assert.equal(codecOf('dts'), 'mp4a.a9');
 });
 
 test('client binaural: copied Dolby Vision loses its metadata where TrueHD needs the experimental flag', () => {
@@ -123,7 +131,14 @@ test('client binaural: copied Dolby Vision loses its metadata where TrueHD needs
     durationMs: 6000,
     tracks: [
       { index: 0, type: 'video', codec: 'hevc', hdr: true, dovi },
-      { index: 1, type: 'audio', codec: 'truehd', channels: 8, sampleRate: 48000, default: true },
+      {
+        index: 1,
+        type: 'audio',
+        codec: 'truehd',
+        channels: 8,
+        sampleRate: 48000,
+        default: true,
+      },
     ],
   });
   const headphones = request(
@@ -132,12 +147,19 @@ test('client binaural: copied Dolby Vision loses its metadata where TrueHD needs
   );
   const bsf = (args) => args[args.indexOf('-bsf:v') + 1];
   // Top Gun: Maverick's UHD remux: profile 7 with an HDR10 base layer
-  const { args } = ffmpegArgs('in', dv({ profile: 7, compatibility: 6 }), headphones, 'out');
+  const { args } = ffmpegArgs(
+    'in',
+    dv({ profile: 7, compatibility: 6 }),
+    headphones,
+    'out'
+  );
   assert.equal(args[args.indexOf('-c:v') + 1], 'copy');
   assert.equal(args[args.indexOf('-strict') + 1], 'experimental');
   assert.equal(bsf(args), 'dovi_rpu=strip=1');
   // no Dolby Vision: the video as it is
-  assert.ok(!ffmpegArgs('in', dv(undefined), headphones, 'out').args.includes('-bsf:v'));
+  assert.ok(
+    !ffmpegArgs('in', dv(undefined), headphones, 'out').args.includes('-bsf:v')
+  );
   // headphones off: no TrueHD copy, no flag, no box to strip
   const off = ffmpegArgs(
     'in',
@@ -154,34 +176,52 @@ test('Dolby Vision the player draws is copied with its RPUs, profile 5 included'
     durationMs: 6000,
     tracks: [
       { index: 0, type: 'video', codec: 'hevc', hdr: true, dovi },
-      { index: 1, type: 'audio', codec: audio, channels: 8, sampleRate: 48000, default: true },
+      {
+        index: 1,
+        type: 'audio',
+        codec: audio,
+        channels: 8,
+        sampleRate: 48000,
+        default: true,
+      },
     ],
   });
   const caps = { video: true, audio: true, container: true, hdr: true };
-  const draws = request({ ...caps, dovi: true }, { audio: 1 });
+  const draws = request({ ...caps, picture: ['dovi'] }, { audio: 1 });
   const plain = request(caps, { audio: 1 });
   // profile 5: converted unless the player draws it
-  assert.equal(select(dv({ profile: 5, compatibility: 0 }), plain).copyVideo, false);
-  const p5 = select(dv({ profile: 5, compatibility: 0 }), draws);
-  assert.equal(p5.copyVideo, true);
-  assert.equal(p5.dovi, true);
+  assert.equal(
+    playbackSpec(dv({ profile: 5, compatibility: 0 }), plain).video.where,
+    'server-encode'
+  );
+  const p5 = playbackSpec(dv({ profile: 5, compatibility: 0 }), draws);
+  assert.equal(p5.video.where, 'server-copy');
+  assert.equal(p5.video.picture, 'dovi');
   // the player reads the DASH stream, never the file directly
-  assert.notEqual(p5.mode, 'direct');
-  // profile 8 copied either way; flagged (and so not played directly) only where the player draws it
-  const p8 = select(dv({ profile: 8, compatibility: 1 }, 'aac'), plain);
-  assert.equal(p8.dovi, false);
-  assert.equal(p8.mode, 'direct');
-  const p8draws = select(dv({ profile: 8, compatibility: 1 }, 'aac'), draws);
-  assert.equal(p8draws.dovi, true);
-  assert.notEqual(p8draws.mode, 'direct');
+  assert.notEqual(modeOf(p5), 'direct');
+  // profile 8 copied either way; drawn (and so not played directly) only where the player draws it
+  const p8 = playbackSpec(dv({ profile: 8, compatibility: 1 }, 'aac'), plain);
+  assert.equal(p8.video.picture, 'none');
+  assert.equal(modeOf(p8), 'direct');
+  const p8draws = playbackSpec(
+    dv({ profile: 8, compatibility: 1 }, 'aac'),
+    draws
+  );
+  assert.equal(p8draws.video.picture, 'dovi');
+  assert.notEqual(modeOf(p8draws), 'direct');
   // no Dolby Vision: nothing to draw
-  assert.equal(select(dv(undefined), draws).dovi, false);
+  assert.equal(playbackSpec(dv(undefined), draws).video.picture, 'none');
   // with headphones (TrueHD copied, experimental flag): the RPUs stay
   const both = request(
-    { ...caps, dovi: true, binaural: true, clientBinaural: ['truehd'] },
+    { ...caps, picture: ['dovi'], binaural: true, clientBinaural: ['truehd'] },
     { audio: 1 }
   );
-  const { args } = ffmpegArgs('in', dv({ profile: 7, compatibility: 6 }), both, 'out');
+  const { args } = ffmpegArgs(
+    'in',
+    dv({ profile: 7, compatibility: 6 }),
+    both,
+    'out'
+  );
   assert.equal(args[args.indexOf('-c:v') + 1], 'copy');
   assert.equal(args[args.indexOf('-strict') + 1], 'experimental');
   assert.ok(!args.includes('-bsf:v'));
@@ -189,27 +229,39 @@ test('Dolby Vision the player draws is copied with its RPUs, profile 5 included'
 
 test('a codec the player decodes itself is copied with headphones off too', () => {
   // The player renders binaural or the speaker version itself: no new job when they're toggled.
-  const off = select(meta('truehd'), request({ binaural: false, clientBinaural: ['truehd'] }));
-  assert.equal(off.clientBinaural, true);
-  assert.equal(off.binaural, false);
-  assert.equal(off.copyAudio, true);
-  const on = select(meta('truehd'), request({ binaural: true, clientBinaural: ['truehd'] }));
-  assert.deepEqual(
-    [on.clientBinaural, on.binaural, on.copyAudio],
-    [off.clientBinaural, off.binaural, off.copyAudio]
+  const off = playbackSpec(
+    meta('truehd'),
+    request({ binaural: false, clientBinaural: ['truehd'] })
   );
+  assert.equal(off.audio.pageRenders, true);
+  assert.equal(rendered(off), false);
+  assert.equal(copied(off), true);
+  const on = playbackSpec(
+    meta('truehd'),
+    request({ binaural: true, clientBinaural: ['truehd'] })
+  );
+  assert.deepEqual(on.audio, off.audio);
   // not one it doesn't decode: converted here as before
-  const aac = select(meta('aac'), request({ binaural: false, clientBinaural: ['truehd'] }));
-  assert.equal(aac.clientBinaural, false);
+  const aac = playbackSpec(
+    meta('aac'),
+    request({ binaural: false, clientBinaural: ['truehd'] })
+  );
+  assert.equal(aac.audio.pageRenders, false);
   // a 96 kHz TrueHD isn't one the renderer reads
   const hi = meta('truehd');
   hi.tracks[1].sampleRate = 96000;
-  assert.equal(select(hi, request({ clientBinaural: ['truehd'] })).clientBinaural, false);
+  assert.equal(
+    playbackSpec(hi, request({ clientBinaural: ['truehd'] })).audio.pageRenders,
+    false
+  );
 });
 
 test("the listener's headphone mode reaches the renderer here", () => {
   const args = (mode, codec = 'truehd') =>
-    rendererArgs(select(meta(codec), request({ binaural: true, binauralMode: mode })));
+    rendererArgs(
+      meta(codec),
+      playbackSpec(meta(codec), request({ binaural: true, binauralMode: mode }))
+    );
   assert.deepEqual(args('near'), ['--format', 'truehd', '--modes', 'windows']);
   assert.deepEqual(args('far'), ['--format', 'truehd', '--modes', 'far']);
   assert.deepEqual(args(undefined), ['--format', 'truehd']);
@@ -217,21 +269,21 @@ test("the listener's headphone mode reaches the renderer here", () => {
   assert.deepEqual(args('mid'), ['--format', 'truehd']);
   assert.deepEqual(args('far', 'eac3').slice(-2), ['--modes', 'far']);
   // rendered in the player: the player applies it, the job doesn't depend on it
-  const client = select(
+  const client = playbackSpec(
     meta('truehd'),
     request({ binaural: true, binauralMode: 'far', clientBinaural: ['truehd'] })
   );
-  assert.equal(client.binauralMode, null);
+  assert.equal(client.audio.render, null);
 });
 
 test('client binaural: E-AC-3 the player renders is copied, with the codec FFmpeg writes', () => {
   const asked = request({ binaural: true, clientBinaural: ['truehd', 'eac3'] });
-  const policy = select(meta('eac3'), asked);
-  assert.equal(policy.clientBinaural, true);
-  assert.equal(policy.binaural, false);
-  assert.equal(policy.copyAudio, true);
+  const spec = playbackSpec(meta('eac3'), asked);
+  assert.equal(spec.audio.pageRenders, true);
+  assert.equal(rendered(spec), false);
+  assert.equal(copied(spec), true);
   // FFmpeg writes "ec-3" itself
-  assert.equal(audioCodec(policy), null);
+  assert.equal(audioCodec(meta('eac3'), spec), null);
   const { args } = ffmpegArgs('in', meta('eac3'), asked, 'out');
   assert.equal(args[args.lastIndexOf('-c:a') + 1], 'copy');
 });
@@ -248,8 +300,8 @@ test('client binaural: the empty TrueHD codec string is filled in', () => {
 });
 
 test('binaural: the arguments of the three processes', () => {
-  const policy = select(meta('eac3'), request({ binaural: true }));
-  const demux = demuxArgs('http://aio/source', policy, 8);
+  const spec = playbackSpec(meta('eac3'), request({ binaural: true }));
+  const demux = demuxArgs('http://aio/source', meta('eac3'), spec, 8);
   // the audio track as a raw stream on pipe:1, its timestamps on pipe:3
   assert.deepEqual(
     demux.slice(demux.indexOf('-ss'), demux.indexOf('-ss') + 2),
@@ -258,20 +310,28 @@ test('binaural: the arguments of the three processes', () => {
   assert.ok(demux.includes('-copyts') && demux.includes('-reconnect'));
   assert.equal(demux[demux.indexOf('pipe:1') - 1], 'eac3');
   assert.equal(demux[demux.indexOf('pipe:3') - 1], 'framemd5');
-  assert.deepEqual(rendererArgs(policy), [
+  assert.deepEqual(rendererArgs(meta('eac3'), spec), [
     '--format',
     'eac3',
     '--ffmpeg',
     'ffmpeg',
   ]);
-  const truehd = select(meta('truehd'), request({ binaural: true }));
-  assert.deepEqual(rendererArgs(truehd), ['--format', 'truehd']);
+  const truehd = playbackSpec(meta('truehd'), request({ binaural: true }));
+  assert.deepEqual(rendererArgs(meta('truehd'), truehd), [
+    '--format',
+    'truehd',
+  ]);
   // AC-3 and DTS: raw as FFmpeg names them, decoded by the renderer's own FFmpeg
   for (const codec of ['ac3', 'dts']) {
-    const p = select(meta(codec), request({ binaural: true }));
-    const d = demuxArgs('in', p, 0);
+    const p = playbackSpec(meta(codec), request({ binaural: true }));
+    const d = demuxArgs('in', meta(codec), p, 0);
     assert.equal(d[d.indexOf('pipe:1') - 1], codec);
-    assert.deepEqual(rendererArgs(p), ['--format', codec, '--ffmpeg', 'ffmpeg']);
+    assert.deepEqual(rendererArgs(meta(codec), p), [
+      '--format',
+      codec,
+      '--ffmpeg',
+      'ffmpeg',
+    ]);
   }
   // the converting FFmpeg reads the rendered stereo on pipe:4 from the first packet's time
   const { args } = ffmpegArgs(
@@ -475,7 +535,7 @@ for (const codec of ['truehd', 'eac3', 'ac3', 'dts'])
             { positionMs }
           ),
         });
-        assert.equal(result.binaural, true);
+        assert.equal(result.effective.audio.where === 'server-render', true);
         const { videoStart, audioStart, audio } = await finished(result.id);
         assert.equal(audio.codec_name, 'flac');
         assert.equal(audio.channels, 2);
@@ -502,8 +562,8 @@ test(
         { positionMs: 0 }
       ),
     });
-    assert.equal(result.clientBinaural, true);
-    assert.equal(result.binaural, false);
+    assert.equal(result.effective.audio.pageRenders, true);
+    assert.equal(result.effective.audio.where === 'server-render', false);
     const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
       headers,
     });
@@ -527,8 +587,8 @@ test(
         { positionMs: 0 }
       ),
     });
-    assert.equal(result.clientBinaural, true);
-    assert.equal(result.binaural, false);
+    assert.equal(result.effective.audio.pageRenders, true);
+    assert.equal(result.effective.audio.where === 'server-render', false);
     const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
       headers,
     });
@@ -555,8 +615,8 @@ for (const [codec, written] of [
           { positionMs: 0 }
         ),
       });
-      assert.equal(result.clientBinaural, true);
-      assert.equal(result.binaural, false);
+      assert.equal(result.effective.audio.pageRenders, true);
+      assert.equal(result.effective.audio.where === 'server-render', false);
       const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
         headers,
       });
@@ -607,7 +667,7 @@ real.stdout.on('data', (chunk) => {
         viewer: 'dying-viewer-xxxxxxxx',
         request: asked,
       });
-      assert.equal(first.binaural, true);
+      assert.equal(first.effective.audio.where === 'server-render', true);
       // the job fails, rather than going on with the video alone
       let job;
       for (let i = 0; i < 100; i++) {
@@ -623,7 +683,7 @@ real.stdout.on('data', (chunk) => {
         request: asked,
       });
       assert.notEqual(again.id, first.id);
-      assert.equal(again.binaural, false);
+      assert.equal(again.effective.audio.where === 'server-render', false);
       const { audio } = await finished(again.id);
       assert.equal(audio.channels, 2);
     } finally {
@@ -648,7 +708,7 @@ test(
           { positionMs: 1000 }
         ),
       });
-      assert.equal(result.binaural, false);
+      assert.equal(result.effective.audio.where === 'server-render', false);
       const { audio } = await finished(result.id);
       // converted as usual: no surround asked for, so stereo AAC
       assert.equal(audio.codec_name, 'aac');

@@ -115,3 +115,4 @@ export type {
   GuestArtwork,
   GuestSegment,
 } from './guest.js';
+export { guestPlaybackSpecSchema } from './guest.js';

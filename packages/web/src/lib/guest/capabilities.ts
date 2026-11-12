@@ -220,6 +220,8 @@ export async function browserCapabilities(
     // Dolby Vision drawn here from its metadata, where the page can show HDR itself
     ...(hdr && (await doviSupported()) ? { picture: ['dovi' as const] } : {}),
     display: typeof matchMedia === 'function' && hdrScreen() ? 'hdr' : 'sdr',
+    // Containers this page demuxes itself: none yet (the transcoder repackages them).
+    demux: [],
     subtitles,
   };
 }

@@ -46,6 +46,17 @@ export function metadata(raw) {
         transfer: s.color_transfer,
         rotation: rotation(s),
         dovi: dovi(s),
+        // HDR10+ dynamic metadata, seen on the first video frame (a separate probe)
+        hdr10plus:
+          s.codec_type === 'video'
+            ? (raw.frames ?? []).some(
+                (f) =>
+                  f.stream_index === s.index &&
+                  (f.side_data_list ?? []).some(
+                    (d) => d.side_data_type === HDR10_PLUS
+                  )
+              )
+            : undefined,
         // Dolby Vision profile 5 has no HDR10 base layer (and often no colour
         // tags): HDR all the same, whose colours only its RPU makes right.
         hdr:
@@ -97,7 +108,9 @@ export function duration(raw) {
       );
   return Number.isFinite(best) && best > 0 ? Math.round(best * 1000) : 0;
 }
-/** The stream's Dolby Vision configuration record, if any. */
+/** FFmpeg's name for HDR10+ (SMPTE ST 2094-40) frame metadata. */
+const HDR10_PLUS = 'HDR Dynamic Metadata SMPTE2094-40 (HDR10+)';
+/** The stream's Dolby Vision configuration record, if any: profile, and which layers it has. */
 function dovi(s) {
   const record = (s.side_data_list ?? []).find(
     (d) => d.side_data_type === 'DOVI configuration record'
@@ -106,6 +119,11 @@ function dovi(s) {
     ? {
         profile: Number(record.dv_profile),
         compatibility: Number(record.dv_bl_signal_compatibility_id),
+        layers: {
+          base: Number(record.bl_present_flag) === 1,
+          enhancement: Number(record.el_present_flag) === 1,
+          rpu: Number(record.rpu_present_flag) === 1,
+        },
       }
     : undefined;
 }
@@ -148,8 +166,9 @@ const DECODED_BY_FFMPEG = new Set(['eac3', 'ac3', 'dts']);
  * stream on pipe:1 for atmos-render, and the same packets' timestamps (framemd5, flushed per
  * packet) on pipe:3, whose first gives where the rendered audio starts.
  */
-export function demuxArgs(input, policy, offset) {
-  const format = BINAURAL_CODECS[policy.audio.codec];
+export function demuxArgs(input, meta, spec, offset) {
+  const audio = tracksOf(meta, spec).audio;
+  const format = BINAURAL_CODECS[audio.codec];
   return [
     '-hide_banner',
     '-loglevel',
@@ -173,14 +192,14 @@ export function demuxArgs(input, policy, offset) {
     '-i',
     input,
     '-map',
-    `0:${policy.audio.index}`,
+    `0:${audio.index}`,
     '-c',
     'copy',
     '-f',
     format,
     'pipe:1',
     '-map',
-    `0:${policy.audio.index}`,
+    `0:${audio.index}`,
     '-c',
     'copy',
     '-flush_packets',
@@ -190,13 +209,13 @@ export function demuxArgs(input, policy, offset) {
     'pipe:3',
   ];
 }
-/** atmos-render's arguments for a policy's audio track. */
 /** The listener's headphone mode as atmos-render's --modes: everything Near (as Windows) or Far. */
 const RENDER_MODES = { near: 'windows', far: 'far' };
 
-export function rendererArgs(policy) {
-  const format = BINAURAL_CODECS[policy.audio.codec];
-  const modes = RENDER_MODES[policy.binauralMode];
+/** atmos-render's arguments for a spec's audio track. */
+export function rendererArgs(meta, spec) {
+  const format = BINAURAL_CODECS[tracksOf(meta, spec).audio.codec];
+  const modes = RENDER_MODES[spec.audio.render?.mode];
   return [
     '--format',
     format,
@@ -224,28 +243,40 @@ export function firstPacketTime(text) {
   return null;
 }
 /**
+ * Where each stream's work happens and what it outputs. Every value a planned feature needs has
+ * its place here; `playbackSpec` chooses only the values built so far (marked "built").
+ *
  * @typedef {object} VideoSpec
  * @property {number} track
- * @property {'page-original'|'server-copy'|'server-encode'} where Later: 'page-demux'.
- * @property {null | {codec: 'h264', range: 'sdr', tonemap: 'none'|'server',
- *   deinterlace: false, height: number|null, maxBitrate: string|null}} encode
- *   Later: codec 'hevc10'|'av1', range 'hdr10', deinterlace true.
- * @property {'none'|'dovi'} picture What the page draws over the video. Later: 'tonemap-sdr'.
- * @property {string|null} reason Why it isn't copied, for /health.
+ * @property {'page-original'|'page-demux'|'server-copy'|'server-encode'} where
+ *   The original file played by the page (built), demuxed by the page, copied (built) or
+ *   encoded (built) on the server.
+ * @property {null | {codec: 'h264'|'hevc10'|'av1', range: 'sdr'|'hdr10',
+ *   tonemap: 'none'|'server', deinterlace: boolean, scale: number|null,
+ *   maxBitrate: string|null}} encode
+ *   A server encode: built are h264, sdr, the server's tone map, no deinterlacing; `scale` is the
+ *   output height (null: the source's), `maxBitrate` its cap.
+ * @property {'none'|'dovi'|'tonemap-sdr'} picture
+ *   What the page draws over the video: Dolby Vision (built), or HDR tone-mapped to SDR.
+ * @property {string|null} reason Why the video isn't copied, for /health.
  *
  * @typedef {object} AudioSpec
  * @property {number} track
  * @property {'page-original'|'server-copy'|'server-convert'|'server-render'} where
  * @property {boolean} pageRenders Copied for the page to render (binaural or speakers) itself.
- * @property {null | {mode: 'near'|'far'|null}} render Rendered to binaural here.
- * @property {null | {codec: 'flac'|'aac', bitrate: string|null, layout: string|null,
- *   channels: number|null}} output What a server conversion or render writes.
- * @property {string|null} reason
+ * @property {null | {codec: 'flac'|'aac', layout: 'stereo'|'5.1'|'7.1', channels: number,
+ *   bitrate: string|null}} convert A server conversion's output.
+ * @property {null | {binaural: true, mode: 'near'|'far'|null, codec: 'flac'|'aac',
+ *   bitrate: string|null}} render Rendered to binaural on the server, in the listener's mode
+ *   (null: as mixed).
+ * @property {string|null} reason Why the audio isn't copied, for /health.
  *
  * @typedef {object} SubtitleSpec
  * @property {number} track
- * @property {'page'|'server-burn'} where Later: page drawing VobSub and DVB.
- * @property {string|null} kind
+ * @property {'page'|'server-burn'} where
+ *   Drawn by the page (built for text, ASS, PGS; VobSub and DVB are burned in until it draws
+ *   them), or burned in on the server.
+ * @property {'text'|'ass'|'pgs'|'vobsub'|'dvb'|null} format
  *
  * @typedef {object} PlaybackSpec
  * @property {VideoSpec|null} video
@@ -253,21 +284,21 @@ export function firstPacketTime(text) {
  * @property {SubtitleSpec|null} subtitle
  */
 
-/** What the page asks to draw itself: the `picture` list, or the older `dovi` flag. */
+/** What the page asks to draw itself. */
 const drawsDovi = (caps) =>
-  caps.dovi === true ||
-  (Array.isArray(caps.picture) && caps.picture.includes('dovi'));
+  Array.isArray(caps.picture) && caps.picture.includes('dovi');
 
 const QUALITY_HEIGHT = { '720p': 720, '1080p': 1080 };
 const QUALITY_BITRATE = { '720p': '4M', '1080p': '8M' };
 
 /**
- * Where each stream's work happens and what it outputs, from the media and what the player
- * can do. Every later option (HDR output, the page tone-mapping or demuxing, more subtitle
- * formats) is a value of these fields; the decisions below choose only what's built.
- * @returns {{spec: PlaybackSpec, video: any, audio: any, subtitle: any, audios: any[]}}
+ * The spec from the media, the request (with what the player can do), and what the
+ * transcoder knows: `binauralFailed`, this track's binaural rendering failed before (or just
+ * now, before the stream started), so it isn't asked of the renderer again.
+ * @param {{binauralFailed?: boolean}} [inputs]
+ * @returns {PlaybackSpec}
  */
-export function playbackSpec(meta, request) {
+export function playbackSpec(meta, request, inputs = {}) {
   const video = meta.tracks.find((t) => t.type === 'video');
   const audios = meta.tracks.filter((t) => t.type === 'audio');
   const audio =
@@ -288,11 +319,11 @@ export function playbackSpec(meta, request) {
   const caps = request.capabilities ?? {};
   const original = request.quality === 'original';
   // Burned in only where the browser can't draw it itself.
-  const kind = subtitle && subtitleKind(subtitle.codec);
+  const format = subtitle ? subtitleKind(subtitle.codec) : null;
   const burn =
     !!subtitle &&
-    kind !== 'text' &&
-    !(kind && (caps.subtitles ?? []).includes(kind));
+    format !== 'text' &&
+    !(format && (caps.subtitles ?? []).includes(format));
   // A successful probe of the actual file is required, not a guessed codec name.
   const copyVideo =
     !!video &&
@@ -315,21 +346,26 @@ export function playbackSpec(meta, request) {
   // The player decodes it itself where it can (in WebAssembly), with headphones on or off, so
   // turning them on or off doesn't need a new job: the track is copied as it is. Not on a retry
   // after failed playback, which converts it here instead.
-  const clientBinaural =
+  const pageRenders =
     renderable &&
     !request.force &&
     (caps.clientBinaural ?? []).includes(audio.codec);
-  // Rendered to binaural here where the player asks for it and doesn't render it itself.
-  const binaural = renderable && caps.binaural === true && !clientBinaural;
+  // Rendered to binaural here where the player asks for it and doesn't render it itself, unless
+  // the renderer failed on this track.
+  const binaural =
+    renderable &&
+    caps.binaural === true &&
+    !inputs.binauralFailed &&
+    !pageRenders;
   const copyAudio =
     !!audio &&
     !binaural &&
-    (clientBinaural || (original && !request.force && caps.audio === true));
+    (pageRenders || (original && !request.force && caps.audio === true));
   const direct =
     original &&
     !request.force &&
     // The player's own rendering (binaural audio, Dolby Vision) reads the DASH stream.
-    !clientBinaural &&
+    !pageRenders &&
     !dovi &&
     caps.container === true &&
     copyVideo &&
@@ -362,13 +398,7 @@ export function playbackSpec(meta, request) {
           : request.force
             ? 'retry after failed playback'
             : "browser can't decode the audio";
-  // The listener's headphone mode where it's rendered here ('near' or 'far'; null: as mixed).
-  const binauralMode =
-    binaural && Object.hasOwn(RENDER_MODES, caps.binauralMode ?? '')
-      ? caps.binauralMode
-      : null;
-  /** @type {PlaybackSpec} */
-  const spec = {
+  return {
     video: video
       ? {
           track: video.index,
@@ -384,7 +414,7 @@ export function playbackSpec(meta, request) {
                 range: 'sdr',
                 tonemap: video.hdr ? 'server' : 'none',
                 deinterlace: false,
-                height: QUALITY_HEIGHT[request.quality] ?? null,
+                scale: QUALITY_HEIGHT[request.quality] ?? null,
                 maxBitrate: QUALITY_BITRATE[request.quality] ?? null,
               },
           picture: dovi ? 'dovi' : 'none',
@@ -401,9 +431,21 @@ export function playbackSpec(meta, request) {
               : binaural
                 ? 'server-render'
                 : 'server-convert',
-          pageRenders: clientBinaural,
-          render: binaural ? { mode: binauralMode } : null,
-          output: copyAudio ? null : audioOutput(audio, caps, binaural),
+          pageRenders,
+          convert: copyAudio || binaural ? null : convertOf(audio, caps),
+          render: binaural
+            ? {
+                binaural: true,
+                // The listener's headphone mode ('near' or 'far'; null: as mixed).
+                mode: Object.hasOwn(RENDER_MODES, caps.binauralMode ?? '')
+                  ? caps.binauralMode
+                  : null,
+                // Already stereo for headphones: FLAC where the browser plays it, else AAC.
+                ...(caps.lossless === true
+                  ? { codec: 'flac', bitrate: null }
+                  : { codec: 'aac', bitrate: '192k' }),
+              }
+            : null,
           reason: audioReason,
         }
       : null,
@@ -411,25 +453,19 @@ export function playbackSpec(meta, request) {
       ? {
           track: subtitle.index,
           where: burn ? 'server-burn' : 'page',
-          kind: kind ?? null,
+          format,
         }
       : null,
   };
-  return { spec, video, audio, subtitle, audios };
 }
 
 /**
- * What a server conversion writes. Rendered binaural is already stereo: FLAC where the browser
- * plays it, else AAC. Otherwise surround stays surround where wanted (a surround output, or the
- * player's virtual surround for headphones): lossless FLAC at the source's layout, up to 7.1,
- * where the browser plays it, else 5.1 AAC (AAC's own 7.1 places its extra pair as front
+ * A server conversion's output. Surround stays surround where wanted (a surround output, or
+ * the player's virtual surround for headphones): lossless FLAC at the source's layout, up to
+ * 7.1, where the browser plays it, else 5.1 AAC (AAC's own 7.1 places its extra pair as front
  * wides). The browser downmixes to the speakers there are.
  */
-function audioOutput(audio, caps, binaural) {
-  if (binaural)
-    return caps.lossless === true
-      ? { codec: 'flac', bitrate: null, layout: null, channels: null }
-      : { codec: 'aac', bitrate: '192k', layout: null, channels: null };
+function convertOf(audio, caps) {
   const channels = audio.channels ?? 2;
   const surround = caps.surround === true && channels > 2;
   const lossless = surround && caps.lossless === true;
@@ -440,47 +476,36 @@ function audioOutput(audio, caps, binaural) {
       : '5.1';
   return {
     codec: lossless ? 'flac' : 'aac',
-    bitrate: lossless ? null : surround ? '384k' : '192k',
     layout,
     channels: { stereo: 2, 5.1: 6, 7.1: 8 }[layout],
+    bitrate: lossless ? null : surround ? '384k' : '192k',
+  };
+}
+
+/** The tracks a spec names, from the media. */
+export function tracksOf(meta, spec) {
+  const find = (s) =>
+    s ? (meta.tracks.find((t) => t.index === s.track) ?? null) : null;
+  return {
+    video: find(spec.video),
+    audio: find(spec.audio),
+    subtitle: find(spec.subtitle),
   };
 }
 
 /**
- * The spec as the flags the conversion code reads. `mode` names the job for /health and the
- * player: the original file (`direct`), both streams copied (`remux`), only the audio
- * converted (`audio`), or the video converted (`video`).
+ * The spec's job, for /health, the capacity count and the player: the original file
+ * (`direct`), both streams copied (`remux`), only the audio converted (`audio`), or the video
+ * converted (`video`).
+ * @returns {'direct'|'remux'|'audio'|'video'}
  */
-export function select(meta, request) {
-  const { spec, video, audio, subtitle } = playbackSpec(meta, request);
-  const copyVideo = !!spec.video && spec.video.where !== 'server-encode';
-  const copyAudio =
-    !!spec.audio &&
-    (spec.audio.where === 'server-copy' ||
-      spec.audio.where === 'page-original');
-  return {
-    spec,
-    videoReason: spec.video?.reason ?? null,
-    audioReason: spec.audio?.reason ?? null,
-    mode:
-      spec.video?.where === 'page-original'
-        ? 'direct'
-        : copyVideo
-          ? copyAudio || !audio
-            ? 'remux'
-            : 'audio'
-          : 'video',
-    video,
-    audio,
-    subtitle,
-    burn: spec.subtitle?.where === 'server-burn',
-    copyVideo: !!video && copyVideo,
-    copyAudio,
-    binaural: spec.audio?.where === 'server-render',
-    clientBinaural: !!spec.audio?.pageRenders,
-    binauralMode: spec.audio?.render?.mode ?? null,
-    dovi: spec.video?.picture === 'dovi',
-  };
+export function modeOf(spec) {
+  if (spec.video?.where === 'page-original') return 'direct';
+  if (!spec.video || spec.video.where === 'server-encode') return 'video';
+  const where = spec.audio?.where;
+  return !spec.audio || where === 'server-copy' || where === 'page-original'
+    ? 'remux'
+    : 'audio';
 }
 /*
  * Video conversion follows Jellyfin's chains (EncodingHelper.cs) on
@@ -523,15 +548,20 @@ export function ffmpegArgs(
   encoder = 'cpu',
   options = {}
 ) {
-  const policy = select(meta, request);
+  // The spec decided for this job (with what the transcoder knows), else from the request.
+  const spec = options.spec ?? playbackSpec(meta, request, options.inputs);
+  const { video, audio, subtitle } = tracksOf(meta, spec);
+  const copyVideo = spec.video.where !== 'server-encode';
+  const burn = spec.subtitle?.where === 'server-burn';
+  const binaural = spec.audio?.where === 'server-render';
+  const copyAudio =
+    spec.audio?.where === 'server-copy' ||
+    spec.audio?.where === 'page-original';
+  const drawsDoviHere = spec.video.picture === 'dovi';
   const offset =
     Math.floor(Math.max(0, request.positionMs ?? 0) / 1000 / 4) * 4;
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y'];
-  const hw =
-    encoder === 'vaapi' &&
-    !policy.copyVideo &&
-    !policy.burn &&
-    !policy.video?.hdr;
+  const hw = encoder === 'vaapi' && !copyVideo && !burn && !video?.hdr;
   if (hw)
     args.push(
       '-vaapi_device',
@@ -540,19 +570,19 @@ export function ffmpegArgs(
   const gpuTonemap =
     encoder === 'nvidia' &&
     (options.tonemap ?? 'gpu') === 'gpu' &&
-    !policy.copyVideo &&
-    !!policy.video?.hdr;
+    !copyVideo &&
+    !!video?.hdr;
   // Frames stay on the GPU from NVDEC to NVENC. Not with burn-in (its
   // overlay is on the CPU) nor a rotated picture (FFmpeg's autorotate is on
   // the CPU), and only with HDR tone-mapped on the GPU too.
   const gpuDecode =
     encoder === 'nvidia' &&
     (options.decode ?? 'gpu') === 'gpu' &&
-    !policy.copyVideo &&
-    !policy.burn &&
-    !policy.video?.rotation &&
-    nvdecDecodes(policy.video) &&
-    (!policy.video?.hdr || gpuTonemap);
+    !copyVideo &&
+    !burn &&
+    !video?.rotation &&
+    nvdecDecodes(video) &&
+    (!video?.hdr || gpuTonemap);
   if (gpuTonemap || gpuDecode)
     args.push('-init_hw_device', 'cuda=cu:0', '-filter_hw_device', 'cu');
   if (gpuDecode)
@@ -565,10 +595,10 @@ export function ffmpegArgs(
       'cuda'
     );
   // Seek before input for ordinary streams. Burn-in retains the source timeline.
-  if (!policy.burn) args.push('-ss', String(offset));
+  if (!burn) args.push('-ss', String(offset));
   // With the video copied, the audio starts at the same keyframe rather than
   // at the seek, as Plex does: no stretch of picture without sound.
-  if (policy.copyVideo) args.push('-noaccurate_seek');
+  if (copyVideo) args.push('-noaccurate_seek');
   // A job paused ahead of its viewers leaves the source connection idle,
   // which the source may close: read on from where it was.
   if (/^https?:/.test(input))
@@ -585,7 +615,7 @@ export function ffmpegArgs(
   args.push('-i', input);
   // A binaural conversion's audio: atmos-render's 48 kHz float stereo on pipe:4, starting at the
   // source timestamp of the first audio packet (options.audioStart, seconds).
-  if (policy.binaural)
+  if (binaural)
     args.push(
       '-f',
       'f32le',
@@ -599,35 +629,34 @@ export function ffmpegArgs(
       'pipe:4'
     );
   const filters = [];
-  if (policy.burn) {
+  if (burn) {
     // FFmpeg's subtitle decoder feeds an overlay without
     // interpolating an untrusted URL into a filter expression.
     const sub = meta.tracks
       .filter((t) => t.type === 'subtitle')
-      .findIndex((t) => t.index === policy.subtitle.index);
-    if (['ass', 'ssa'].includes(policy.subtitle.codec)) {
+      .findIndex((t) => t.index === subtitle.index);
+    if (['ass', 'ssa'].includes(subtitle.codec)) {
       // The input is a server-generated, URL-safe source handle.
       filters.push(
         `subtitles=filename='${input.replace(/[:\\']/g, '\\$&')}':si=${sub}`
       );
     }
   }
-  if (policy.burn) args.push('-ss', String(offset));
+  if (burn) args.push('-ss', String(offset));
   args.push(
     '-map',
-    policy.burn && !['ass', 'ssa'].includes(policy.subtitle.codec)
+    burn && !['ass', 'ssa'].includes(subtitle.codec)
       ? '[vsub]'
-      : `0:${policy.video.index}`
+      : `0:${video.index}`
   );
-  if (policy.audio)
-    args.push('-map', policy.binaural ? '1:a' : `0:${policy.audio.index}`);
-  if (policy.copyVideo) {
+  if (audio) args.push('-map', binaural ? '1:a' : `0:${audio.index}`);
+  if (copyVideo) {
     args.push('-c:v', 'copy');
     // Browsers and Safari's player expect HEVC tagged hvc1.
-    if (policy.video?.codec === 'hevc') args.push('-tag:v', 'hvc1');
+    if (video?.codec === 'hevc') args.push('-tag:v', 'hvc1');
   } else {
-    const encode = policy.spec.video.encode;
-    const height = encode.height;
+    const encode = spec.video.encode;
+    const height = encode.scale;
     const hdr = encode.tonemap === 'server';
     if (gpuDecode) {
       // Jellyfin's GetNvidiaVidFiltersPrefered with NVDEC and NVENC.
@@ -636,15 +665,15 @@ export function ffmpegArgs(
         : `w='trunc(iw/2)*2':h='trunc(ih/2)*2'`;
       // HEVC range extensions (4:4:4, 12-bit) go to tonemap_cuda as P010.
       const rext = !['yuv420p', 'yuvj420p', 'yuv420p10le'].includes(
-        policy.video.pixelFormat
+        video.pixelFormat
       );
       filters.push(
-        hdr ? hdrParams(policy.video) : SDR_PARAMS,
+        hdr ? hdrParams(video) : SDR_PARAMS,
         `scale_cuda=${size}${hdr ? (rext ? ':format=p010' : '') : ':format=yuv420p'}`
       );
       if (hdr) filters.push(`tonemap_cuda=${TONEMAP}:format=yuv420p`);
     } else {
-      if (hdr) filters.push(hdrParams(policy.video));
+      if (hdr) filters.push(hdrParams(video));
       // Scaled before the tone map, as Jellyfin does: fewer pixels to map.
       if (height) filters.push(`scale=w=-2:h='min(${height},ih)'`);
       if (hdr)
@@ -657,10 +686,10 @@ export function ffmpegArgs(
       filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2', 'format=yuv420p');
     }
     if (hw) filters.push('hwupload');
-    if (policy.burn && !['ass', 'ssa'].includes(policy.subtitle.codec)) {
+    if (burn && !['ass', 'ssa'].includes(subtitle.codec)) {
       args.push(
         '-filter_complex',
-        `[0:${policy.video.index}][0:${policy.subtitle.index}]overlay,${filters.join(',')}[vsub]`
+        `[0:${video.index}][0:${subtitle.index}]overlay,${filters.join(',')}[vsub]`
       );
     } else if (filters.length) args.push('-vf', filters.join(','));
     const codec = hw
@@ -694,9 +723,9 @@ export function ffmpegArgs(
       '0'
     );
   }
-  if (policy.audio) args.push('-c:a', policy.copyAudio ? 'copy' : 'aac');
+  if (audio) args.push('-c:a', copyAudio ? 'copy' : 'aac');
   // TrueHD in MP4 (mlpa) is behind FFmpeg's experimental flag.
-  if (policy.copyAudio && policy.audio.codec === 'truehd') {
+  if (copyAudio && audio.codec === 'truehd') {
     args.push('-strict', 'experimental');
     // That flag also has the MP4 muxer write a copied Dolby Vision stream's configuration box
     // (dvcC), which it otherwise leaves out, and Chrome refuses Dolby Vision through Media Source
@@ -704,28 +733,28 @@ export function ffmpegArgs(
     // decryptor"). Without the Dolby Vision metadata it's the HDR10 stream that plays without
     // the flag.
     // Where the player draws Dolby Vision it needs the RPUs, and it drops the box itself.
-    if (policy.copyVideo && policy.video?.dovi && !policy.dovi)
+    if (copyVideo && video?.dovi && !drawsDoviHere)
       args.push('-bsf:v', 'dovi_rpu=strip=1');
   }
-  const audioOut = policy.spec.audio?.output;
-  if (audioOut) {
-    // A conversion's layout: continuous where the source's audio has gaps, and downmixed
-    // without clipping, as Plex does (a plain -ac 2 peaks over 0 dBFS). A binaural render is
-    // stereo already.
-    if (audioOut.layout)
-      args.push(
-        '-af',
-        `aresample=async=1:ochl=${audioOut.layout}:rematrix_maxval=1`,
-        '-ac',
-        String(audioOut.channels)
-      );
+  // A conversion's layout: continuous where the source's audio has gaps, and downmixed without
+  // clipping, as Plex does (a plain -ac 2 peaks over 0 dBFS). A binaural render is stereo
+  // already.
+  const convert = spec.audio?.convert;
+  const out = convert ?? spec.audio?.render;
+  if (convert)
     args.push(
-      ...(audioOut.codec === 'flac'
+      '-af',
+      `aresample=async=1:ochl=${convert.layout}:rematrix_maxval=1`,
+      '-ac',
+      String(convert.channels)
+    );
+  if (out)
+    args.push(
+      ...(out.codec === 'flac'
         ? // 24-bit, as TrueHD and DTS-HD MA decode to.
           ['-c:a', 'flac', '-sample_fmt', 's32']
-        : ['-b:a', audioOut.bitrate])
+        : ['-b:a', out.bitrate])
     );
-  }
   args.push(
     '-sn',
     '-map_metadata',
@@ -753,7 +782,7 @@ export function ffmpegArgs(
     '-use_timeline',
     '1',
     '-adaptation_sets',
-    policy.audio ? 'id=0,streams=v id=1,streams=a' : 'id=0,streams=v',
+    audio ? 'id=0,streams=v id=1,streams=a' : 'id=0,streams=v',
     // Each fragment's timestamps (tfdt) are the source's, as the manifest
     // says, not an edit list, which browsers don't apply; no sidx, which
     // makes FFmpeg rewrite timestamps at open-GOP boundaries.
@@ -768,13 +797,9 @@ export function ffmpegArgs(
   // Where the video was decoded and HDR tone-mapped, for the fallback and
   // /health.
   const tonemap =
-    policy.video?.hdr && !policy.copyVideo
-      ? gpuTonemap
-        ? 'gpu'
-        : 'cpu'
-      : null;
-  const decode = policy.copyVideo ? null : gpuDecode ? 'gpu' : 'cpu';
-  return { args, offsetMs: offset * 1000, offset, policy, tonemap, decode };
+    video?.hdr && !copyVideo ? (gpuTonemap ? 'gpu' : 'cpu') : null;
+  const decode = copyVideo ? null : gpuDecode ? 'gpu' : 'cpu';
+  return { args, offsetMs: offset * 1000, offset, spec, tonemap, decode };
 }
 
 /** The boxes in an ISO BMFF byte range: [type, start of content, end]. */
@@ -932,8 +957,10 @@ export function manifestStart(mpd) {
  * TrueHD's, and DTS's (MP4's object type for it, as FFmpeg 6 writes).
  */
 const COPIED_CODECS = { truehd: 'mlpa', dts: 'mp4a.a9' };
-export function audioCodec(policy) {
-  return (policy.copyAudio && COPIED_CODECS[policy.audio?.codec]) || null;
+export function audioCodec(meta, spec) {
+  const where = spec.audio?.where;
+  const copied = where === 'server-copy' || where === 'page-original';
+  return (copied && COPIED_CODECS[tracksOf(meta, spec).audio?.codec]) || null;
 }
 /** Fills in an audio representation's empty codec string (FFmpeg writes none for TrueHD). */
 export function withAudioCodec(mpd, codec) {

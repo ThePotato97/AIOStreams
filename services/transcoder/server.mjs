@@ -12,7 +12,8 @@ import {
   demuxArgs,
   rendererArgs,
   firstPacketTime,
-  select,
+  playbackSpec,
+  modeOf,
   manifestReady,
   outTimeMs,
   manifestStart,
@@ -153,7 +154,32 @@ async function probe(input) {
       // AIOStreams retries once and must answer within Cloudflare's 100 s.
       { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }
     )
-      .then(({ stdout }) => metadata(JSON.parse(stdout)))
+      .then(async ({ stdout }) => ({
+        ...JSON.parse(stdout),
+        // The first video frame's side data (HDR10+), which the streams don't list. Without it
+        // (no video, a frame that doesn't decode) the file is described all the same.
+        frames: await exec(
+          'ffprobe',
+          [
+            '-v',
+            'error',
+            '-select_streams',
+            'v:0',
+            '-show_frames',
+            '-read_intervals',
+            '%+#1',
+            '-show_entries',
+            'frame=stream_index,side_data_list',
+            '-of',
+            'json',
+            input,
+          ],
+          { timeout: 30000, maxBuffer: 1024 * 1024 }
+        )
+          .then(({ stdout: frames }) => JSON.parse(frames).frames ?? [])
+          .catch(() => []),
+      }))
+      .then((raw) => metadata(raw))
       .catch((error) => {
         probes.delete(input);
         throw Error(probeFailure(error));
@@ -197,7 +223,20 @@ export async function drop(job) {
  * failing the same way again. Bounded; the oldest is forgotten first.
  */
 const binauralFailed = new Set();
-const binauralKey = (job, policy) => `${job.input}#${policy.audio?.index}`;
+const binauralKey = (job, spec) => `${job.input}#${spec.audio?.track}`;
+/**
+ * The spec a job runs: from its request, and what the transcoder knows. Binaural rendering
+ * isn't asked of the renderer for a track it failed on (`binauralFailed`), nor again for a job
+ * that already fell back from it (`noBinaural`).
+ */
+function specFor(job) {
+  const spec = playbackSpec(job.meta, job.request);
+  if (spec.audio?.where !== 'server-render') return spec;
+  const failed = job.noBinaural || binauralFailed.has(binauralKey(job, spec));
+  return failed
+    ? playbackSpec(job.meta, job.request, { binauralFailed: true })
+    : spec;
+}
 /** How long a binaural conversion waits for its first audio packet. */
 const AUDIO_START_TIMEOUT_MS = 60_000;
 /** Kills a process started in its own group (`detached`) and everything in that group. */
@@ -231,27 +270,19 @@ function killHelpers(job) {
  */
 function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
   killHelpers(job);
-  let policy = select(job.meta, job.request);
-  if (policy.binaural && binauralFailed.has(binauralKey(job, policy))) {
-    job.request = {
-      ...job.request,
-      capabilities: { ...job.request.capabilities, binaural: false },
-    };
-    policy = select(job.meta, job.request);
-  }
-  job.binaural = policy.binaural;
-  if (!policy.binaural) {
-    startMain(job, encoder, gpu, {});
+  const spec = specFor(job);
+  if (spec.audio?.where !== 'server-render') {
+    startMain(job, encoder, gpu, { spec });
     return;
   }
   const offset =
     Math.floor(Math.max(0, job.request.positionMs ?? 0) / 1000 / 4) * 4;
-  const demux = spawn('ffmpeg', demuxArgs(job.input, policy, offset), {
+  const demux = spawn('ffmpeg', demuxArgs(job.input, job.meta, spec, offset), {
     stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
   });
   const renderer = spawn(
     process.env.ATMOS_RENDER ?? 'atmos-render',
-    rendererArgs(policy),
+    rendererArgs(job.meta, spec),
     {
       stdio: ['pipe', 'pipe', 'pipe'],
       // Its own process group, with the FFmpeg it decodes E-AC-3, AC-3 and DTS with: stopping
@@ -276,7 +307,7 @@ function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
     // Once playing, the converting FFmpeg would carry on with the video alone
     // and the audio would just stop. The job fails instead, so the player
     // reconnects, and this track converts without binaural rendering.
-    binauralFailed.add(binauralKey(job, policy));
+    binauralFailed.add(binauralKey(job, spec));
     if (binauralFailed.size > 200)
       binauralFailed.delete(binauralFailed.values().next().value);
     job.error = 'Binaural rendering stopped';
@@ -306,7 +337,7 @@ function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
     const audioStart = firstPacketTime(text);
     if (audioStart == null) return;
     clearTimeout(timer);
-    main = startMain(job, encoder, gpu, { audioStart });
+    main = startMain(job, encoder, gpu, { audioStart, spec });
     const sink = main.stdio[4];
     sink.on('error', () => {});
     renderer.stdout.off('data', hold);
@@ -325,10 +356,7 @@ async function withoutBinaural(job, encoder, gpu) {
     main.kill('SIGKILL');
     await new Promise((resolve) => main.once('exit', resolve));
   }
-  job.request = {
-    ...job.request,
-    capabilities: { ...job.request.capabilities, binaural: false },
-  };
+  job.noBinaural = true;
   await rm(job.dir, { recursive: true, force: true });
   await mkdir(job.dir, { recursive: true });
   if (!jobs.has(job.id)) return;
@@ -345,25 +373,20 @@ function startMain(job, encoder, gpu, extra) {
     { ...gpu, ...extra }
   );
   job.offsetMs = command.offsetMs;
-  job.mode = command.policy.mode;
-  job.clientBinaural = command.policy.clientBinaural;
-  job.dovi = command.policy.dovi;
   // What this conversion makes, after any fallback (no binaural, the CPU): the player follows it.
-  job.spec = command.policy.spec;
-  job.audioCodec = audioCodec(command.policy);
-  job.reasons = {
-    video: command.policy.videoReason,
-    audio: command.policy.audioReason,
-  };
+  job.spec = command.spec;
+  job.mode = modeOf(command.spec);
+  job.audioCodec = audioCodec(job.meta, command.spec);
   job.encoder = encoder;
   job.tonemap = command.tonemap;
   job.decode = command.decode;
   const args = [...command.args];
   args.splice(args.length - 1, 0, '-progress', 'pipe:3');
   const child = spawn('ffmpeg', args, {
-    stdio: command.policy.binaural
-      ? ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
-      : ['ignore', 'ignore', 'pipe', 'pipe'],
+    stdio:
+      command.spec.audio?.where === 'server-render'
+        ? ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
+        : ['ignore', 'ignore', 'pipe', 'pipe'],
   });
   job.child = child;
   let progress = '';
@@ -402,7 +425,11 @@ function startMain(job, encoder, gpu, extra) {
       else if (command.tonemap === 'gpu')
         start(job, encoder, { decode: 'cpu', tonemap: 'cpu' });
       else start(job, 'cpu');
-    } else if (code !== 0 && !job.ready && job.binaural)
+    } else if (
+      code !== 0 &&
+      !job.ready &&
+      job.spec?.audio?.where === 'server-render'
+    )
       // all on the CPU and still failing: without binaural rendering
       await withoutBinaural(job, encoder, gpu);
     else if (code !== 0) job.error ??= 'Conversion failed';
@@ -500,22 +527,26 @@ async function admit(body, meta) {
     !/^[A-Za-z0-9_-]{16,128}$/.test(body.viewer)
   )
     throw Error('Invalid viewer');
-  const policy = select(meta, request);
-  if (!policy.video) throw Error('Source has no video');
-  if (policy.mode === 'direct')
-    return { mode: 'direct', spec: policy.spec, meta };
+  // What the request asks for, and what will be tried (a track the renderer failed on is
+  // converted instead).
+  const asked = playbackSpec(meta, request);
+  const requested = specFor({ meta, request, input });
+  if (!asked.video) throw Error('Source has no video');
+  if (asked.video.where === 'page-original')
+    return { mode: 'direct', spec: requested, effective: requested, meta };
+  const where = asked.audio?.where;
   const key = hash([
     input,
     request.quality,
     request.audio,
     request.subtitle,
-    policy.copyVideo,
-    policy.copyAudio,
-    policy.burn,
-    policy.binaural,
-    policy.clientBinaural,
-    policy.binauralMode,
-    policy.dovi,
+    asked.video.where !== 'server-encode',
+    where === 'server-copy',
+    asked.subtitle?.where === 'server-burn',
+    where === 'server-render',
+    !!asked.audio?.pageRenders,
+    asked.audio?.render?.mode ?? null,
+    asked.video.picture === 'dovi',
   ]);
   const positionMs = request.positionMs;
   let job = [...jobs.values()].find(
@@ -530,7 +561,7 @@ async function admit(body, meta) {
     for (const old of [...jobs.values()])
       if (!old.viewers.size || old.error) await drop(old);
     const encodes = (j) => j.mode === 'video';
-    const encoding = select(meta, request).mode === 'video';
+    const encoding = modeOf(asked) === 'video';
     if (
       jobs.size >= copyLimit ||
       (encoding && [...jobs.values()].filter(encodes).length >= limit)
@@ -550,6 +581,7 @@ async function admit(body, meta) {
       input,
       meta,
       request,
+      requested,
       dir: `${root}/${jobId}`,
       viewers: new Map(),
       last: Date.now(),
@@ -610,15 +642,9 @@ async function whenReady(job, meta) {
     mode: job.mode,
     offsetMs: 0,
     startMs: job.offsetMs,
-    // Whether the audio was rendered to binaural here: the player's own
-    // virtualiser stays off for it.
-    binaural: !!job.binaural,
-    // The audio is copied for the player to render itself.
-    clientBinaural: !!job.clientBinaural,
-    // Dolby Vision copied with its RPUs for the player to draw.
-    dovi: !!job.dovi,
-    // Where each stream's work happens, as this job does it.
-    spec: job.spec,
+    // What was asked for, and what this job does after any fallback (the player follows it).
+    spec: job.requested,
+    effective: job.spec,
     meta,
   };
 }
@@ -645,13 +671,15 @@ export function createServer() {
             id: j.id,
             mode: j.mode,
             // Why video/audio are converted (null: copied).
-            reasons: j.reasons,
+            reasons: {
+              video: j.spec?.video?.reason ?? null,
+              audio: j.spec?.audio?.reason ?? null,
+            },
             encoder: j.encoder,
             tonemap: j.tonemap,
             decode: j.decode,
-            binaural: !!j.binaural,
-            clientBinaural: !!j.clientBinaural,
-            dovi: !!j.dovi,
+            requested: j.requested,
+            effective: j.spec,
             viewers: j.viewers.size,
             producedMs: j.producedMs,
             speed: j.speed,

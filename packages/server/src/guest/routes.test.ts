@@ -42,8 +42,8 @@ const fixture = vi.hoisted(() => ({
   prepared: { mode: 'direct' } as {
     mode: string;
     id?: string;
-    binaural?: boolean;
     spec?: GuestPlaybackSpec;
+    effective?: GuestPlaybackSpec;
   },
   segment: 'slow' as 'slow' | 'silent',
   segmentAborts: 0,
@@ -1012,38 +1012,56 @@ describe('converted media', () => {
           binaural,
         },
       });
-    type Answer = { spec: GuestPlaybackSpec };
-    // A transcoder that sends only its older flags: the spec is made from them.
-    fixture.prepared = { mode: 'audio', id: 'job-binaural', binaural: true };
-    const rendered = (await (await ask(true)).json()) as Answer;
-    expect(fixture.prepareCapabilities.at(-1)?.binaural).toBe(true);
-    expect(rendered.spec.audio?.where).toBe('server-render');
-    // the transcoder didn't render it (a fallback, or a track it doesn't read)
-    fixture.prepared = { mode: 'audio', id: 'job-plain' };
-    const plain = (await (await ask(true)).json()) as Answer;
-    expect(plain.spec.audio?.where).toBe('server-convert');
-    // A transcoder's own spec is passed on as it is.
-    const spec: GuestPlaybackSpec = {
+    type Answer = { spec: GuestPlaybackSpec; effective: GuestPlaybackSpec };
+    const asked: GuestPlaybackSpec = {
       video: {
         track: 0,
         where: 'server-copy',
         encode: null,
-        picture: 'dovi',
+        picture: 'none',
         reason: null,
       },
       audio: {
         track: 1,
         where: 'server-render',
         pageRenders: false,
-        render: { mode: 'near' },
-        output: { codec: 'flac', bitrate: null, layout: null, channels: null },
+        convert: null,
+        render: { binaural: true, mode: 'near', codec: 'flac', bitrate: null },
         reason: 'binaural rendering',
       },
       subtitle: null,
     };
-    fixture.prepared = { mode: 'audio', id: 'job-spec', spec };
-    const sent = (await (await ask(true)).json()) as Answer;
-    expect(sent.spec).toEqual(spec);
+    // The transcoder rendered it: what was asked is what runs.
+    fixture.prepared = {
+      mode: 'audio',
+      id: 'job-binaural',
+      spec: asked,
+      effective: asked,
+    };
+    const rendered = (await (await ask(true)).json()) as Answer;
+    expect(fixture.prepareCapabilities.at(-1)?.binaural).toBe(true);
+    expect(rendered.spec).toEqual(asked);
+    expect(rendered.effective).toEqual(asked);
+    // It fell back (the renderer failed): asked for and done differ, and both are passed on.
+    const converted: GuestPlaybackSpec = {
+      ...asked,
+      audio: {
+        ...asked.audio!,
+        where: 'server-convert',
+        render: null,
+        convert: { codec: 'flac', layout: '5.1', channels: 6, bitrate: null },
+        reason: "browser can't decode the audio",
+      },
+    };
+    fixture.prepared = {
+      mode: 'audio',
+      id: 'job-fallback',
+      spec: asked,
+      effective: converted,
+    };
+    const fellBack = (await (await ask(true)).json()) as Answer;
+    expect(fellBack.spec).toEqual(asked);
+    expect(fellBack.effective).toEqual(converted);
   });
   async function ownSegment() {
     fixture.prepared = { mode: 'audio', id: 'job-1' };

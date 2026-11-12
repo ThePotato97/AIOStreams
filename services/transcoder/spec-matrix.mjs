@@ -5,13 +5,8 @@
  * code produced before the playback spec replaced its flags; the test compares against it, so
  * the decision can change shape without changing what runs.
  */
-import {
-  select,
-  ffmpegArgs,
-  demuxArgs,
-  rendererArgs,
-  audioCodec,
-} from './media.mjs';
+import { gzipSync, gunzipSync } from 'node:zlib';
+import * as media from './media.mjs';
 
 const VIDEOS = {
   h264: { codec: 'h264', profile: 'High', pixelFormat: 'yuv420p' },
@@ -91,7 +86,23 @@ const PLAYERS = {
     surround: true,
     lossless: true,
     clientBinaural: ['truehd', 'eac3', 'ac3', 'dts'],
-    dovi: true,
+    picture: ['dovi'],
+    display: 'hdr',
+    demux: [],
+    subtitles: ['ass', 'pgs'],
+  },
+  // Edge on an HDR screen as it is now: plays E-AC-3 natively, and renders it here too.
+  edgeToday: {
+    video: true,
+    audio: true,
+    container: false,
+    hdr: true,
+    surround: true,
+    lossless: true,
+    clientBinaural: ['truehd', 'eac3', 'ac3', 'dts'],
+    picture: ['dovi'],
+    display: 'hdr',
+    demux: [],
     subtitles: ['ass', 'pgs'],
   },
   // Edge on an HDR screen before ac991ea: plays E-AC-3 natively, no page renderer for it.
@@ -103,7 +114,7 @@ const PLAYERS = {
     surround: true,
     lossless: true,
     clientBinaural: ['truehd', 'dts'],
-    dovi: true,
+    picture: ['dovi'],
     subtitles: ['ass', 'pgs'],
   },
   // Safari: plays the file as it is where it can, no WebAssembly renderers.
@@ -141,6 +152,7 @@ const HEADPHONES = {
   off: {},
   on: { binaural: true },
   near: { binaural: true, binauralMode: 'near' },
+  far: { binaural: true, binauralMode: 'far' },
 };
 const REQUESTS = {
   original: { quality: 'original' },
@@ -196,12 +208,6 @@ export function* cases() {
           for (const [h, phones] of Object.entries(HEADPHONES))
             for (const [r, req] of Object.entries(REQUESTS))
               for (const track of audio ? [undefined, 2] : [undefined]) {
-                // Headphone and track variants only where they can matter.
-                if (h !== 'off' && !audio) continue;
-                if (track !== undefined && (h !== 'off' || s !== 'none'))
-                  continue;
-                if (r !== 'original' && (s !== 'none' || h === 'near'))
-                  continue;
                 const request = {
                   ...req,
                   positionMs: 1_668_993,
@@ -217,35 +223,85 @@ export function* cases() {
               }
 }
 
-/** The policy and every argument list for one case, as plain data. */
+/**
+ * What a spec means for the conversion, as plain data: the same fields the decision had as
+ * flags before the spec, so records made before and after it compare.
+ */
+function viewOf(meta, spec) {
+  const where = spec.audio?.where;
+  return {
+    mode: media.modeOf(spec),
+    videoReason: spec.video?.reason ?? null,
+    audioReason: spec.audio?.reason ?? null,
+    burn: spec.subtitle?.where === 'server-burn',
+    copyVideo: !!spec.video && spec.video.where !== 'server-encode',
+    copyAudio: where === 'server-copy' || where === 'page-original',
+    binaural: where === 'server-render',
+    clientBinaural: !!spec.audio?.pageRenders,
+    binauralMode: spec.audio?.render?.mode ?? null,
+    dovi: spec.video?.picture === 'dovi',
+    audio: spec.audio?.track ?? null,
+    subtitle: spec.subtitle?.track ?? null,
+    audioCodec: media.audioCodec(meta, spec),
+  };
+}
+
+/**
+ * The same for the code before the spec (ac991ea's media.mjs, which the pin was made from):
+ * its `select()` flags, and its argument functions. It knew Dolby Vision drawn by the page as
+ * the `dovi` capability flag, which `picture: ['dovi']` replaced.
+ */
+function before(meta, request) {
+  const caps = request.capabilities ?? {};
+  const asked = caps.picture?.includes('dovi')
+    ? { ...request, capabilities: { ...caps, dovi: true } }
+    : request;
+  const policy = media.select(meta, asked);
+  return {
+    request: asked,
+    view: {
+      mode: policy.mode,
+      videoReason: policy.videoReason,
+      audioReason: policy.audioReason,
+      burn: policy.burn,
+      copyVideo: policy.copyVideo,
+      copyAudio: policy.copyAudio,
+      binaural: policy.binaural,
+      clientBinaural: policy.clientBinaural,
+      binauralMode: policy.binauralMode,
+      dovi: policy.dovi,
+      audio: policy.audio?.index ?? null,
+      subtitle: policy.subtitle?.index ?? null,
+      audioCodec: media.audioCodec(policy),
+    },
+    demux: () => media.demuxArgs('in', policy, 1668),
+    renderer: () => media.rendererArgs(policy),
+  };
+}
+
+/** The decision and every argument list for one case, as plain data. */
 export function record({ meta, request }) {
-  let policy;
+  let decided;
   try {
-    policy = select(meta, request);
+    if (media.playbackSpec) {
+      const spec = media.playbackSpec(meta, request);
+      decided = {
+        request,
+        view: viewOf(meta, spec),
+        demux: () => media.demuxArgs('in', meta, spec, 1668),
+        renderer: () => media.rendererArgs(meta, spec),
+      };
+    } else decided = before(meta, request);
   } catch (error) {
     return { error: error.message };
   }
-  const plain = {
-    mode: policy.mode,
-    videoReason: policy.videoReason,
-    audioReason: policy.audioReason,
-    burn: policy.burn,
-    copyVideo: policy.copyVideo,
-    copyAudio: policy.copyAudio,
-    binaural: policy.binaural,
-    clientBinaural: policy.clientBinaural,
-    binauralMode: policy.binauralMode,
-    dovi: policy.dovi,
-    audio: policy.audio?.index ?? null,
-    subtitle: policy.subtitle?.index ?? null,
-    audioCodec: audioCodec(policy),
-  };
-  if (policy.mode === 'direct') return { policy: plain };
+  const { view } = decided;
+  if (view.mode === 'direct') return { policy: view };
   const runs = {};
   for (const [encoder, options] of ENCODERS) {
-    const out = ffmpegArgs('in', meta, request, 'out', encoder, {
+    const out = media.ffmpegArgs('in', meta, decided.request, 'out', encoder, {
       ...options,
-      ...(policy.binaural ? { audioStart: 1667.995 } : {}),
+      ...(view.binaural ? { audioStart: 1667.995 } : {}),
     });
     runs[`${encoder}:${options.decode ?? '-'}:${options.tonemap ?? '-'}`] = {
       args: out.args,
@@ -255,13 +311,10 @@ export function record({ meta, request }) {
     };
   }
   return {
-    policy: plain,
+    policy: view,
     runs,
-    ...(policy.binaural
-      ? {
-          demux: demuxArgs('in', policy, 1668),
-          renderer: rendererArgs(policy),
-        }
+    ...(view.binaural
+      ? { demux: decided.demux(), renderer: decided.renderer() }
       : {}),
   };
 }
@@ -273,4 +326,12 @@ export async function digestOf(record) {
     .update(JSON.stringify(record))
     .digest('base64url')
     .slice(0, 22);
+}
+
+/** The pinned digests, stored compressed: name → digest. */
+export function readPin(buffer) {
+  return JSON.parse(gunzipSync(buffer).toString('utf8'));
+}
+export function writePin(pin) {
+  return gzipSync(JSON.stringify(pin));
 }

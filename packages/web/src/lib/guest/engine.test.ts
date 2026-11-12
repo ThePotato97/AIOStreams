@@ -231,8 +231,10 @@ function specOf(flags: Record<string, unknown>, mode: string) {
               ? 'server-copy'
               : 'server-convert',
       pageRenders: !!flags.clientBinaural,
-      render: flags.binaural ? { mode: null } : null,
-      output: null,
+      convert: null,
+      render: flags.binaural
+        ? { binaural: true, mode: null, codec: 'flac', bitrate: null }
+        : null,
       reason: null,
     },
     subtitle: null,
@@ -248,6 +250,7 @@ function setup(options: Parameters<typeof guestEngine>[4] = {}) {
       return {
         ...flags,
         spec: specOf(flags, mode),
+        effective: specOf(flags, mode),
         mode,
         url: `/party/guest/media/${mode === 'direct' ? 'original' : 'job/manifest.mpd'}?token=t&lease=l`,
         offsetMs: 0,
@@ -938,6 +941,7 @@ describe('a subtitle still being extracted', () => {
     vi.mocked(api.prepare).mockResolvedValueOnce({
       mode: 'audio',
       spec: specOf({}, 'audio'),
+      effective: specOf({}, 'audio'),
       url: '/party/guest/media/job/manifest.mpd?token=t&lease=l',
       subtitleUrl: '/party/guest/subtitle/3?token=t&lease=l',
       offsetMs: 0,
@@ -966,6 +970,7 @@ describe('ASS and PGS drawn in the browser', () => {
     vi.mocked(api.prepare).mockResolvedValue({
       mode: 'direct',
       spec: specOf({}, 'direct'),
+      effective: specOf({}, 'direct'),
       url: '/party/guest/media/original?token=t&lease=l',
       offsetMs: 0,
       lease: 'l'.repeat(43),

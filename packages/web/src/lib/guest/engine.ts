@@ -111,14 +111,19 @@ const SHAKA_CONFIG = {
 const UNWRITTEN_WAIT_MS = 60_000;
 /** The longest a full transcoder is waited for before reporting it. */
 const CAPACITY_WAIT_MS = 5 * 60_000;
+/*
+ * What this page does for a playback follows its effective spec: what the server does after any
+ * fallback (rendering without binaural, say), not what was asked.
+ */
 /** The server renders this playback's audio to binaural. */
 const serverRenders = (p: GuestPlayback | null) =>
-  p?.spec?.audio?.where === 'server-render';
+  p?.effective?.audio?.where === 'server-render';
 /** The audio was copied for this page to render (binaural or speakers). */
-const pageRenders = (p: GuestPlayback | null) => !!p?.spec?.audio?.pageRenders;
+const pageRenders = (p: GuestPlayback | null) =>
+  !!p?.effective?.audio?.pageRenders;
 /** The video is Dolby Vision for this page to draw. */
 const drawsDovi = (p: GuestPlayback | null) =>
-  p?.spec?.video?.picture === 'dovi';
+  p?.effective?.video?.picture === 'dovi';
 /** Stays this far behind the newest written segment so playback doesn't stall at once. */
 const EDGE_MARGIN_MS = 2_000;
 

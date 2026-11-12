@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { cases, record, digestOf } from './spec-matrix.mjs';
+import { cases, record, digestOf, readPin } from './spec-matrix.mjs';
 import { playbackSpec } from './media.mjs';
 
 test('spec: every case runs exactly what it did before the spec', async () => {
-  const pinned = JSON.parse(
-    await readFile(new URL('./fixtures/spec-matrix.json', import.meta.url))
+  const pinned = readPin(
+    await readFile(new URL('./fixtures/spec-matrix.json.gz', import.meta.url))
   );
   const changed = [];
   let count = 0;
@@ -40,13 +40,12 @@ test('spec: where each stream is worked on, for the main players', () => {
       { index: 2, type: 'subtitle', codec: 'ass' },
     ],
   };
-  const ask = (capabilities) =>
-    playbackSpec(meta, {
-      quality: 'original',
-      positionMs: 0,
-      subtitle: 2,
-      capabilities,
-    }).spec;
+  const ask = (capabilities, inputs) =>
+    playbackSpec(
+      meta,
+      { quality: 'original', positionMs: 0, subtitle: 2, capabilities },
+      inputs
+    );
   // Chrome: the page renders E-AC-3 and draws ASS; nothing is converted.
   const chrome = ask({
     video: true,
@@ -66,11 +65,23 @@ test('spec: where each stream is worked on, for the main players', () => {
     lossless: true,
   });
   assert.equal(server.audio.where, 'server-render');
-  assert.deepEqual(server.audio.output, {
+  assert.deepEqual(server.audio.render, {
+    binaural: true,
+    mode: null,
     codec: 'flac',
     bitrate: null,
-    layout: null,
-    channels: null,
+  });
+  // The renderer failed on this track: converted instead, not asked of it again.
+  const failed = ask(
+    { video: true, hdr: true, binaural: true, lossless: true, surround: true },
+    { binauralFailed: true }
+  );
+  assert.equal(failed.audio.where, 'server-convert');
+  assert.deepEqual(failed.audio.convert, {
+    codec: 'flac',
+    layout: '5.1',
+    channels: 6,
+    bitrate: null,
   });
   assert.equal(server.subtitle.where, 'server-burn');
   // A browser that can't show HDR: encoded with the tone map on the server.
@@ -80,20 +91,31 @@ test('spec: where each stream is worked on, for the main players', () => {
     range: 'sdr',
     tonemap: 'server',
     deinterlace: false,
-    height: null,
+    scale: null,
     maxBitrate: null,
   });
-  // `picture` asks for what the older `dovi` flag did.
+  // Dolby Vision drawn by the page is asked for with `picture`; the old `dovi` flag is gone.
   const dv = { ...meta, tracks: [{ ...meta.tracks[0], dovi: { profile: 5 } }] };
   const draws = (caps) =>
     playbackSpec(dv, { quality: 'original', positionMs: 0, capabilities: caps })
-      .spec.video;
-  assert.deepEqual(
-    draws({ video: true, hdr: true, picture: ['dovi'] }),
-    draws({ video: true, hdr: true, dovi: true })
-  );
+      .video;
   assert.equal(
     draws({ video: true, hdr: true, picture: ['dovi'] }).picture,
     'dovi'
   );
+  assert.equal(
+    draws({ video: true, hdr: true, dovi: true }).where,
+    'server-encode'
+  );
+});
+
+test('spec: the shared examples are what the transcoder decides', async () => {
+  // fixtures/spec-examples.json is also parsed by core's schema (packages/core/src/guest.test.ts),
+  // so this mirror and the TypeScript type check against the same specs.
+  const examples = JSON.parse(
+    await readFile(new URL('./fixtures/spec-examples.json', import.meta.url))
+  );
+  assert.ok(examples.length >= 6);
+  for (const { name, meta, request, inputs, spec } of examples)
+    assert.deepEqual(playbackSpec(meta, request, inputs), spec, name);
 });

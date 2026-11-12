@@ -6,7 +6,8 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import {
   metadata,
-  select,
+  playbackSpec,
+  modeOf,
   ffmpegArgs,
   duration,
   manifestReady,
@@ -258,7 +259,7 @@ test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU othe
     ].filter(Boolean);
   // The browser shows it (an HDR display, or it tone-maps): only audio converts.
   const shown = ffmpegArgs('in', meta, request(caps(true)), 'out', 'nvidia');
-  assert.equal(shown.policy.mode, 'audio');
+  assert.equal(modeOf(shown.spec), 'audio');
   assert.equal(shown.tonemap, null);
   assert.equal(shown.decode, null);
   assert.deepEqual(tonemaps(shown.args), []);
@@ -266,7 +267,7 @@ test('HDR: copied where the browser shows it, tone-mapped on the GPU or CPU othe
   // It doesn't (Firefox on an SDR display): decoded, scaled and tone-mapped on
   // the GPU, the frames staying there into NVENC (Jellyfin's chain).
   const gpu = ffmpegArgs('in', meta, request(caps(false)), 'out', 'nvidia');
-  assert.equal(gpu.policy.videoReason, "HDR the browser can't show");
+  assert.equal(gpu.spec.video.reason, "HDR the browser can't show");
   assert.equal(gpu.tonemap, 'gpu');
   assert.equal(gpu.decode, 'gpu');
   assert.deepEqual(tonemaps(gpu.args), ['cuda']);
@@ -444,6 +445,9 @@ test('Dolby Vision profile 5: HDR, never copied, tone-mapped through its RPU', (
             dv_profile: profile,
             dv_level: 6,
             dv_bl_signal_compatibility_id: compatibility,
+            bl_present_flag: 1,
+            el_present_flag: 0,
+            rpu_present_flag: 1,
           },
           { side_data_type: 'Display Matrix', rotation: 0 },
         ],
@@ -458,23 +462,31 @@ test('Dolby Vision profile 5: HDR, never copied, tone-mapped through its RPU', (
   });
   // Profile 5 carries no colour tags; profile 8.1 has an HDR10 base layer.
   const p5 = metadata(raw(5, 0, undefined)).tracks[0];
-  assert.deepEqual(p5.dovi, { profile: 5, compatibility: 0 });
+  assert.deepEqual(p5.dovi, {
+    profile: 5,
+    compatibility: 0,
+    layers: { base: true, enhancement: false, rpu: true },
+  });
   assert.equal(p5.hdr, true);
   assert.equal(p5.rotation, 0);
   const p8 = metadata(raw(8, 1, 'smpte2084')).tracks[0];
-  assert.deepEqual(p8.dovi, { profile: 8, compatibility: 1 });
+  assert.deepEqual(p8.dovi, {
+    profile: 8,
+    compatibility: 1,
+    layers: { base: true, enhancement: false, rpu: true },
+  });
   assert.equal(p8.hdr, true);
   const original = request({
     capabilities: { video: true, audio: true, container: true, hdr: true },
   });
   // Profile 8.1 plays as HDR10 where the browser shows HDR; profile 5 can't.
   assert.equal(
-    select(metadata(raw(8, 1, 'smpte2084')), original).copyVideo,
-    true
+    playbackSpec(metadata(raw(8, 1, 'smpte2084')), original).video.where,
+    'page-original'
   );
-  const p5policy = select(metadata(raw(5, 0, undefined)), original);
-  assert.equal(p5policy.copyVideo, false);
-  assert.equal(p5policy.videoReason, 'Dolby Vision profile 5');
+  const p5spec = playbackSpec(metadata(raw(5, 0, undefined)), original);
+  assert.equal(p5spec.video.where, 'server-encode');
+  assert.equal(p5spec.video.reason, 'Dolby Vision profile 5');
   // Every chain tone-maps it as PQ; the filters apply the RPU by default.
   for (const [encoder, options, filter] of [
     ['nvidia', {}, 'tonemap_cuda'],
@@ -517,7 +529,8 @@ test('subtitles: burned in only where the browser cannot draw them', () => {
     },
   });
   const burn = (index, subtitles) =>
-    select(meta, request({ subtitle: index, ...caps(subtitles) })).burn;
+    playbackSpec(meta, request({ subtitle: index, ...caps(subtitles) }))
+      .subtitle.where === 'server-burn';
   assert.equal(burn(2, ['ass', 'pgs']), false);
   assert.equal(burn(3, ['ass', 'pgs']), false);
   // Without a renderer, or one for something else: burned in.
@@ -528,7 +541,7 @@ test('subtitles: burned in only where the browser cannot draw them', () => {
   assert.equal(burn(5, []), false);
   // Not burned, the video is copied.
   assert.equal(
-    select(meta, request({ subtitle: 2, ...caps(['ass']) })).mode,
+    modeOf(playbackSpec(meta, request({ subtitle: 2, ...caps(['ass']) }))),
     'direct'
   );
   assert.deepEqual(
@@ -577,7 +590,7 @@ test('metadata: fonts attached to the file', () => {
   ]);
 });
 
-test('select explains why each stream is converted', () => {
+test('the spec explains why each stream is converted', () => {
   const meta = {
     durationMs: 60000,
     tracks: [
@@ -586,24 +599,28 @@ test('select explains why each stream is converted', () => {
     ],
   };
   const caps = { video: true, audio: false, container: false, hdr: false };
-  const original = select(meta, { quality: 'original', capabilities: caps });
-  assert.equal(original.mode, 'audio');
-  assert.equal(original.videoReason, null);
-  assert.equal(original.audioReason, "browser can't decode the audio");
-  const scaled = select(meta, { quality: '720p', capabilities: caps });
-  assert.equal(scaled.mode, 'video');
-  assert.equal(scaled.videoReason, 'quality 720p');
-  const retry = select(meta, {
+  const original = playbackSpec(meta, {
+    quality: 'original',
+    capabilities: caps,
+  });
+  assert.equal(modeOf(original), 'audio');
+  assert.equal(original.video.reason, null);
+  assert.equal(original.audio.reason, "browser can't decode the audio");
+  const scaled = playbackSpec(meta, { quality: '720p', capabilities: caps });
+  assert.equal(modeOf(scaled), 'video');
+  assert.equal(scaled.video.reason, 'quality 720p');
+  assert.equal(scaled.video.encode.scale, 720);
+  const retry = playbackSpec(meta, {
     quality: 'original',
     force: true,
     capabilities: caps,
   });
-  assert.equal(retry.videoReason, 'retry after failed playback');
-  const unsupported = select(meta, {
+  assert.equal(retry.video.reason, 'retry after failed playback');
+  const unsupported = playbackSpec(meta, {
     quality: 'original',
     capabilities: { ...caps, video: false },
   });
-  assert.equal(unsupported.videoReason, "browser can't decode the video");
+  assert.equal(unsupported.video.reason, "browser can't decode the video");
 });
 test('duration falls back to stream durations and Matroska tags', () => {
   assert.equal(duration({ format: { duration: '12.5' } }), 12500);
@@ -631,24 +648,23 @@ test('probe retains chapter timestamps and track choices', () => {
   );
 });
 test('conversion policy chooses direct, remux, audio, video and burn-in', () => {
-  assert.equal(select(media, request()).mode, 'direct');
+  const mode = (r) => modeOf(playbackSpec(media, r));
+  assert.equal(mode(request()), 'direct');
   assert.equal(
-    select(
-      media,
+    mode(
       request({ capabilities: { video: true, audio: true, container: false } })
-    ).mode,
+    ),
     'remux'
   );
   assert.equal(
-    select(
-      media,
+    mode(
       request({ capabilities: { video: true, audio: false, container: false } })
-    ).mode,
+    ),
     'audio'
   );
-  assert.equal(select(media, request({ force: true })).mode, 'video');
+  assert.equal(mode(request({ force: true })), 'video');
   assert.equal(
-    select(
+    playbackSpec(
       {
         ...media,
         tracks: media.tracks.map((t) =>
@@ -656,10 +672,13 @@ test('conversion policy chooses direct, remux, audio, video and burn-in', () => 
         ),
       },
       request({ subtitle: 2 })
-    ).burn,
-    true
+    ).subtitle.where,
+    'server-burn'
   );
-  assert.throws(() => select(media, request({ audio: 99 })), /Unknown track/);
+  assert.throws(
+    () => playbackSpec(media, request({ audio: 99 })),
+    /Unknown track/
+  );
 });
 for (const [name, options] of [
   [
@@ -724,7 +743,7 @@ test('real FFmpeg: styled subtitle burn-in', async () => {
   const command = ffmpegArgs(input, meta, request({ subtitle: 2 }), output);
   await exec('ffmpeg', command.args, { timeout: 30000 });
   assert.match((await dashOutput(output)).mpd, /type="static"/);
-  assert.equal(command.policy.mode, 'video');
+  assert.equal(modeOf(command.spec), 'video');
 });
 
 test('real FFmpeg: HDR to SDR', async () => {
@@ -822,9 +841,13 @@ test('real FFmpeg: Dolby Vision profile 5 is tone-mapped through its RPU', async
     input,
   ]);
   const meta = metadata(JSON.parse(stdout));
-  assert.deepEqual(meta.tracks[0].dovi, { profile: 5, compatibility: 0 });
+  assert.deepEqual(meta.tracks[0].dovi, {
+    profile: 5,
+    compatibility: 0,
+    layers: { base: true, enhancement: false, rpu: true },
+  });
   assert.equal(meta.tracks[0].hdr, true);
-  const { args, policy } = ffmpegArgs(
+  const { args, spec } = ffmpegArgs(
     input,
     meta,
     request({
@@ -832,7 +855,7 @@ test('real FFmpeg: Dolby Vision profile 5 is tone-mapped through its RPU', async
     }),
     `${dir}/unused`
   );
-  assert.equal(policy.copyVideo, false);
+  assert.equal(spec.video.where, 'server-encode');
   const chain = args[args.indexOf('-vf') + 1];
   // The CPU chain's first frame, with the RPU applied and without: they differ
   // only if the RPU reaches the tone map through the filters before it.
@@ -874,7 +897,7 @@ test('real FFmpeg: copied video and converted audio stay in step after a seek', 
   // 15 s is 5 s past the keyframe at 10 s: the video starts there, the
   // converted audio at the seek (12 s, floored to 4 s).
   const { command, output, mpd, streams } = await convertLongGop(15000);
-  assert.equal(command.policy.mode, 'audio');
+  assert.equal(modeOf(command.spec), 'audio');
   // Browsers (MSE) apply a single edit at most. A stream's start must be in
   // its fragments' timestamps, as the manifest says, not an empty edit,
   // which they skip: that played the audio up to a keyframe interval early.
@@ -1560,4 +1583,92 @@ test('progress: out_time is read once FFmpeg has written something', () => {
   assert.equal(outTimeMs('out_time_us=N/A'), null);
   assert.equal(outTimeMs('out_time_us='), null);
   assert.equal(outTimeMs('speed=4.2x'), null);
+});
+
+test('metadata: bit depth, field order, aspect ratio, HDR10+ and Dolby Vision layers', () => {
+  const meta = metadata({
+    format: { duration: '10' },
+    streams: [
+      {
+        index: 0,
+        codec_type: 'video',
+        codec_name: 'hevc',
+        pix_fmt: 'yuv420p10le',
+        field_order: 'progressive',
+        sample_aspect_ratio: '1:1',
+        side_data_list: [
+          {
+            side_data_type: 'DOVI configuration record',
+            dv_profile: 7,
+            dv_bl_signal_compatibility_id: 6,
+            bl_present_flag: 1,
+            el_present_flag: 1,
+            rpu_present_flag: 1,
+          },
+        ],
+      },
+      {
+        index: 1,
+        codec_type: 'video',
+        codec_name: 'h264',
+        pix_fmt: 'yuv420p',
+        bits_per_raw_sample: '8',
+        field_order: 'tt',
+        sample_aspect_ratio: '32:27',
+      },
+      { index: 2, codec_type: 'audio', codec_name: 'aac' },
+    ],
+    // The first video frame, from its own probe.
+    frames: [
+      {
+        stream_index: 0,
+        side_data_list: [
+          { side_data_type: 'Mastering display metadata' },
+          { side_data_type: 'HDR Dynamic Metadata SMPTE2094-40 (HDR10+)' },
+        ],
+      },
+    ],
+  });
+  const [hevc, h264, aac] = meta.tracks;
+  assert.equal(hevc.bitDepth, 10);
+  assert.equal(hevc.fieldOrder, 'progressive');
+  assert.equal(hevc.sampleAspectRatio, '1:1');
+  assert.equal(hevc.hdr10plus, true);
+  assert.deepEqual(hevc.dovi, {
+    profile: 7,
+    compatibility: 6,
+    layers: { base: true, enhancement: true, rpu: true },
+  });
+  // Interlaced and anamorphic; no HDR10+ seen on its frames
+  assert.equal(h264.bitDepth, 8);
+  assert.equal(h264.fieldOrder, 'tt');
+  assert.equal(h264.sampleAspectRatio, '32:27');
+  assert.equal(h264.hdr10plus, false);
+  assert.equal(h264.dovi, undefined);
+  // Audio has none of them
+  assert.equal(aac.bitDepth, undefined);
+  assert.equal(aac.hdr10plus, undefined);
+});
+
+test('metadata: the Dolby Vision fixture, probed for real', async () => {
+  const raw = JSON.parse(
+    (
+      await exec('ffprobe', [
+        '-v',
+        'error',
+        '-show_format',
+        '-show_streams',
+        '-of',
+        'json',
+        new URL('./fixtures/dolby-vision-p5.mkv', import.meta.url).pathname,
+      ])
+    ).stdout
+  );
+  const [video] = metadata(raw).tracks;
+  assert.deepEqual(video.dovi, {
+    profile: 5,
+    compatibility: 0,
+    layers: { base: true, enhancement: false, rpu: true },
+  });
+  assert.equal(video.sampleAspectRatio, '1:1');
 });
