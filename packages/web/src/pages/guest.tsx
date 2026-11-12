@@ -31,6 +31,7 @@ import { NO_SERVER_INFO, ServerInfoProvider } from '../lib/server-info';
 import { PartySheet, openPartySheet } from '../components/party/party-sheet';
 import { PlayerPage } from './player';
 import { setNavigator } from '../lib/paths';
+import type { MediaSegmentDto } from '../lib/types';
 import type { EngineFactory } from '../lib/playback/engine';
 
 /**
@@ -165,13 +166,21 @@ export function GuestPage() {
   };
   // What the player page asks its server for, answered from the title playing and the queue.
   const playing = React.useRef<GuestCurrent | undefined>(undefined);
+  const api = React.useRef<GuestApi | null>(null);
+  api.current = joined?.api ?? null;
   const client = React.useMemo(
     () =>
       new GuestJellyfinClient(
         guestBase(),
         () => playing.current,
         () =>
-          (party.state()?.queue ?? []).flatMap((e) => (e.item ? [e.item] : []))
+          (party.state()?.queue ?? []).flatMap((e) => (e.item ? [e.item] : [])),
+        async () =>
+          api.current
+            ? api.current.request<{ Items: MediaSegmentDto[] }>('/segments')
+            : { Items: [] },
+        // The host's server's own image route, which serves image tags without a session.
+        `${guestBase().replace(/\/party\/guest$/, '')}/jellyfin`
       ),
     []
   );

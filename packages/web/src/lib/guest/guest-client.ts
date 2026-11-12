@@ -2,13 +2,15 @@
  * The Jellyfin client a guest's player page talks to. Guests have no account on the host's server,
  * so the requests the player page makes for its item, version, preferences and the party's titles
  * are answered here, from what the guest routes and the party already give the guest: the title
- * playing (`/current`) and the party's queue. Nothing is sent for them.
+ * playing (`/current`, with the host's artwork) and the party's queue. The host's segments come
+ * from the guest routes (`/segments`); nothing else is sent. Images load from the host's image
+ * route, which reads the image tags without a session.
  */
 import { t } from '@lingui/core/macro';
 import { JellyfinClient, JellyfinError, type Query } from '../client';
 import { forgetUser } from '../cache';
 import type { PartyItem } from '../party/items';
-import type { BaseItemDto, SourceInfo } from '../types';
+import type { BaseItemDto, MediaSegmentDto, SourceInfo } from '../types';
 import type { GuestCurrent } from './api';
 import { guestPrefs } from './track-memory';
 
@@ -20,12 +22,19 @@ const TICKS_PER_MS = 10_000;
 /** The party's titles the guest can see, by item id. */
 export type QueueItems = () => readonly PartyItem[];
 
+/** An item's image, as the player page asks for it. */
+const IMAGE = /^\/Items\/[^/]+\/Images\//;
+
 export class GuestJellyfinClient extends JellyfinClient {
   constructor(
     base: string,
     /** The title the party plays, as the guest routes last gave it. */
     private readonly playing: () => GuestCurrent | undefined,
-    private readonly queue: QueueItems
+    private readonly queue: QueueItems,
+    /** The host's segments for the title playing, from the guest routes. */
+    private readonly segments: () => Promise<{ Items: MediaSegmentDto[] }>,
+    /** Where the host's server serves item images: its Jellyfin routes. */
+    private readonly images: string
   ) {
     super(base);
     // Answered here and from nothing kept: a saved copy would open the next file on old answers.
@@ -36,11 +45,17 @@ export class GuestJellyfinClient extends JellyfinClient {
     return this;
   }
 
+  override url(path: string, query?: Query): string {
+    const url = super.url(path, query);
+    return IMAGE.test(path) ? this.images + url.slice(this.base.length) : url;
+  }
+
   /** The item the guest plays, or one of the party's other titles. */
   item(id: string): BaseItemDto | null {
     const current = this.playing();
     const queued = this.queue().find((e) => e.id === id);
-    if (current?.itemId === id) return itemOf(current.itemId, queued, current);
+    if (current?.itemId === id)
+      return { ...itemOf(current.itemId, queued, current), ...current.artwork };
     return queued ? itemOf(queued.id, queued) : null;
   }
 
@@ -64,14 +79,14 @@ export class GuestJellyfinClient extends JellyfinClient {
     path: string,
     init: { query?: Query; body?: unknown } = {}
   ): Promise<T> {
-    return this.answer(method, path, init.query ?? {}) as T;
+    return (await this.answer(method, path, init.query ?? {})) as T;
   }
 
-  private answer(
+  private async answer(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
     query: Query
-  ): unknown {
+  ): Promise<unknown> {
     const none = { Items: [], TotalRecordCount: 0 };
     if (method === 'GET' && path === '/Items') {
       // The party's titles by id; a search or listing finds nothing beyond them.
@@ -97,7 +112,13 @@ export class GuestJellyfinClient extends JellyfinClient {
       return { Id: GUEST_USER_ID, Configuration: guestPrefs() };
     if (path.startsWith('/DisplayPreferences/'))
       return method === 'GET' ? { CustomPrefs: {} } : undefined;
-    if (method === 'GET' && path.startsWith('/MediaSegments/')) return none;
+    if (method === 'GET' && path.startsWith('/MediaSegments/')) {
+      // Only the title playing has the host's; another's would be the next title's own.
+      const id = path.slice('/MediaSegments/'.length);
+      if (this.playing()?.itemId !== id) return none;
+      const { Items } = await this.segments();
+      return { Items, TotalRecordCount: Items.length };
+    }
     // The host's server keeps no playback record for a guest.
     if (method === 'POST' && path.startsWith('/Sessions/Playing'))
       return undefined;

@@ -111,4 +111,6 @@ export type {
   GuestCapabilities,
   GuestPlaybackRequest,
   GuestPlayback,
+  GuestArtwork,
+  GuestSegment,
 } from './guest.js';

@@ -30,7 +30,20 @@ const { GuestJellyfinClient } = await import('./guest-client');
 const { JellyfinError } = await import('../client');
 const { rememberTrack } = await import('./track-memory');
 
-const current = {
+const current: {
+  revision: string;
+  playlistItemId: string;
+  itemId: string;
+  title: string;
+  media: {
+    durationMs: number;
+    container: string;
+    bitrate: number;
+    tracks: never[];
+    chapters: never[];
+  };
+  artwork?: Record<string, unknown>;
+} = {
   revision: 'rev-1',
   playlistItemId: 'p1',
   itemId: 'item-1',
@@ -55,16 +68,24 @@ const queue = [
   },
   { id: 'item-2', type: 'Movie', name: 'Next One', runtimeMs: 5_400_000 },
 ];
+const hostSegments = {
+  Items: [{ Type: 'Intro', StartTicks: 0, EndTicks: 900_000_000 }],
+};
+const segmentRequests: number[] = [];
 const client = () =>
   new GuestJellyfinClient(
     'https://aio.example/party/guest',
-    () => current,
-    () => queue
+    () => current as never,
+    () => queue,
+    async () => (segmentRequests.push(1), hostSegments as never),
+    'https://aio.example/jellyfin'
   );
 
 beforeEach(() => {
   saved.clear();
   fetchSpy.mockReset();
+  segmentRequests.length = 0;
+  delete current.artwork;
 });
 
 describe("a guest's player page asking its server", () => {
@@ -137,12 +158,41 @@ describe("a guest's player page asking its server", () => {
       AudioLanguagePreference: 'jpn',
     });
   });
-  it('has no segments, show picks or playback records', async () => {
+  it("gets the host's segments for the title playing, and none for another", async () => {
     const c = client();
     expect(await c.get('/MediaSegments/item-1')).toEqual({
+      ...hostSegments,
+      TotalRecordCount: 1,
+    });
+    expect(await c.get('/MediaSegments/item-2')).toEqual({
       Items: [],
       TotalRecordCount: 0,
     });
+    expect(segmentRequests).toHaveLength(1);
+  });
+  it("gets the host's artwork on the title playing", async () => {
+    current.artwork = {
+      ImageTags: { Logo: 'l-tag' },
+      ParentLogoItemId: 'series',
+      ParentLogoImageTag: 'sl-tag',
+      Overview: 'What happens.',
+    };
+    const { Items } = await client().get<{ Items: Record<string, unknown>[] }>(
+      '/Items',
+      { Ids: 'item-1,item-2' }
+    );
+    expect(Items[0]).toMatchObject({
+      Id: 'item-1',
+      Name: 'The Second',
+      ImageTags: { Logo: 'l-tag' },
+      ParentLogoItemId: 'series',
+      ParentLogoImageTag: 'sl-tag',
+      Overview: 'What happens.',
+    });
+    expect(Items[1].ImageTags).toBeUndefined();
+  });
+  it('has no show picks or playback records', async () => {
+    const c = client();
     expect(
       await c.get('/DisplayPreferences/aiostreams-web-tracks', {
         client: 'aiostreams-web-tracks',
@@ -162,9 +212,12 @@ describe("a guest's player page asking its server", () => {
     });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
-  it('builds image addresses on its own base', () => {
+  it("loads images from the host's image route, and nothing else from there", () => {
     expect(client().url('/Items/item-1/Images/Logo', { tag: 't' })).toBe(
-      'https://aio.example/party/guest/Items/item-1/Images/Logo?tag=t'
+      'https://aio.example/jellyfin/Items/item-1/Images/Logo?tag=t'
+    );
+    expect(client().url('/Videos/item-1/stream')).toBe(
+      'https://aio.example/party/guest/Videos/item-1/stream'
     );
   });
 });

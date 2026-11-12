@@ -1,4 +1,5 @@
 import type {
+  GuestArtwork,
   GuestMedia,
   GuestPlayback,
   GuestPlaybackRequest,
@@ -9,6 +10,8 @@ export interface GuestCurrent {
   itemId: string;
   title: string;
   media: GuestMedia;
+  /** The host's artwork for it, where the host's server has the item. */
+  artwork?: GuestArtwork;
 }
 export class GuestApi {
   constructor(

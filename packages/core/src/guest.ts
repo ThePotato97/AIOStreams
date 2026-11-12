@@ -30,6 +30,27 @@ export interface GuestMedia {
   fonts?: { index: number; filename: string; mimetype: string }[];
   chapters: { title: string; startMs: number }[];
 }
+/**
+ * The host's artwork for the title playing, as the host's item has it: Jellyfin image tags, which
+ * carry each image's address, so the image route serves them without a session.
+ */
+export interface GuestArtwork {
+  ImageTags?: Record<string, string>;
+  BackdropImageTags?: string[];
+  ParentLogoItemId?: string;
+  ParentLogoImageTag?: string;
+  ParentBackdropItemId?: string;
+  ParentBackdropImageTags?: string[];
+  ParentThumbItemId?: string;
+  ParentThumbImageTag?: string;
+  Overview?: string;
+}
+/** An intro, recap or credits, as the host's segment providers have it. */
+export interface GuestSegment {
+  Type: 'Intro' | 'Recap' | 'Outro';
+  StartTicks: number;
+  EndTicks: number;
+}
 export interface GuestCapabilities {
   video: boolean;
   audio: boolean;

@@ -52,8 +52,35 @@ const fixture = vi.hoisted(() => ({
   touchStatus: 200,
   extraction: [] as { status: number; body: string }[],
   subtitleCodec: 'subrip',
+  /** The host's item, as the host's configuration builds it. */
+  hostItem: null as Record<string, unknown> | null,
+  hostUserData: {} as Record<string, unknown>,
+  segmentsEnabled: true,
+  /** What the host's segment providers find, and what they were asked. */
+  providerSegments: [] as { type: string; startMs: number; endMs: number }[],
+  segmentQueries: [] as {
+    runtimeMs?: number;
+    types?: string[];
+    key?: string;
+  }[],
 }));
 vi.mock('@aiostreams/core', () => ({
+  lookupFor: (descriptor: unknown, runtimeMs?: number) =>
+    descriptor ? { descriptor, runtimeMs } : null,
+  msToTicks: (ms: number) => ms * 10_000,
+  segmentsEnabled: () => fixture.segmentsEnabled,
+  segmentsFor: async (
+    lookup: { runtimeMs?: number },
+    opts: { pmdbApiKey?: string },
+    types?: string[]
+  ) => {
+    fixture.segmentQueries.push({
+      runtimeMs: lookup.runtimeMs,
+      types,
+      key: opts.pmdbApiKey,
+    });
+    return fixture.providerSegments;
+  },
   createLogger: () =>
     Object.fromEntries(
       ['warn', 'error', 'info', 'debug'].map((level) => [
@@ -108,10 +135,16 @@ vi.mock('../party/relay.js', () => ({
 vi.mock('../party/ticket.js', () => ({
   ticketExpiry: () => Date.now() + 60000,
 }));
+vi.mock('../routes/jellyfin/items.js', () => ({
+  itemFromDescriptor: async () => fixture.hostItem,
+}));
 vi.mock('../routes/jellyfin/playback.js', () => ({
   locate: async (req: { jf?: { scope?: () => string } }) => (
     fixture.scopes.push(req.jf?.scope?.()),
-    {}
+    {
+      ctx: { userData: fixture.hostUserData },
+      descriptor: { type: 'series', id: 'tt1', season: 1, episode: 2 },
+    }
   ),
   ensureMemo: async (_loc: unknown, opts?: { current?: boolean }) => (
     ++fixture.memoCalls,
@@ -401,6 +434,11 @@ beforeEach(() => {
   fixture.touchStatus = 200;
   fixture.extraction = [];
   fixture.subtitleCodec = 'subrip';
+  fixture.hostItem = null;
+  fixture.hostUserData = {};
+  fixture.segmentsEnabled = true;
+  fixture.providerSegments = [];
+  fixture.segmentQueries = [];
   MEDIA_TIMEOUT.headersMs = 30_000;
   vi.restoreAllMocks();
   spyFetch();
@@ -868,6 +906,85 @@ describe('guest playback authorization', () => {
       await api('/current', token);
       expect(fixture.scopes).toEqual(['owner-scope', 'guest:owner-scope']);
     });
+  });
+});
+describe("the host's artwork and segments", () => {
+  const joined = async () => {
+    const token = await guest(await invitation());
+    join(token);
+    return token;
+  };
+  it("gives a guest the host's artwork, and nothing else of the item", async () => {
+    fixture.hostItem = {
+      Id: 'item',
+      Path: 'https://debrid.example/private-token',
+      MediaSources: [{ Path: 'https://debrid.example/private-token' }],
+      ImageTags: { Primary: 'p-tag', Logo: 'l-tag' },
+      BackdropImageTags: ['b-tag'],
+      ParentLogoItemId: 'series',
+      ParentLogoImageTag: 'sl-tag',
+      Overview: 'What happens.',
+    };
+    const current = (await (await api('/current', await joined())).json()) as {
+      artwork: Record<string, unknown>;
+    };
+    expect(current.artwork).toEqual({
+      ImageTags: { Primary: 'p-tag', Logo: 'l-tag' },
+      BackdropImageTags: ['b-tag'],
+      ParentLogoItemId: 'series',
+      ParentLogoImageTag: 'sl-tag',
+      Overview: 'What happens.',
+    });
+  });
+  it('gives none where the host has no item for it', async () => {
+    const current = (await (await api('/current', await joined())).json()) as {
+      artwork: Record<string, unknown>;
+    };
+    expect(current.artwork).toEqual({});
+  });
+  it("gives the host's segments, of the types the host turned on, at the file's runtime", async () => {
+    fixture.hostUserData = {
+      pmdbApiKey: 'host-key',
+      jellyfin: { segmentTypes: ['Intro', 'Outro'] },
+    };
+    fixture.providerSegments = [
+      { type: 'Intro', startMs: 1_000, endMs: 90_000 },
+      { type: 'Recap', startMs: 90_000, endMs: 120_000 },
+      { type: 'Outro', startMs: 1_140_000, endMs: 1_200_000 },
+    ];
+    const token = await joined();
+    const current = (await (await api('/current', token)).json()) as {
+      media: { durationMs: number };
+    };
+    const response = await api('/segments', token);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      Items: [
+        { Type: 'Intro', StartTicks: 10_000_000, EndTicks: 900_000_000 },
+        { Type: 'Outro', StartTicks: 11_400_000_000, EndTicks: 12_000_000_000 },
+      ],
+    });
+    expect(fixture.segmentQueries).toEqual([
+      {
+        runtimeMs: current.media.durationMs,
+        types: ['Intro', 'Outro'],
+        key: 'host-key',
+      },
+    ]);
+    // Looked up once for every guest's request.
+    await api('/segments', token);
+    expect(fixture.segmentQueries).toHaveLength(1);
+  });
+  it('gives none where the host turned segments off', async () => {
+    fixture.hostUserData = { jellyfin: { segments: false } };
+    fixture.providerSegments = [{ type: 'Intro', startMs: 0, endMs: 1 }];
+    const response = await api('/segments', await joined());
+    expect(await response.json()).toEqual({ Items: [] });
+    expect(fixture.segmentQueries).toEqual([]);
+  });
+  it('refuses a guest without a seat', async () => {
+    const token = await guest(await invitation());
+    expect((await api('/segments', token)).status).toBe(403);
   });
 });
 describe('converted media', () => {

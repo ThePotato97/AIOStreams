@@ -10,6 +10,12 @@ import { z } from 'zod';
 import {
   config,
   createLogger,
+  lookupFor,
+  msToTicks,
+  segmentsEnabled,
+  segmentsFor,
+  type GuestArtwork,
+  type GuestSegment,
   type GuestMedia,
   type GuestPlayback,
   type MediaSourceRecord,
@@ -23,6 +29,7 @@ import {
 } from '../routes/jellyfin/context.js';
 import { jellyfinCors } from '../routes/jellyfin/cors.js';
 import { locate, ensureMemo } from '../routes/jellyfin/playback.js';
+import { itemFromDescriptor } from '../routes/jellyfin/items.js';
 import { guestPartyState } from '../party/relay.js';
 import { ticketExpiry } from '../party/ticket.js';
 import { guestSessions, randomSecret, type GuestSession } from './sessions.js';
@@ -72,6 +79,10 @@ interface Source {
   title: string;
   record: MediaSourceRecord;
   media?: Promise<GuestMedia>;
+  /** The host's item, found under the host's configuration: its artwork and segments. */
+  host?: Located;
+  artwork?: Promise<GuestArtwork>;
+  segments?: Promise<GuestSegment[]>;
   /**
    * Where the source's redirects lead, followed once. Each range request of
    * a probe or conversion goes here directly: going back through the
@@ -79,6 +90,7 @@ interface Source {
    */
   pinned?: { url: URL; headers: Record<string, string> };
 }
+type Located = NonNullable<Awaited<ReturnType<typeof locate>>>;
 const logger = createLogger('guest');
 /**
  * What went wrong, without the details that can carry secrets: source URLs
@@ -270,7 +282,9 @@ async function lookupRecord(
   entry: { itemId: string; sourceId?: string; filename?: string },
   bingeGroup?: string,
   // Guest lookups keep their own cache; a user's own playback shares theirs.
-  scope: 'guest' | 'own' = 'guest'
+  scope: 'guest' | 'own' = 'guest',
+  /** The item as the configuration has it, once found. */
+  onLocated?: (loc: Located) => void
 ): Promise<MediaSourceRecord> {
   // Sources are fetched by this server, not from the guest's public IP.
   const guestIp = req.userIp;
@@ -300,6 +314,7 @@ async function lookupRecord(
   } finally {
     req.jf = old;
   }
+  if (loc) onLocated?.(loc);
   // A named version keeps the list it was picked from, as the rest of the server's playback
   // does: its link plays as long as that list is kept, and a list run again may not have it
   // (an addon that timed out, results in another order). Only a version missing from it, or
@@ -397,11 +412,14 @@ async function current(req: Request) {
     pending = (async () => {
       const user = await userForToken(state.binding.ownerToken);
       if (!user) fail(410, 'The host session has expired');
+      let host: Located | undefined;
       const record = await lookupRecord(
         req,
         user,
         entry,
-        state.binding.bingeGroup
+        state.binding.bingeGroup,
+        'guest',
+        (loc) => (host = loc)
       );
       state.binding.bingeGroup = record.extension.bingeGroup;
       const source: Source = {
@@ -412,6 +430,7 @@ async function current(req: Request) {
         itemId: entry.itemId,
         title: entry.title,
         record,
+        host,
       };
       sources.set(source.handle, source);
       return source;
@@ -594,14 +613,97 @@ router.post('/exchange', async (req, res) => {
 });
 router.get('/current', async (req, res) => {
   const { source, media } = await current(req);
+  // Found once per title, shared by every guest's poll.
+  const artwork = await (source.artwork ??= artworkOf(source));
   res.json({
     revision: source.revision,
     playlistItemId: source.playlistItemId,
     itemId: source.itemId,
     title: source.title,
     media,
+    artwork,
   });
 });
+/** The host's intro, recap and credits for the title playing, as their own player gets them. */
+router.get('/segments', async (req, res) => {
+  const { source, media } = await current(req);
+  const segments = await (source.segments ??= segmentsOf(
+    source,
+    media.durationMs
+  ));
+  res.json({ Items: segments });
+});
+/**
+ * The host's item's artwork: image tags carry each image's address, so a guest's browser loads
+ * them from the image route without a session. None where the item can't be built.
+ */
+async function artworkOf(source: Source): Promise<GuestArtwork> {
+  if (!source.host) return {};
+  try {
+    const item = (await itemFromDescriptor(
+      source.host.ctx,
+      source.host.descriptor
+    )) as (GuestArtwork & Record<string, unknown>) | null;
+    if (!item) return {};
+    return {
+      ImageTags: item.ImageTags,
+      BackdropImageTags: item.BackdropImageTags,
+      ParentLogoItemId: item.ParentLogoItemId,
+      ParentLogoImageTag: item.ParentLogoImageTag,
+      ParentBackdropItemId: item.ParentBackdropItemId,
+      ParentBackdropImageTags: item.ParentBackdropImageTags,
+      ParentThumbItemId: item.ParentThumbItemId,
+      ParentThumbImageTag: item.ParentThumbImageTag,
+      Overview: item.Overview,
+    };
+  } catch (error) {
+    logger.warn(
+      { party: source.party, cause: errorCause(error) },
+      'guest artwork unavailable'
+    );
+    return {};
+  }
+}
+/**
+ * The host's segments for the title, by the host's configuration (its providers, the types it
+ * turned on), at the file's own runtime. None where segments are off or can't be looked up.
+ */
+async function segmentsOf(
+  source: Source,
+  runtimeMs: number
+): Promise<GuestSegment[]> {
+  const host = source.host;
+  if (!host || !segmentsEnabled()) return [];
+  const { userData } = host.ctx;
+  if (userData.jellyfin?.segments === false) return [];
+  const lookup = lookupFor(host.descriptor, runtimeMs);
+  if (!lookup) return [];
+  const configured = userData.jellyfin?.segmentTypes;
+  if (configured?.length === 0) return [];
+  try {
+    const found = await segmentsFor(
+      lookup,
+      { pmdbApiKey: userData.pmdbApiKey },
+      configured ?? undefined
+    );
+    return found
+      .filter((s) => !configured || configured.includes(s.type))
+      .filter((s): s is typeof s & { type: GuestSegment['Type'] } =>
+        ['Intro', 'Recap', 'Outro'].includes(s.type)
+      )
+      .map((s) => ({
+        Type: s.type,
+        StartTicks: msToTicks(s.startMs),
+        EndTicks: msToTicks(s.endMs),
+      }));
+  } catch (error) {
+    logger.warn(
+      { party: source.party, cause: errorCause(error) },
+      'guest segments unavailable'
+    );
+    return [];
+  }
+}
 router.post('/prepare', async (req, res) => {
   const body = playbackSchema.parse(req.body);
   const { source, session, media } = await current(req);
