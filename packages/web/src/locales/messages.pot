@@ -701,6 +701,10 @@ msgstr ""
 msgid "Back in the player"
 msgstr ""
 
+#: src/pages/guest.tsx
+msgid "Back to the party"
+msgstr ""
+
 #: src/components/version-settings.tsx
 #: src/pages/settings/interface.tsx
 #: src/pages/settings/subtitles.tsx
@@ -5677,6 +5681,10 @@ msgstr ""
 
 #: src/pages/guest.tsx
 msgid "You left the party"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "You left the party's playback."
 msgstr ""
 
 #: src/lib/party/party.ts

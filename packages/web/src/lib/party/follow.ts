@@ -53,6 +53,12 @@ const subscribe = (listener: () => void) => {
   return () => void listeners.delete(listener);
 };
 
+/** Binds the player page to what the party plays, for a page that opens it itself (a guest's). */
+export function bindPartyPlayback(binding: Binding): void {
+  followed.binding = binding;
+  changed();
+}
+
 /** Whether this device's player can follow a party; another app's can't. */
 export function canFollow(): boolean {
   return !currentHost().play && chosenPlayer().kind !== 'link';

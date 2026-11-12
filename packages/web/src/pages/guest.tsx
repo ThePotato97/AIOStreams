@@ -2,9 +2,15 @@ import { PartyLayer } from '../components/party/party-layer';
 import React from 'react';
 import { t } from '@lingui/core/macro';
 import { Button } from '@aiostreams/ui/button';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { GuestApi, guestBase, type GuestCurrent } from '../lib/guest/api';
 import { guestEngine } from '../lib/guest/engine';
+import { GuestJellyfinClient, GUEST_USER_ID } from '../lib/guest/guest-client';
+import { PlayerEngineOverride } from '../lib/guest/player-engine';
 import { partyKeys } from '../lib/party/crypto';
 import {
   party,
@@ -13,20 +19,30 @@ import {
   useParty,
   usePartyEvent,
 } from '../lib/party/party';
-import { usePartyPlayer } from '../lib/party/playback';
-import { guestPrefs, rememberingTracks } from '../lib/guest/track-memory';
-import { usePlayer } from '../lib/playback/use-player';
+import {
+  bindPartyPlayback,
+  leavePartyPlayback,
+  rejoinPartyPlayback,
+  usePartyAway,
+} from '../lib/party/follow';
+import { guestPrefs, rememberingEngine } from '../lib/guest/track-memory';
 import { GuestSessionProvider } from '../lib/session';
-import { JellyfinClient } from '../lib/client';
 import { NO_SERVER_INFO, ServerInfoProvider } from '../lib/server-info';
-import { PlayerControls } from '../components/player/controls';
 import { PartySheet, openPartySheet } from '../components/party/party-sheet';
-import type { BaseItemDto, SourceInfo } from '../lib/types';
+import { PlayerPage } from './player';
+import { setNavigator } from '../lib/paths';
+import type { EngineFactory } from '../lib/playback/engine';
 
-/** The invitation in the page's address: its party code and secret. */
-function invitation() {
+/**
+ * The invitation in the page's address: its party code and secret. Read as the page opens: the
+ * player page's navigation would replace the address's hash.
+ */
+const opened = (() => {
   const hash = new URLSearchParams(window.location.hash.slice(1));
   return { code: hash.get('code') ?? '', secret: hash.get('secret') ?? '' };
+})();
+function invitation() {
+  return opened;
 }
 
 /**
@@ -147,7 +163,26 @@ export function GuestPage() {
       setJoining(false);
     }
   };
-  const client = React.useMemo(() => new JellyfinClient(guestBase()), []);
+  // What the player page asks its server for, answered from the title playing and the queue.
+  const playing = React.useRef<GuestCurrent | undefined>(undefined);
+  const client = React.useMemo(
+    () =>
+      new GuestJellyfinClient(
+        guestBase(),
+        () => playing.current,
+        () =>
+          (party.state()?.queue ?? []).flatMap((e) => (e.item ? [e.item] : []))
+      ),
+    []
+  );
+  // The player page navigates the app's pages, which a guest has none of: the address keeps
+  // the invitation, so a reload takes the seat back.
+  React.useEffect(() => {
+    setNavigator(
+      () => {},
+      async () => {}
+    );
+  }, []);
   if (ended)
     return (
       <main className="grid min-h-screen place-items-center p-6">
@@ -182,9 +217,13 @@ export function GuestPage() {
   return (
     <ServerInfoProvider value={NO_SERVER_INFO}>
       <GuestSessionProvider client={client} name={joined.name} onLeave={leave}>
-        <GuestParty api={joined.api} client={client} onLeave={leave} />
+        <GuestParty
+          api={joined.api}
+          client={client}
+          playing={playing}
+          onLeave={leave}
+        />
         <PartySheet />
-        <PartyLayer />
       </GuestSessionProvider>
     </ServerInfoProvider>
   );
@@ -192,14 +231,17 @@ export function GuestPage() {
 function GuestParty({
   api,
   client,
+  playing,
   onLeave,
 }: {
   api: GuestApi;
-  client: JellyfinClient;
+  client: GuestJellyfinClient;
+  playing: React.MutableRefObject<GuestCurrent | undefined>;
   onLeave(): void;
 }) {
   const state = useParty();
   const entry = playingEntry(state);
+  const away = usePartyAway();
   const info = useQuery({
     queryKey: ['guest-current', api.token, entry?.playlistItemId],
     queryFn: ({ signal }) => api.current(signal),
@@ -214,145 +256,176 @@ function GuestParty({
   const last = React.useRef<GuestCurrent | undefined>(undefined);
   if (info.data) last.current = info.data;
   const current = info.data ?? last.current;
-  if (!entry || !current)
+  playing.current = current;
+  /** The quality the guest chose, kept from one title to the next. */
+  const [quality, setQuality] = React.useState<GuestQuality>('original');
+  if (!entry || !current || current.playlistItemId !== entry.playlistItemId)
     return (
-      <main className="grid min-h-screen place-items-center p-6">
-        <div className="space-y-4 text-center">
-          <p>
-            {info.error
-              ? (info.error as Error).message
-              : t`Waiting for the host to choose a title…`}
-          </p>
-          <Button
-            intent="gray-outline"
-            onClick={() => openPartySheet()}
-          >{t`Watch party`}</Button>
-        </div>
-      </main>
+      <Waiting
+        message={
+          info.error
+            ? (info.error as Error).message
+            : t`Waiting for the host to choose a title…`
+        }
+      />
+    );
+  if (away)
+    return (
+      <Waiting
+        message={t`You left the party's playback.`}
+        action={{ label: t`Back to the party`, run: rejoinPartyPlayback }}
+      />
     );
   return (
     <GuestPlayer
+      key={current.revision}
       api={api}
       client={client}
       current={current}
-      onLeave={onLeave}
+      quality={quality}
+      onQuality={setQuality}
     />
   );
 }
+
+function Waiting({
+  message,
+  action,
+}: {
+  message: string;
+  action?: { label: string; run(): void };
+}) {
+  return (
+    <main className="grid min-h-screen place-items-center p-6">
+      <div className="space-y-4 text-center">
+        <p>{message}</p>
+        <div className="flex justify-center gap-2">
+          {action && (
+            <Button intent="white" onClick={action.run}>
+              {action.label}
+            </Button>
+          )}
+          <Button intent="gray-outline" onClick={() => openPartySheet()}>
+            {t`Watch party`}
+          </Button>
+        </div>
+      </div>
+      <PartyLayer />
+    </main>
+  );
+}
+
+type GuestQuality = 'original' | '1080p' | '720p';
+
+/**
+ * The party's title on the app's own player page, with the guest engine: it plays what the guest
+ * routes prepare, and the page's requests to its server are answered by the guest's client.
+ */
 function GuestPlayer({
   api,
   client,
   current,
-  onLeave,
+  quality,
+  onQuality,
 }: {
   api: GuestApi;
-  client: JellyfinClient;
+  client: GuestJellyfinClient;
   current: GuestCurrent;
-  onLeave(): void;
+  quality: GuestQuality;
+  onQuality(quality: GuestQuality): void;
 }) {
-  const state = useParty();
-  const details = state?.queue.find(
-    (e) => e.playlistItemId === current.playlistItemId
-  )?.item;
-  const video = React.useRef<HTMLVideoElement>(null);
+  const queryClient = useQueryClient();
   const [mode, setMode] = React.useState('');
+  const [loaded, setLoaded] = React.useState(false);
   const [unlocked, setUnlocked] = React.useState(false);
   const currentRef = React.useRef(current);
   currentRef.current = current;
+  /** The player page's video, handed to the engine. */
+  const video = React.useRef<React.RefObject<HTMLVideoElement | null> | null>(
+    null
+  );
+  const setEngineQuality = React.useRef<(q: GuestQuality) => void>(() => {});
   const startMs = React.useMemo(() => {
     const state = party.state();
     return state?.timeline
       ? positionAt(state.timeline, party.clock()?.now() ?? Date.now())
       : 0;
-  }, [current.revision]);
-  const [engine] = React.useState(() =>
-    guestEngine(video, api, () => currentRef.current, setMode)
-  );
-  const item = React.useMemo<BaseItemDto>(
-    () => ({
-      Id: current.itemId,
-      Name: current.title,
-      Type: details?.type === 'Episode' ? 'Episode' : 'Movie',
-      SeriesName: details?.seriesName,
-      ParentIndexNumber: details?.season,
-      IndexNumber: details?.episode,
-      RunTimeTicks: current.media.durationMs * 10000,
-    }),
-    [current.itemId, current.title, current.media.durationMs, details]
-  );
-  const source = React.useMemo<SourceInfo>(
-    () => ({
-      Id: current.revision,
-      RunTimeTicks: current.media.durationMs * 10000,
-      MediaStreams: [],
-    }),
-    [current.revision, current.media.durationMs]
-  );
-  const own = usePlayer(engine.factory, {
-    client,
-    item,
-    source,
-    url: current.revision,
-    startMs,
-    startPaused: true,
-    // the track languages this guest last picked, read as each file opens
-    prefs: guestPrefs(),
-    onEnded: () => {
-      const state = party.state();
-      if (!state) return;
-      party.request(
-        state.queue.length > state.playingIndex + 1
-          ? { type: 'NextItem', playlistItemId: current.playlistItemId }
-          : { type: 'Stop' }
+  }, []);
+  // The player page plays the party's title as the party's: paused until the party plays,
+  // following it, stepping through its queue.
+  const [bound, setBound] = React.useState(false);
+  React.useLayoutEffect(() => {
+    const source = client.source();
+    if (!source) return;
+    bindPartyPlayback({
+      playlistItemId: current.playlistItemId,
+      itemId: current.itemId,
+      source,
+    });
+    setBound(true);
+  }, [client, current.playlistItemId, current.itemId]);
+  // Its Back leaves the party's playback, going back in the browser's history: an entry of
+  // this page's own keeps the guest here, and the browser's own Back does the same.
+  React.useEffect(() => {
+    if (window.history.state?.guestPlayer !== true)
+      window.history.pushState(
+        { ...window.history.state, guestPlayer: true },
+        '',
+        window.location.href
       );
-    },
-  });
-  const partyPlayer = usePartyPlayer(own, current.playlistItemId);
-  const player = React.useMemo(
-    () => rememberingTracks(partyPlayer),
-    [partyPlayer]
+    const left = () => leavePartyPlayback();
+    window.addEventListener('popstate', left);
+    return () => window.removeEventListener('popstate', left);
+  }, []);
+  const choice = React.useMemo(
+    () => ({
+      engine(ref: React.RefObject<HTMLVideoElement | null>) {
+        video.current = ref;
+        const inner = guestEngine(ref, api, () => currentRef.current, setMode);
+        setEngineQuality.current = inner.setQuality;
+        // The engine takes a quality once the player page has made it, before it loads.
+        const withQuality: EngineFactory = (emit, opts) => {
+          const engine = inner.factory(emit, opts);
+          inner.setQuality(quality);
+          return engine;
+        };
+        return rememberingEngine(
+          withQuality,
+          () => currentRef.current,
+          () => setLoaded(true),
+          () =>
+            queryClient.setQueryData(
+              ['jf', client.base, GUEST_USER_ID, 'configuration'],
+              guestPrefs()
+            )
+        );
+      },
+    }),
+    // Made once per title, as the player page makes its engine once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   );
-  const at = state?.playingIndex ?? 0;
+  if (!bound) return null;
   return (
-    <main className="fixed inset-0 bg-black">
-      <video ref={video} playsInline className="h-full w-full object-contain" />
-      <PlayerControls
-        item={item}
-        player={player}
-        segments={null}
-        onBack={onLeave}
-        onParty={() => openPartySheet()}
-        onPrevious={
-          at > 0
-            ? () =>
-                party.request({
-                  type: 'PreviousItem',
-                  playlistItemId: current.playlistItemId,
-                })
-            : undefined
-        }
-        onNext={
-          state && at < state.queue.length - 1
-            ? () =>
-                party.request({
-                  type: 'NextItem',
-                  playlistItemId: current.playlistItemId,
-                })
-            : undefined
-        }
+    <PlayerEngineOverride.Provider value={choice}>
+      <PlayerPage
+        itemId={current.itemId}
+        sourceId={current.revision}
+        startMs={startMs}
+        mini={false}
       />
-      <div className="absolute left-4 top-4 z-20 flex items-center gap-2 rounded-lg bg-black/70 p-2 text-sm">
+      <div className="fixed left-1/2 top-[calc(1rem+env(safe-area-inset-top))] z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg bg-black/70 p-2 text-sm">
         <label>
           {t`Quality`}{' '}
           <select
             aria-label={t`Quality`}
             className="rounded bg-neutral-800 p-1"
-            defaultValue="original"
-            onChange={(event) =>
-              engine.setQuality(
-                event.target.value as 'original' | '1080p' | '720p'
-              )
-            }
+            value={quality}
+            onChange={(event) => {
+              const next = event.target.value as GuestQuality;
+              onQuality(next);
+              setEngineQuality.current(next);
+            }}
           >
             <option value="original">{t`Original`}</option>
             <option value="1080p">1080p</option>
@@ -367,23 +440,23 @@ function GuestPlayer({
               : ''}
         </span>
       </div>
-      {!unlocked && own.state.loaded && (
-        <div className="absolute inset-0 z-30 grid place-items-center bg-black/50">
+      {!unlocked && loaded && (
+        <div className="fixed inset-0 z-20 grid place-items-center bg-black/50">
           <Button
             intent="white"
             onClick={() => {
-              void video.current
+              const el = video.current?.current;
+              void el
                 ?.play()
                 .then(() => {
                   setUnlocked(true);
-                  if (party.state()?.timeline?.playing === false)
-                    video.current?.pause();
+                  if (party.state()?.timeline?.playing === false) el.pause();
                 })
                 .catch(() => {});
             }}
           >{t`Play`}</Button>
         </div>
       )}
-    </main>
+    </PlayerEngineOverride.Provider>
   );
 }

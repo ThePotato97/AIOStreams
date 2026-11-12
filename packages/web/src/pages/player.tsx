@@ -106,6 +106,7 @@ import { indexForTrack } from '../lib/remote/tracks';
 import { useLatest } from '../lib/use-latest';
 import { openPartySheet } from '../components/party/party-sheet';
 import { usePlaylistEdits, usePlaylistName } from '../lib/playlists';
+import { PlayerEngineOverride } from '../lib/guest/player-engine';
 
 interface PlayerProps {
   mini: boolean;
@@ -606,7 +607,10 @@ function Player({
 }: PlayerProps) {
   const { client } = useSession();
   const video = React.useRef<HTMLVideoElement>(null);
-  const [hostPlayer] = React.useState(() => currentHost().player);
+  const override = React.useContext(PlayerEngineOverride);
+  const [hostPlayer] = React.useState(() =>
+    override ? undefined : currentHost().player
+  );
   const close = React.useRef<() => void>(undefined);
   const ended = useEnded(item, mini, () => close.current?.());
   const { connect } = ended;
@@ -622,7 +626,7 @@ function Player({
     stopEnded();
   }, [playlistItemId, stopEnded]);
   const minimise =
-    canMinimise() && !launched
+    canMinimise() && !launched && !override
       ? () => minimisePlayback(to.item(item.Id!))
       : undefined;
   React.useEffect(() => {
@@ -664,10 +668,11 @@ function Player({
       !hostPlayer && !local?.local && !youTube && audioNeedsConversion(source)
   );
   // Made once, like the player that owns it.
-  const [engine] = React.useState(
-    () =>
-      hostPlayer ??
-      (convert ? convertingEngine(video, client) : videoEngine(video))
+  const [engine] = React.useState(() =>
+    override
+      ? override.engine(video, client)
+      : (hostPlayer ??
+        (convert ? convertingEngine(video, client) : videoEngine(video)))
   );
   const own = usePlayer(engine, {
     client,
@@ -728,7 +733,8 @@ function Player({
     playlist,
   });
   connect(next);
-  const switchVersion = useSwitchVersion(item, source, player, next.playlist);
+  const versions = useSwitchVersion(item, source, player, next.playlist);
+  const switchVersion = override ? undefined : versions;
   const together = () =>
     openPartySheet(
       inParty
