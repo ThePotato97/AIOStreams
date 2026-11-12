@@ -1060,6 +1060,18 @@ describe('headphones', () => {
     expect(asked.headphones).toEqual([false, true, false]);
     expect(prepares).toHaveLength(3);
   });
+  it('sends only the newest prepare when the setting is read while the first asks the browser', async () => {
+    const { engine, api } = setup();
+    // As a file opens: the setting loads while the first prepare is still asking the browser.
+    engine.load({ startMs: 0, paused: false } as unknown as EngineFile);
+    headphones.listener!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    // Sent after the newer one, the first would reach the server last and replace it.
+    expect(asked.headphones).toEqual([false, true]);
+    expect(prepares).toHaveLength(1);
+    const [, signal] = vi.mocked(api.prepare).mock.calls[0];
+    expect(signal?.aborted).toBe(false);
+  });
   it('leaves stereo, and audio that is not converted, alone', async () => {
     const { engine } = setup();
     await start(engine);

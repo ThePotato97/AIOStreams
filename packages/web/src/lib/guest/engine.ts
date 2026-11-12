@@ -616,6 +616,8 @@ export function guestEngine(
       const at = ++generation;
       controller?.abort();
       controller = new AbortController();
+      // This request's own: `controller` is the newest request's by the time this one's awaits end.
+      const signal = controller.signal;
       tries = { network: 0, media: 0 };
       preparing = true;
       target = positionMs;
@@ -640,6 +642,9 @@ export function guestEngine(
           ...(noBinaural ? { binaural: false } : {}),
           dovi: noDovi ? undefined : probed.dovi,
         };
+        // A newer prepare started while this one asked the browser (the headphones setting read
+        // as a file opens does): sent now, this one would reach the server after it and replace it.
+        if (at !== generation) return;
         const result = await api.prepare(
           {
             revision: info.revision,
@@ -650,7 +655,7 @@ export function guestEngine(
             force,
             capabilities,
           },
-          controller.signal
+          signal
         );
         if (at !== generation) return;
         supersededTries = 0;
@@ -675,11 +680,10 @@ export function guestEngine(
           // Rendered on the server or here: either way no virtualiser on top.
           binaural: !!result.binaural || !!result.clientBinaural,
         });
-        if (result.subtitleUrl)
-          void attachSubtitle(result, at, controller.signal);
+        if (result.subtitleUrl) void attachSubtitle(result, at, signal);
         listTracks();
       } catch (error) {
-        if (at !== generation || controller.signal.aborted) return;
+        if (at !== generation || signal.aborted) return;
         const { status, message, retryAfter, code } = error as Error & {
           status?: number;
           retryAfter?: number;
@@ -692,7 +696,6 @@ export function guestEngine(
           retryAfter != null &&
           waitedMs + ms <= CAPACITY_WAIT_MS
         ) {
-          const signal = controller.signal;
           preparing = false;
           void sleep(ms, signal)
             .then(() => {
