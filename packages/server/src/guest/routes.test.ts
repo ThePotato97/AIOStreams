@@ -9,6 +9,7 @@ import {
 } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
+import type { GuestPlaybackSpec } from '@aiostreams/core';
 
 const fixture = vi.hoisted(() => ({
   enabled: true,
@@ -42,6 +43,7 @@ const fixture = vi.hoisted(() => ({
     mode: string;
     id?: string;
     binaural?: boolean;
+    spec?: GuestPlaybackSpec;
   },
   segment: 'slow' as 'slow' | 'silent',
   segmentAborts: 0,
@@ -1010,14 +1012,38 @@ describe('converted media', () => {
           binaural,
         },
       });
+    type Answer = { spec: GuestPlaybackSpec };
+    // A transcoder that sends only its older flags: the spec is made from them.
     fixture.prepared = { mode: 'audio', id: 'job-binaural', binaural: true };
-    const rendered = (await (await ask(true)).json()) as { binaural?: boolean };
+    const rendered = (await (await ask(true)).json()) as Answer;
     expect(fixture.prepareCapabilities.at(-1)?.binaural).toBe(true);
-    expect(rendered.binaural).toBe(true);
+    expect(rendered.spec.audio?.where).toBe('server-render');
     // the transcoder didn't render it (a fallback, or a track it doesn't read)
     fixture.prepared = { mode: 'audio', id: 'job-plain' };
-    const plain = (await (await ask(true)).json()) as { binaural?: boolean };
-    expect(plain.binaural).toBeUndefined();
+    const plain = (await (await ask(true)).json()) as Answer;
+    expect(plain.spec.audio?.where).toBe('server-convert');
+    // A transcoder's own spec is passed on as it is.
+    const spec: GuestPlaybackSpec = {
+      video: {
+        track: 0,
+        where: 'server-copy',
+        encode: null,
+        picture: 'dovi',
+        reason: null,
+      },
+      audio: {
+        track: 1,
+        where: 'server-render',
+        pageRenders: false,
+        render: { mode: 'near' },
+        output: { codec: 'flac', bitrate: null, layout: null, channels: null },
+        reason: 'binaural rendering',
+      },
+      subtitle: null,
+    };
+    fixture.prepared = { mode: 'audio', id: 'job-spec', spec };
+    const sent = (await (await ask(true)).json()) as Answer;
+    expect(sent.spec).toEqual(spec);
   });
   async function ownSegment() {
     fixture.prepared = { mode: 'audio', id: 'job-1' };

@@ -8,6 +8,9 @@ export function subtitleKind(codec) {
   if (['subrip', 'webvtt', 'mov_text', 'text'].includes(codec)) return 'text';
   if (codec === 'ass' || codec === 'ssa') return 'ass';
   if (codec === 'hdmv_pgs_subtitle') return 'pgs';
+  // Bitmaps the page doesn't draw yet: burned in until it does.
+  if (codec === 'dvd_subtitle') return 'vobsub';
+  if (codec === 'dvb_subtitle') return 'dvb';
   return null;
 }
 const FONT_FILE = /\.(ttf|otf|ttc|woff2?)$/i;
@@ -36,6 +39,10 @@ export function metadata(raw) {
         channels: s.channels,
         sampleRate: Number(s.sample_rate || 48000),
         pixelFormat: s.pix_fmt,
+        bitDepth: bitDepth(s),
+        // progressive, or the field order of interlaced video (tt, bb, tb, bt)
+        fieldOrder: s.field_order,
+        sampleAspectRatio: s.sample_aspect_ratio,
         transfer: s.color_transfer,
         rotation: rotation(s),
         dovi: dovi(s),
@@ -101,6 +108,14 @@ function dovi(s) {
         compatibility: Number(record.dv_bl_signal_compatibility_id),
       }
     : undefined;
+}
+/** Bits per sample of a video stream, from FFmpeg's count or its pixel format's name. */
+function bitDepth(s) {
+  if (s.codec_type !== 'video') return undefined;
+  const raw = Number(s.bits_per_raw_sample);
+  if (Number.isInteger(raw) && raw > 0) return raw;
+  const named = /p(\d+)(le|be)$/.exec(s.pix_fmt ?? '');
+  return named ? Number(named[1]) : s.pix_fmt ? 8 : undefined;
 }
 /** Degrees the display matrix rotates the picture by, 0 without one. */
 function rotation(s) {
@@ -208,7 +223,51 @@ export function firstPacketTime(text) {
   }
   return null;
 }
-export function select(meta, request) {
+/**
+ * @typedef {object} VideoSpec
+ * @property {number} track
+ * @property {'page-original'|'server-copy'|'server-encode'} where Later: 'page-demux'.
+ * @property {null | {codec: 'h264', range: 'sdr', tonemap: 'none'|'server',
+ *   deinterlace: false, height: number|null, maxBitrate: string|null}} encode
+ *   Later: codec 'hevc10'|'av1', range 'hdr10', deinterlace true.
+ * @property {'none'|'dovi'} picture What the page draws over the video. Later: 'tonemap-sdr'.
+ * @property {string|null} reason Why it isn't copied, for /health.
+ *
+ * @typedef {object} AudioSpec
+ * @property {number} track
+ * @property {'page-original'|'server-copy'|'server-convert'|'server-render'} where
+ * @property {boolean} pageRenders Copied for the page to render (binaural or speakers) itself.
+ * @property {null | {mode: 'near'|'far'|null}} render Rendered to binaural here.
+ * @property {null | {codec: 'flac'|'aac', bitrate: string|null, layout: string|null,
+ *   channels: number|null}} output What a server conversion or render writes.
+ * @property {string|null} reason
+ *
+ * @typedef {object} SubtitleSpec
+ * @property {number} track
+ * @property {'page'|'server-burn'} where Later: page drawing VobSub and DVB.
+ * @property {string|null} kind
+ *
+ * @typedef {object} PlaybackSpec
+ * @property {VideoSpec|null} video
+ * @property {AudioSpec|null} audio
+ * @property {SubtitleSpec|null} subtitle
+ */
+
+/** What the page asks to draw itself: the `picture` list, or the older `dovi` flag. */
+const drawsDovi = (caps) =>
+  caps.dovi === true ||
+  (Array.isArray(caps.picture) && caps.picture.includes('dovi'));
+
+const QUALITY_HEIGHT = { '720p': 720, '1080p': 1080 };
+const QUALITY_BITRATE = { '720p': '4M', '1080p': '8M' };
+
+/**
+ * Where each stream's work happens and what it outputs, from the media and what the player
+ * can do. Every later option (HDR output, the page tone-mapping or demuxing, more subtitle
+ * formats) is a value of these fields; the decisions below choose only what's built.
+ * @returns {{spec: PlaybackSpec, video: any, audio: any, subtitle: any, audios: any[]}}
+ */
+export function playbackSpec(meta, request) {
   const video = meta.tracks.find((t) => t.type === 'video');
   const audios = meta.tracks.filter((t) => t.type === 'audio');
   const audio =
@@ -244,9 +303,9 @@ export function select(meta, request) {
     (!video.hdr || caps.hdr === true) &&
     // Profile 5 shown as HDR10 has the wrong colours, so it's converted unless the player draws
     // Dolby Vision itself (from the RPUs).
-    (video.dovi?.profile !== 5 || caps.dovi === true);
+    (video.dovi?.profile !== 5 || drawsDovi(caps));
   // Dolby Vision copied with its RPUs for the player to draw
-  const dovi = copyVideo && !!video.dovi && caps.dovi === true;
+  const dovi = copyVideo && !!video.dovi && drawsDovi(caps);
   // A track the renderer (atmos-render, Dolby Atmos for Headphones' renderer) reads: TrueHD,
   // E-AC-3, AC-3 or DTS at 48 kHz.
   const renderable =
@@ -303,30 +362,124 @@ export function select(meta, request) {
           : request.force
             ? 'retry after failed playback'
             : "browser can't decode the audio";
+  // The listener's headphone mode where it's rendered here ('near' or 'far'; null: as mixed).
+  const binauralMode =
+    binaural && Object.hasOwn(RENDER_MODES, caps.binauralMode ?? '')
+      ? caps.binauralMode
+      : null;
+  /** @type {PlaybackSpec} */
+  const spec = {
+    video: video
+      ? {
+          track: video.index,
+          where: direct
+            ? 'page-original'
+            : copyVideo
+              ? 'server-copy'
+              : 'server-encode',
+          encode: copyVideo
+            ? null
+            : {
+                codec: 'h264',
+                range: 'sdr',
+                tonemap: video.hdr ? 'server' : 'none',
+                deinterlace: false,
+                height: QUALITY_HEIGHT[request.quality] ?? null,
+                maxBitrate: QUALITY_BITRATE[request.quality] ?? null,
+              },
+          picture: dovi ? 'dovi' : 'none',
+          reason: videoReason,
+        }
+      : null,
+    audio: audio
+      ? {
+          track: audio.index,
+          where: direct
+            ? 'page-original'
+            : copyAudio
+              ? 'server-copy'
+              : binaural
+                ? 'server-render'
+                : 'server-convert',
+          pageRenders: clientBinaural,
+          render: binaural ? { mode: binauralMode } : null,
+          output: copyAudio ? null : audioOutput(audio, caps, binaural),
+          reason: audioReason,
+        }
+      : null,
+    subtitle: subtitle
+      ? {
+          track: subtitle.index,
+          where: burn ? 'server-burn' : 'page',
+          kind: kind ?? null,
+        }
+      : null,
+  };
+  return { spec, video, audio, subtitle, audios };
+}
+
+/**
+ * What a server conversion writes. Rendered binaural is already stereo: FLAC where the browser
+ * plays it, else AAC. Otherwise surround stays surround where wanted (a surround output, or the
+ * player's virtual surround for headphones): lossless FLAC at the source's layout, up to 7.1,
+ * where the browser plays it, else 5.1 AAC (AAC's own 7.1 places its extra pair as front
+ * wides). The browser downmixes to the speakers there are.
+ */
+function audioOutput(audio, caps, binaural) {
+  if (binaural)
+    return caps.lossless === true
+      ? { codec: 'flac', bitrate: null, layout: null, channels: null }
+      : { codec: 'aac', bitrate: '192k', layout: null, channels: null };
+  const channels = audio.channels ?? 2;
+  const surround = caps.surround === true && channels > 2;
+  const lossless = surround && caps.lossless === true;
+  const layout = !surround
+    ? 'stereo'
+    : lossless && channels > 6
+      ? '7.1'
+      : '5.1';
   return {
-    videoReason,
-    audioReason,
-    mode: direct
-      ? 'direct'
-      : copyVideo
-        ? copyAudio || !audio
-          ? 'remux'
-          : 'audio'
-        : 'video',
+    codec: lossless ? 'flac' : 'aac',
+    bitrate: lossless ? null : surround ? '384k' : '192k',
+    layout,
+    channels: { stereo: 2, 5.1: 6, 7.1: 8 }[layout],
+  };
+}
+
+/**
+ * The spec as the flags the conversion code reads. `mode` names the job for /health and the
+ * player: the original file (`direct`), both streams copied (`remux`), only the audio
+ * converted (`audio`), or the video converted (`video`).
+ */
+export function select(meta, request) {
+  const { spec, video, audio, subtitle } = playbackSpec(meta, request);
+  const copyVideo = !!spec.video && spec.video.where !== 'server-encode';
+  const copyAudio =
+    !!spec.audio &&
+    (spec.audio.where === 'server-copy' ||
+      spec.audio.where === 'page-original');
+  return {
+    spec,
+    videoReason: spec.video?.reason ?? null,
+    audioReason: spec.audio?.reason ?? null,
+    mode:
+      spec.video?.where === 'page-original'
+        ? 'direct'
+        : copyVideo
+          ? copyAudio || !audio
+            ? 'remux'
+            : 'audio'
+          : 'video',
     video,
     audio,
     subtitle,
-    burn,
-    copyVideo,
+    burn: spec.subtitle?.where === 'server-burn',
+    copyVideo: !!video && copyVideo,
     copyAudio,
-    binaural,
-    clientBinaural,
-    // The listener's headphone mode where it's rendered here ('near' or 'far'; null: as mixed).
-    binauralMode:
-      binaural && Object.hasOwn(RENDER_MODES, caps.binauralMode ?? '')
-        ? caps.binauralMode
-        : null,
-    dovi,
+    binaural: spec.audio?.where === 'server-render',
+    clientBinaural: !!spec.audio?.pageRenders,
+    binauralMode: spec.audio?.render?.mode ?? null,
+    dovi: spec.video?.picture === 'dovi',
   };
 }
 /*
@@ -473,13 +626,9 @@ export function ffmpegArgs(
     // Browsers and Safari's player expect HEVC tagged hvc1.
     if (policy.video?.codec === 'hevc') args.push('-tag:v', 'hvc1');
   } else {
-    const height =
-      request.quality === '720p'
-        ? 720
-        : request.quality === '1080p'
-          ? 1080
-          : null;
-    const hdr = !!policy.video?.hdr;
+    const encode = policy.spec.video.encode;
+    const height = encode.height;
+    const hdr = encode.tonemap === 'server';
     if (gpuDecode) {
       // Jellyfin's GetNvidiaVidFiltersPrefered with NVDEC and NVENC.
       const size = height
@@ -526,15 +675,16 @@ export function ffmpegArgs(
     if (codec === 'h264_nvenc')
       args.push('-preset', 'p4', '-cq', '20', '-forced-idr', '1');
     if (codec === 'h264_vaapi' && !height) args.push('-qp', '20');
-    if (height) {
-      const bitrate = height === 720 ? '4M' : '8M';
+    if (encode.maxBitrate) {
+      // A buffer of two seconds at the cap.
+      const bufsize = `${parseInt(encode.maxBitrate, 10) * 2}M`;
       args.push(
         '-b:v',
-        bitrate,
+        encode.maxBitrate,
         '-maxrate',
-        bitrate,
+        encode.maxBitrate,
         '-bufsize',
-        height === 720 ? '8M' : '16M'
+        bufsize
       );
     }
     args.push(
@@ -557,38 +707,23 @@ export function ffmpegArgs(
     if (policy.copyVideo && policy.video?.dovi && !policy.dovi)
       args.push('-bsf:v', 'dovi_rpu=strip=1');
   }
-  if (policy.binaural) {
-    // Already stereo for headphones: FLAC where the browser plays it, else AAC.
+  const audioOut = policy.spec.audio?.output;
+  if (audioOut) {
+    // A conversion's layout: continuous where the source's audio has gaps, and downmixed
+    // without clipping, as Plex does (a plain -ac 2 peaks over 0 dBFS). A binaural render is
+    // stereo already.
+    if (audioOut.layout)
+      args.push(
+        '-af',
+        `aresample=async=1:ochl=${audioOut.layout}:rematrix_maxval=1`,
+        '-ac',
+        String(audioOut.channels)
+      );
     args.push(
-      ...(request.capabilities?.lossless === true
-        ? ['-c:a', 'flac', '-sample_fmt', 's32']
-        : ['-b:a', '192k'])
-    );
-  } else if (policy.audio && !policy.copyAudio) {
-    // Surround stays surround where wanted (a surround output, or the
-    // player's virtual surround for headphones): lossless FLAC at the
-    // source's layout, up to 7.1, where the browser plays it, else 5.1 AAC
-    // (AAC's own 7.1 places its extra pair as front wides). The browser
-    // downmixes to the speakers there are.
-    const channels = policy.audio.channels ?? 2;
-    const surround = request.capabilities?.surround === true && channels > 2;
-    const lossless = surround && request.capabilities?.lossless === true;
-    const layout = !surround
-      ? 'stereo'
-      : lossless && channels > 6
-        ? '7.1'
-        : '5.1';
-    args.push(
-      '-af',
-      // Continuous where the source's audio has gaps, and downmixed without
-      // clipping, as Plex does: a plain -ac 2 peaks over 0 dBFS.
-      `aresample=async=1:ochl=${layout}:rematrix_maxval=1`,
-      '-ac',
-      String({ stereo: 2, 5.1: 6, 7.1: 8 }[layout]),
-      ...(lossless
+      ...(audioOut.codec === 'flac'
         ? // 24-bit, as TrueHD and DTS-HD MA decode to.
           ['-c:a', 'flac', '-sample_fmt', 's32']
-        : ['-b:a', surround ? '384k' : '192k'])
+        : ['-b:a', audioOut.bitrate])
     );
   }
   args.push(

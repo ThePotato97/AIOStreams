@@ -348,6 +348,8 @@ function startMain(job, encoder, gpu, extra) {
   job.mode = command.policy.mode;
   job.clientBinaural = command.policy.clientBinaural;
   job.dovi = command.policy.dovi;
+  // What this conversion makes, after any fallback (no binaural, the CPU): the player follows it.
+  job.spec = command.policy.spec;
   job.audioCodec = audioCodec(command.policy);
   job.reasons = {
     video: command.policy.videoReason,
@@ -500,7 +502,8 @@ async function admit(body, meta) {
     throw Error('Invalid viewer');
   const policy = select(meta, request);
   if (!policy.video) throw Error('Source has no video');
-  if (policy.mode === 'direct') return { mode: 'direct', meta };
+  if (policy.mode === 'direct')
+    return { mode: 'direct', spec: policy.spec, meta };
   const key = hash([
     input,
     request.quality,
@@ -614,6 +617,8 @@ async function whenReady(job, meta) {
     clientBinaural: !!job.clientBinaural,
     // Dolby Vision copied with its RPUs for the player to draw.
     dovi: !!job.dovi,
+    // Where each stream's work happens, as this job does it.
+    spec: job.spec,
     meta,
   };
 }

@@ -205,14 +205,49 @@ let prepares: {
 /** What the server answers each prepare with, besides the stream. */
 let answer: (body: (typeof prepares)[number]) => Record<string, unknown>;
 let touch: () => Promise<unknown>;
+/** The spec a server sends, from the flags a test answers with. */
+function specOf(flags: Record<string, unknown>, mode: string) {
+  return {
+    video: {
+      track: 0,
+      where:
+        mode === 'direct'
+          ? 'page-original'
+          : mode === 'video'
+            ? 'server-encode'
+            : 'server-copy',
+      encode: null,
+      picture: flags.dovi ? 'dovi' : 'none',
+      reason: null,
+    },
+    audio: {
+      track: 1,
+      where:
+        mode === 'direct'
+          ? 'page-original'
+          : flags.binaural
+            ? 'server-render'
+            : flags.clientBinaural || mode === 'remux'
+              ? 'server-copy'
+              : 'server-convert',
+      pageRenders: !!flags.clientBinaural,
+      render: flags.binaural ? { mode: null } : null,
+      output: null,
+      reason: null,
+    },
+    subtitle: null,
+  };
+}
 let mode: string;
 function setup(options: Parameters<typeof guestEngine>[4] = {}) {
   const events: { type: string; error?: string; retry?: unknown }[] = [];
   const api = {
     prepare: vi.fn(async (body: (typeof prepares)[number]) => {
       prepares.push(body);
+      const flags = answer(body);
       return {
-        ...answer(body),
+        ...flags,
+        spec: specOf(flags, mode),
         mode,
         url: `/party/guest/media/${mode === 'direct' ? 'original' : 'job/manifest.mpd'}?token=t&lease=l`,
         offsetMs: 0,
@@ -902,6 +937,7 @@ describe('a subtitle still being extracted', () => {
     await start(engine);
     vi.mocked(api.prepare).mockResolvedValueOnce({
       mode: 'audio',
+      spec: specOf({}, 'audio'),
       url: '/party/guest/media/job/manifest.mpd?token=t&lease=l',
       subtitleUrl: '/party/guest/subtitle/3?token=t&lease=l',
       offsetMs: 0,
@@ -929,6 +965,7 @@ describe('ASS and PGS drawn in the browser', () => {
     await start(engine);
     vi.mocked(api.prepare).mockResolvedValue({
       mode: 'direct',
+      spec: specOf({}, 'direct'),
       url: '/party/guest/media/original?token=t&lease=l',
       offsetMs: 0,
       lease: 'l'.repeat(43),

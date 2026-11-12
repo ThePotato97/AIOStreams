@@ -111,6 +111,14 @@ const SHAKA_CONFIG = {
 const UNWRITTEN_WAIT_MS = 60_000;
 /** The longest a full transcoder is waited for before reporting it. */
 const CAPACITY_WAIT_MS = 5 * 60_000;
+/** The server renders this playback's audio to binaural. */
+const serverRenders = (p: GuestPlayback | null) =>
+  p?.spec?.audio?.where === 'server-render';
+/** The audio was copied for this page to render (binaural or speakers). */
+const pageRenders = (p: GuestPlayback | null) => !!p?.spec?.audio?.pageRenders;
+/** The video is Dolby Vision for this page to draw. */
+const drawsDovi = (p: GuestPlayback | null) =>
+  p?.spec?.video?.picture === 'dovi';
 /** Stays this far behind the newest written segment so playback doesn't stall at once. */
 const EDGE_MARGIN_MS = 2_000;
 
@@ -321,7 +329,7 @@ export function guestEngine(
     /** What the player tries first: fetch the stream again, or reload it where it was. */
     /** The browser couldn't render the audio to binaural: the server does it instead, from here. */
     const binauralFailed = (error: ShakaError) => {
-      if (error.code !== TRANSMUXING_FAILED || !playback?.clientBinaural)
+      if (error.code !== TRANSMUXING_FAILED || !pageRenders(playback))
         return false;
       serverBinaural = true;
       void prepare(position());
@@ -336,7 +344,7 @@ export function guestEngine(
         noBinaural ||
         failure.kind !== 'media' ||
         failure.media?.stream === 'video' ||
-        !(playback?.binaural || playback?.clientBinaural)
+        !(serverRenders(playback) || pageRenders(playback))
       )
         return false;
       noBinaural = true;
@@ -358,7 +366,7 @@ export function guestEngine(
       doviView = null;
       if (noDovi) return;
       noDovi = true;
-      if (!playback?.dovi) return;
+      if (!drawsDovi(playback)) return;
       toast.message(
         t`Dolby Vision couldn't be shown here, so the server converts it`,
         {
@@ -442,7 +450,7 @@ export function guestEngine(
           null,
         estimatedBps: stats?.estimatedBandwidth,
         streamBps: stats?.streamBandwidth,
-        renderSpeed: playback?.clientBinaural ? renderSpeed() : null,
+        renderSpeed: pageRenders(playback) ? renderSpeed() : null,
       });
       const mbps = (bps: number) => (bps / 1e6).toFixed(bps < 1e7 ? 1 : 0);
       switch (reason?.kind) {
@@ -646,7 +654,7 @@ export function guestEngine(
           clientBinaural:
             serverBinaural || noBinaural ? undefined : probed.clientBinaural,
           ...(noBinaural ? { binaural: false } : {}),
-          dovi: noDovi ? undefined : probed.dovi,
+          picture: noDovi ? undefined : probed.picture,
         };
         // A newer prepare started while this one asked the browser (the headphones setting read
         // as a file opens does): sent now, this one would reach the server after it and replace it.
@@ -684,7 +692,7 @@ export function guestEngine(
           paused,
           subtitles: [],
           // Rendered on the server or here: either way no virtualiser on top.
-          binaural: !!result.binaural || !!result.clientBinaural,
+          binaural: serverRenders(result) || pageRenders(result),
         });
         if (result.subtitleUrl) void attachSubtitle(result, at, signal);
         listTracks();
@@ -763,7 +771,7 @@ export function guestEngine(
       unwatchDisabled ??= sceneStore.subscribeDisabled(() => {
         clearTimeout(disabledTimer);
         disabledTimer = setTimeout(() => {
-          if (playback?.clientBinaural && !preparing) void prepare(position());
+          if (pageRenders(playback) && !preparing) void prepare(position());
         }, 600);
       });
     };
@@ -777,14 +785,14 @@ export function guestEngine(
         // Converted in the page (the server copied the track either way): a stream carrying both
         // outputs switches at once in the page's audio graph. A stale mode with headphones on, or
         // a stream carrying only one output, is converted again from the same job's segments.
-        if (playback?.clientBinaural && !preparing) {
+        if (pageRenders(playback) && !preparing) {
           const both = localAudio.current?.contents === 'both';
           if ((now && staleMode) || (askedHeadphones !== now && !both))
             void prepare(position());
           return;
         }
         // The server renders binaural in the listener's mode: a new one is a new job.
-        if (staleMode && now && playback?.binaural) {
+        if (staleMode && now && serverRenders(playback)) {
           void prepare(preparing ? target : position());
           return;
         }
@@ -799,7 +807,7 @@ export function guestEngine(
         // for that, and turning them off leaves binaural audio that has to be converted again.
         const binaural =
           (now && (track?.codec === 'truehd' || track?.codec === 'eac3')) ||
-          (!now && (!!playback?.binaural || !!playback?.clientBinaural));
+          (!now && (serverRenders(playback) || pageRenders(playback)));
         if ((converted && (track?.channels ?? 2) > 2) || binaural)
           void prepare(preparing ? target : position());
       });

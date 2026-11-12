@@ -532,10 +532,17 @@ test('subtitles: burned in only where the browser cannot draw them', () => {
     'direct'
   );
   assert.deepEqual(
-    ['subrip', 'ass', 'ssa', 'hdmv_pgs_subtitle', 'dvd_subtitle'].map(
-      subtitleKind
-    ),
-    ['text', 'ass', 'ass', 'pgs', null]
+    [
+      'subrip',
+      'ass',
+      'ssa',
+      'hdmv_pgs_subtitle',
+      'dvd_subtitle',
+      'dvb_subtitle',
+      'xsub',
+    ].map(subtitleKind),
+    // VobSub and DVB are named, though the page doesn't draw them yet (burned in, as before).
+    ['text', 'ass', 'ass', 'pgs', 'vobsub', 'dvb', null]
   );
 });
 

@@ -12,6 +12,18 @@ export interface GuestTrack {
   channels?: number;
   sampleRate?: number;
   hdr?: boolean;
+  /** Video: ffmpeg's pixel format ("yuv420p10le"). */
+  pixelFormat?: string;
+  /** Video: bits per sample. */
+  bitDepth?: number;
+  /** Video: transfer characteristics ("smpte2084" PQ, "arib-std-b67" HLG). */
+  transfer?: string;
+  /** Video: "progressive", or an interlaced field order ("tt", "bb", "tb", "bt"). */
+  fieldOrder?: string;
+  /** Video: the sample aspect ratio ("1:1"; anything else is anamorphic). */
+  sampleAspectRatio?: string;
+  /** Video: Dolby Vision's configuration, where it has one. */
+  dovi?: { profile: number; compatibility: number };
   title: string;
   language?: string;
   /** ffprobe's channel layout name ("5.1(side)"). */
@@ -84,6 +96,60 @@ export interface GuestCapabilities {
   dovi?: boolean;
   /** Subtitle formats the browser draws itself, rather than burned in. */
   subtitles?: ('ass' | 'pgs')[];
+  /**
+   * What the page's picture renderer draws over the video: `dovi` is Dolby Vision from each
+   * frame's metadata (replacing the `dovi` flag). Later: SDR tone-mapping of HDR.
+   */
+  picture?: 'dovi'[];
+  /** The screen: HDR or SDR. A hint; whether this file's video shows as HDR is `hdr`. */
+  display?: 'sdr' | 'hdr';
+}
+
+/**
+ * Where each stream's work happens and what it outputs, as the transcoder decided it (and, once
+ * a conversion runs, after any fallback). Values marked "later" are where planned features go.
+ */
+export interface GuestPlaybackSpec {
+  video: {
+    track: number;
+    /** The original file in the page; copied or encoded on the server. Later: 'page-demux'. */
+    where: 'page-original' | 'server-copy' | 'server-encode';
+    encode: {
+      /** Later: 'hevc10', 'av1'. */
+      codec: 'h264';
+      /** Later: 'hdr10'. */
+      range: 'sdr';
+      tonemap: 'none' | 'server';
+      /** Later: true for interlaced sources. */
+      deinterlace: false;
+      height: number | null;
+      maxBitrate: string | null;
+    } | null;
+    /** What the page draws over the video. Later: 'tonemap-sdr'. */
+    picture: 'none' | 'dovi';
+    reason: string | null;
+  } | null;
+  audio: {
+    track: number;
+    where: 'page-original' | 'server-copy' | 'server-convert' | 'server-render';
+    /** Copied for the page to render itself (binaural, or the speaker version). */
+    pageRenders: boolean;
+    /** Rendered to binaural on the server, in this headphone mode (null: as mixed). */
+    render: { mode: 'near' | 'far' | null } | null;
+    output: {
+      codec: 'flac' | 'aac';
+      bitrate: string | null;
+      layout: string | null;
+      channels: number | null;
+    } | null;
+    reason: string | null;
+  } | null;
+  subtitle: {
+    track: number;
+    /** Later: the page drawing VobSub and DVB too. */
+    where: 'page' | 'server-burn';
+    kind: 'text' | 'ass' | 'pgs' | 'vobsub' | 'dvb' | null;
+  } | null;
 }
 export interface GuestPlaybackRequest {
   revision: string;
@@ -107,12 +173,8 @@ export interface GuestPlayback {
   subtitleUrl?: string;
   /** How the subtitle is served: WebVTT, ASS for JASSUB, PGS for libpgs. */
   subtitleFormat?: 'vtt' | 'ass' | 'sup';
-  /** The audio was rendered to binaural on the server: the player adds no virtualiser. */
-  binaural?: boolean;
-  /** The audio is copied for the player to render to binaural itself. */
-  clientBinaural?: boolean;
-  /** The video is Dolby Vision copied with its metadata for the player to draw. */
-  dovi?: boolean;
+  /** Where each stream's work happens: what the page renders, draws or plays as it is. */
+  spec: GuestPlaybackSpec;
   /** Fonts attached to the file, for an ASS subtitle. */
   fontUrls?: string[];
 }

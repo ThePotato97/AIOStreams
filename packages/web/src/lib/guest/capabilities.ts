@@ -218,7 +218,8 @@ export async function browserCapabilities(
       ? { clientBinaural: clientBinauralCodecs() }
       : {}),
     // Dolby Vision drawn here from its metadata, where the page can show HDR itself
-    ...(hdr && (await doviSupported()) ? { dovi: true } : {}),
+    ...(hdr && (await doviSupported()) ? { picture: ['dovi' as const] } : {}),
+    display: typeof matchMedia === 'function' && hdrScreen() ? 'hdr' : 'sdr',
     subtitles,
   };
 }

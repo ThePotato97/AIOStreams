@@ -18,6 +18,7 @@ import {
   type GuestSegment,
   type GuestMedia,
   type GuestPlayback,
+  type GuestPlaybackSpec,
   type MediaSourceRecord,
   type PlaybackMemo,
   isMemoFresh,
@@ -499,6 +500,11 @@ const capabilitySchema = z.object({
     .array(z.enum(['ass', 'pgs']))
     .max(2)
     .optional(),
+  picture: z
+    .array(z.enum(['dovi']))
+    .max(1)
+    .optional(),
+  display: z.enum(['sdr', 'hdr']).optional(),
 });
 const playbackSchema = z.object({
   revision: z.string().length(64),
@@ -778,6 +784,7 @@ function playbackResponse(
     id?: string;
     mode: GuestPlayback['mode'];
     offsetMs?: number;
+    spec?: GuestPlaybackSpec;
     binaural?: boolean;
     clientBinaural?: boolean;
     dovi?: boolean;
@@ -795,10 +802,8 @@ function playbackResponse(
     mode: result.mode,
     offsetMs: result.offsetMs ?? 0,
     url: `${base}${result.mode === 'direct' ? 'original' : `${result.id}/manifest.mpd`}${query}`,
+    spec: result.spec ?? specFromFlags(result, body),
   };
-  if (result.binaural) response.binaural = true;
-  if (result.clientBinaural) response.clientBinaural = true;
-  if (result.dovi) response.dovi = true;
   const track =
     body.subtitle == null
       ? undefined
@@ -822,6 +827,49 @@ function playbackResponse(
       );
   }
   return response;
+}
+/**
+ * The spec from a transcoder too old to send one, from the flags it did send: only what the
+ * page reads (what it renders, draws or plays as it is) is filled in.
+ */
+export function specFromFlags(
+  result: {
+    mode: GuestPlayback['mode'];
+    binaural?: boolean;
+    clientBinaural?: boolean;
+    dovi?: boolean;
+  },
+  body: { audio?: number; subtitle?: number }
+): GuestPlaybackSpec {
+  const direct = result.mode === 'direct';
+  return {
+    video: {
+      track: -1,
+      where: direct
+        ? 'page-original'
+        : result.mode === 'video'
+          ? 'server-encode'
+          : 'server-copy',
+      encode: null,
+      picture: result.dovi ? 'dovi' : 'none',
+      reason: null,
+    },
+    audio: {
+      track: body.audio ?? -1,
+      where: direct
+        ? 'page-original'
+        : result.binaural
+          ? 'server-render'
+          : result.mode === 'remux' || result.clientBinaural
+            ? 'server-copy'
+            : 'server-convert',
+      pageRenders: !!result.clientBinaural,
+      render: result.binaural ? { mode: null } : null,
+      output: null,
+      reason: null,
+    },
+    subtitle: null,
+  };
 }
 const ownOpenSchema = z.object({
   itemId: z.string().regex(/^[0-9a-f]{32}$/),
