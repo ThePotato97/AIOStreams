@@ -136,6 +136,31 @@ async function json(req) {
   }
   return JSON.parse(text || '{}');
 }
+/**
+ * The source reader's state, from AIOStreams (`<source>/status`): read when an FFmpeg reading the
+ * source exits with an error, since FFmpeg's stderr isn't read (it can carry credentials). It
+ * tells a source that failed (`failed`, with the status and code AIOStreams gives) from one that
+ * is still resolving or was fine. Never throws: `unknown` when AIOStreams doesn't answer.
+ */
+export async function sourceStatus(input) {
+  try {
+    const url = new URL(input);
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/status`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return { state: 'unknown', httpStatus: res.status };
+    return await res.json();
+  } catch {
+    return { state: 'unknown' };
+  }
+}
+/** Source states read after probes failed, newest last; without the handle (a credential). */
+const probeSources = [];
+/** Keeps the source's state on a job whose FFmpeg (`which`) exited with an error. */
+function noteSource(job, which) {
+  void sourceStatus(job.input).then((status) => {
+    job.source = { ...status, after: which, at: Date.now() };
+  });
+}
 async function probe(input) {
   inputUrl(input);
   if (!probes.has(input)) {
@@ -180,9 +205,12 @@ async function probe(input) {
           .catch(() => []),
       }))
       .then((raw) => metadata(raw))
-      .catch((error) => {
+      .catch(async (error) => {
         probes.delete(input);
-        throw Error(probeFailure(error));
+        const source = await sourceStatus(input);
+        probeSources.push({ ...source, at: Date.now() });
+        if (probeSources.length > 20) probeSources.shift();
+        throw Object.assign(Error(probeFailure(error)), { source });
       });
     probes.set(input, task);
     if (probes.size > 200) probes.delete(probes.keys().next().value);
@@ -320,6 +348,8 @@ function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
   for (const c of [demux, renderer]) {
     c.on('error', fail);
     c.on('exit', (code) => {
+      if (code !== 0 && c === demux && !helpers.stopping)
+        noteSource(job, 'demux');
       if (code !== 0) fail();
     });
   }
@@ -416,6 +446,7 @@ function startMain(job, encoder, gpu, extra) {
   child.on('exit', async (code) => {
     if (!jobs.has(job.id) || job.child !== child) return;
     job.child = null;
+    if (code !== 0) noteSource(job, 'main');
     if (code !== 0 && encoder !== 'cpu' && !job.ready) {
       await rm(job.dir, { recursive: true, force: true });
       await mkdir(job.dir, { recursive: true });
@@ -685,7 +716,10 @@ export function createServer() {
             speed: j.speed,
             finished: !!j.finished,
             error: j.error,
+            // The source's state when an FFmpeg reading it last failed.
+            source: j.source ?? null,
           })),
+          probeSources,
         });
       if (req.method === 'POST' && url.pathname === '/probe')
         return send(await probe(inputUrl((await json(req)).input)));

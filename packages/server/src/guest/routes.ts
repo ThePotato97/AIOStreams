@@ -3,7 +3,7 @@ import { offsetWebVtt } from './subtitles.js';
 import { Router, type Request, type Response } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { Agent, request } from 'undici';
+import { Agent, request, type Dispatcher } from 'undici';
 import { lookup, type LookupAddress } from 'node:dns';
 import { isIP } from 'node:net';
 import { z } from 'zod';
@@ -22,7 +22,15 @@ import {
   type MediaSourceRecord,
   type PlaybackMemo,
   isMemoFresh,
+  openNativeUsenetStream,
 } from '@aiostreams/core';
+import { serveRangeStream } from '../utils/range-stream.js';
+import {
+  BlockStore,
+  SOURCE_CACHE_BYTES,
+  SourceReader,
+  type Upstream,
+} from './source-reader.js';
 import {
   userForToken,
   contextFromCredentials,
@@ -90,6 +98,11 @@ interface Source {
    * playback route re-runs its failover chain, which can pick another file.
    */
   pinned?: { url: URL; headers: Record<string, string> };
+  /**
+   * Runs the host's configuration again for a fresh list and returns this version's record:
+   * what a source whose credentials expired (a Drive token) is opened with next.
+   */
+  refresh?: () => Promise<MediaSourceRecord>;
 }
 type Located = NonNullable<Awaited<ReturnType<typeof locate>>>;
 const logger = createLogger('guest');
@@ -134,6 +147,32 @@ interface OwnSession {
 }
 const owns = new Map<string, OwnSession>();
 const sources = new Map<string, Source>();
+/** Each source's shared reader: every read of a source goes through it. */
+const readers = new Map<string, SourceReader>();
+let blocks: BlockStore | undefined;
+function readerFor(source: Source): SourceReader {
+  let reader = readers.get(source.handle);
+  if (!reader) {
+    blocks ??= new BlockStore(SOURCE_CACHE_BYTES);
+    reader = new SourceReader(
+      source.record.filename ?? 'source',
+      {
+        open: (start, signal) => openRange(source, start, signal),
+        resolving: () => !source.pinned,
+      },
+      blocks,
+      { maxCursors: 2, stores: true }
+    );
+    readers.set(source.handle, reader);
+  }
+  return reader;
+}
+/** Forgets a source, and stops and drops its reader. */
+function dropSource(handle: string): void {
+  sources.delete(handle);
+  readers.get(handle)?.close();
+  readers.delete(handle);
+}
 const requests = new Map<string, number>();
 const digest = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -285,7 +324,9 @@ async function lookupRecord(
   // Guest lookups keep their own cache; a user's own playback shares theirs.
   scope: 'guest' | 'own' = 'guest',
   /** The item as the configuration has it, once found. */
-  onLocated?: (loc: Located) => void
+  onLocated?: (loc: Located) => void,
+  /** A list made now, not the one kept (whose credentials may have expired). */
+  fresh = false
 ): Promise<MediaSourceRecord> {
   // Sources are fetched by this server, not from the guest's public IP.
   const guestIp = req.userIp;
@@ -331,7 +372,9 @@ async function lookupRecord(
   };
   let kept: PlaybackMemo | null = null;
   let found: ReturnType<typeof find> | undefined;
-  if (entry.sourceId && loc) {
+  if (fresh)
+    found = find(loc ? await ensureMemo(loc, { current: true }) : null);
+  else if (entry.sourceId && loc) {
     kept = await ensureMemo(loc);
     found = find(kept);
   }
@@ -432,6 +475,17 @@ async function current(req: Request) {
         title: entry.title,
         record,
         host,
+        // The host's configuration again, for a fresh list of this version (its credentials).
+        refresh: () =>
+          lookupRecord(
+            req,
+            user,
+            entry,
+            state.binding.bingeGroup,
+            'guest',
+            undefined,
+            true
+          ),
       };
       sources.set(source.handle, source);
       return source;
@@ -469,7 +523,7 @@ function ownSession(token: string): OwnSession {
 }
 function dropOwn(key: string, session: OwnSession) {
   owns.delete(key);
-  sources.delete(session.stream.handle);
+  dropSource(session.stream.handle);
   void release(session);
 }
 /** The playback a media URL belongs to: a guest's party, or a user's own. */
@@ -591,7 +645,7 @@ router.post('/disable', async (req, res) => {
   bindings.delete(body.party);
   guestSessions.revokeParty(body.party);
   for (const [handle, source] of sources)
-    if (source.party === body.party) sources.delete(handle);
+    if (source.party === body.party) dropSource(handle);
   res.json({ ok: true });
 });
 router.post('/exchange', async (req, res) => {
@@ -843,13 +897,9 @@ router.post('/own/open', async (req, res) => {
   if (!user) fail(401, 'Sign in to play this');
   const body = ownOpenSchema.parse(req.body);
   // The default version's id is the item's own: no explicit choice.
-  const record = await lookupRecord(
-    req,
-    user,
-    body.sourceId === body.itemId ? { ...body, sourceId: undefined } : body,
-    undefined,
-    'own'
-  );
+  const entry =
+    body.sourceId === body.itemId ? { ...body, sourceId: undefined } : body;
+  const record = await lookupRecord(req, user, entry, undefined, 'own');
   const revision = digest([OWN, user.uuid, body.itemId, record.msid]);
   const stream: Source = {
     handle: randomSecret(),
@@ -859,13 +909,16 @@ router.post('/own/open', async (req, res) => {
     itemId: body.itemId,
     title: '',
     record,
+    // The user's configuration again, for a fresh list of this version (its credentials).
+    refresh: () =>
+      lookupRecord(req, user, entry, undefined, 'own', undefined, true),
   };
   sources.set(stream.handle, stream);
   let media: GuestMedia;
   try {
     media = await probeMedia(stream);
   } catch (error) {
-    sources.delete(stream.handle);
+    dropSource(stream.handle);
     throw error;
   }
   // Opening the same item and version again (resume, retry, a reload)
@@ -1039,8 +1092,12 @@ async function openUpstream(
   source: Source,
   method: 'GET' | 'HEAD',
   range?: string,
-  options: { pinned?: Source['pinned']; headersTimeout?: number } = {}
-) {
+  options: {
+    pinned?: Source['pinned'];
+    headersTimeout?: number;
+    signal?: AbortSignal;
+  } = {}
+): Promise<{ upstream: Dispatcher.ResponseData | null; url: URL }> {
   const headers: Record<string, string> = options.pinned
     ? { ...options.pinned.headers }
     : Object.fromEntries(
@@ -1052,18 +1109,24 @@ async function openUpstream(
   const target =
     options.pinned?.url ??
     internalize(new URL(source.record.url, config.bootstrap.baseUrl));
+  // A pinned file answers at once; the playback route answers only once it has resolved.
+  const headersTimeout =
+    options.headersTimeout ?? (options.pinned ? 30000 : resolveTimeoutMs());
   const open = (url: URL) => {
     assertPublic(url);
-    return request(url, {
+    return request(withoutLogin(url, headers), {
       method,
       headers,
       bodyTimeout: 0,
-      headersTimeout: options.headersTimeout ?? 30000,
+      headersTimeout,
       dispatcher: guarded,
+      signal: options.signal,
     });
   };
-  let upstream = await open(target);
   let next = target;
+  // AIOStreams' own usenet stream is read in-process, not over HTTP.
+  if (nativeUsenetToken(next)) return { upstream: null, url: next };
+  let upstream = await open(target);
   let hops = 0;
   while (
     upstream.statusCode >= 300 &&
@@ -1086,14 +1149,60 @@ async function openUpstream(
       for (const name of Object.keys(headers))
         if (!CROSS_ORIGIN_HEADERS.has(name)) delete headers[name];
     next = location;
+    if (nativeUsenetToken(next)) {
+      source.pinned = { url: next, headers: {} };
+      return { upstream: null, url: next };
+    }
     upstream = await open(next);
   }
   // Landed on the file itself: later requests go straight there.
   if (!options.pinned && upstream.statusCode < 400 && !placeholderOf(next)) {
     const { range: _range, ...kept } = headers;
-    source.pinned = { url: next, headers: kept };
+    source.pinned = { url: withoutLogin(next, kept), headers: kept };
   }
   return { upstream, url: next };
+}
+/**
+ * The longest the playback route can take to answer: its failover chain runs under a lock held
+ * for at least 180 s, and a service waiting for a download polls up to its own limit
+ * (`BUILTIN_DOWNLOAD_MAX_WAIT_TIME`). A little more, so its own answer arrives first.
+ */
+function resolveTimeoutMs(): number {
+  const waits = Object.values(
+    (config.builtins?.debrid?.downloadMaxWaitTime ?? {}) as Record<
+      string,
+      number
+    >
+  ).filter((ms) => Number.isFinite(ms));
+  return Math.max(180_000, ...waits) + 30_000;
+}
+/**
+ * A login written into the URL (NzbDAV and AltMount's WebDAV links) sent as Basic auth, which
+ * undici doesn't do from a URL. The URL is returned without it. `headers` gets the header.
+ */
+function withoutLogin(url: URL, headers: Record<string, string>): URL {
+  if (!url.username && !url.password) return url;
+  headers.authorization = `Basic ${Buffer.from(
+    `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+  ).toString('base64')}`;
+  const bare = new URL(url);
+  bare.username = '';
+  bare.password = '';
+  return bare;
+}
+/** The token of AIOStreams' own usenet stream URL (`/api/v1/usenet/stream/:token`), if it is one. */
+function nativeUsenetToken(url: URL): string | null {
+  const own = [config.bootstrap.baseUrl, config.party.internalUrl]
+    .filter((u): u is string => !!u)
+    .map((u) => new URL(u));
+  if (!own.some((u) => u.origin === url.origin)) return null;
+  const base = own
+    .find((u) => u.origin === url.origin)!
+    .pathname.replace(/\/+$/, '');
+  const m = new RegExp(
+    `^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/api/v1/usenet/stream/([^/]+)`
+  ).exec(url.pathname);
+  return m ? decodeURIComponent(m[1]) : null;
 }
 /**
  * Opens the pinned stream; when it stops working (expired link, error,
@@ -1102,13 +1211,20 @@ async function openUpstream(
 async function openSource(
   source: Source,
   method: 'GET' | 'HEAD',
-  range?: string
+  range?: string,
+  signal?: AbortSignal
 ) {
   const pinned = source.pinned;
   if (pinned) {
     try {
-      const opened = await openUpstream(source, method, range, { pinned });
-      if (opened.upstream.statusCode < 400 && !placeholderOf(opened.url))
+      const opened = await openUpstream(source, method, range, {
+        pinned,
+        signal,
+      });
+      if (
+        !opened.upstream ||
+        (opened.upstream.statusCode < 400 && !placeholderOf(opened.url))
+      )
         return opened;
       await opened.upstream.body.dump().catch(() => {});
       logger.warn(
@@ -1125,7 +1241,139 @@ async function openSource(
     }
     if (source.pinned === pinned) source.pinned = undefined;
   }
-  return openUpstream(source, method, range);
+  return openUpstream(source, method, range, { signal });
+}
+/**
+ * Opens a source for its shared reader at `start`, to the end: following redirects (resolving
+ * as long as the playback route takes), checking it's the file and not a placeholder clip or an
+ * error page, and, when its credentials are refused (an expired Drive token), running the
+ * host's configuration again once for a fresh list. AIOStreams' own usenet streams are opened
+ * in-process.
+ */
+async function openRange(
+  source: Source,
+  start: number,
+  signal: AbortSignal
+): Promise<Upstream> {
+  let refreshed = false;
+  for (;;) {
+    let opened;
+    try {
+      opened = await openSource(source, 'GET', `bytes=${start}-`, signal);
+    } catch (error) {
+      if (typeof (error as { status?: number }).status === 'number')
+        throw error;
+      if (signal.aborted) throw error;
+      logger.warn({ cause: errorCause(error) }, 'guest source unreachable');
+      const blocked = errorCause(error) === 'EBLOCKED';
+      throw sourceError(
+        502,
+        blocked
+          ? 'The source points at a private address'
+          : 'The source could not be reached',
+        blocked ? 'source_failed' : 'source_unreachable'
+      );
+    }
+    const { upstream, url } = opened;
+    if (!upstream) return openNativeUsenet(url, start, signal);
+    const placeholder = placeholderOf(url);
+    if (placeholder) {
+      await upstream.body.dump().catch(() => {});
+      logger.warn(
+        { file: url.pathname.split('/').pop(), status: placeholder.status },
+        'guest source is a placeholder'
+      );
+      throw sourceError(
+        placeholder.status,
+        placeholder.message,
+        placeholder.code
+      );
+    }
+    const status = upstream.statusCode;
+    if ((status === 401 || status === 403) && source.refresh && !refreshed) {
+      await upstream.body.dump().catch(() => {});
+      refreshed = true;
+      logger.info(
+        { status, host: url.hostname },
+        'guest source refused its credentials; running the configuration again'
+      );
+      source.record = await source.refresh();
+      source.pinned = undefined;
+      continue;
+    }
+    if (status >= 400) {
+      await upstream.body.dump().catch(() => {});
+      logger.warn(
+        { status, host: url.hostname },
+        'guest source returned an error'
+      );
+      throw sourceError(
+        502,
+        `The source answered ${status}`,
+        'source_unreachable'
+      );
+    }
+    const type = String(upstream.headers['content-type'] ?? '');
+    if (/^(text\/|image\/|application\/(json|xml|xhtml))/i.test(type)) {
+      await upstream.body.dump({ limit: 65536 }).catch(() => {});
+      logger.warn(
+        { type: type.split(';')[0], host: url.hostname },
+        'guest source is not media'
+      );
+      throw sourceError(
+        502,
+        "The source didn't return a media file",
+        'source_failed'
+      );
+    }
+    const total = /\/(\d+)\s*$/.exec(
+      String(upstream.headers['content-range'] ?? '')
+    );
+    const length = Number(upstream.headers['content-length']);
+    return {
+      body: upstream.body as unknown as Readable,
+      size: total
+        ? Number(total[1])
+        : status === 200 && Number.isFinite(length)
+          ? length
+          : null,
+      ranged: status === 206,
+      etag: upstream.headers.etag ? String(upstream.headers.etag) : null,
+      lastModified: upstream.headers['last-modified']
+        ? new Date(String(upstream.headers['last-modified']))
+        : null,
+    };
+  }
+}
+/** AIOStreams' own usenet stream at `start`, from its engine in this process. */
+async function openNativeUsenet(
+  url: URL,
+  start: number,
+  signal: AbortSignal
+): Promise<Upstream> {
+  try {
+    const opened = await openNativeUsenetStream({
+      token: nativeUsenetToken(url)!,
+      start,
+      signal,
+    });
+    return {
+      body: opened.stream,
+      size: opened.size,
+      ranged: true,
+      etag: opened.etag,
+      lastModified: opened.lastModified,
+      native: true,
+    };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    logger.warn({ cause: errorCause(error) }, 'guest usenet source failed');
+    throw sourceError(
+      502,
+      'The usenet source could not be read',
+      'source_unreachable'
+    );
+  }
 }
 /**
  * Why a source didn't play, for the player: `source_failed` won't change on a retry (pick another
@@ -1205,80 +1453,17 @@ const sourceError = (status: number, message: string, code?: SourceCode) =>
     retryAfter: RETRY_AFTER[status],
     code,
   });
-/**
- * Opens a little of the source before it is probed or played: a link that
- * isn't ready lands on one of AIOStreams' placeholder clips or an error page,
- * which would otherwise be converted as if it were the episode.
- */
-async function checkSource(source: Source): Promise<void> {
-  let opened;
-  try {
-    source.pinned = undefined;
-    opened = await openUpstream(source, 'GET', 'bytes=0-0', {
-      headersTimeout: 15000,
-    });
-  } catch (error) {
-    if (typeof (error as { status?: number }).status === 'number') throw error;
-    logger.warn({ cause: errorCause(error) }, 'guest source unreachable');
-    const blocked = errorCause(error) === 'EBLOCKED';
-    throw sourceError(
-      502,
-      blocked
-        ? 'The source points at a private address'
-        : 'The source could not be reached',
-      blocked ? 'source_failed' : 'source_unreachable'
-    );
-  }
-  const { upstream, url } = opened;
-  // Discarded cleanly: destroy() would raise an unhandled abort. A source
-  // that ignores the range is cut off after a little.
-  await upstream.body.dump({ limit: 65536 }).catch(() => {});
-  const placeholder = placeholderOf(url);
-  if (placeholder) {
-    logger.warn(
-      { file: url.pathname.split('/').pop(), status: placeholder.status },
-      'guest source is a placeholder'
-    );
-    throw sourceError(
-      placeholder.status,
-      placeholder.message,
-      placeholder.code
-    );
-  }
-  if (upstream.statusCode >= 400) {
-    logger.warn(
-      { status: upstream.statusCode, host: url.hostname },
-      'guest source returned an error'
-    );
-    throw sourceError(
-      502,
-      `The source answered ${upstream.statusCode}`,
-      'source_unreachable'
-    );
-  }
-  const type = String(upstream.headers['content-type'] ?? '');
-  if (/^(text\/|image\/|application\/(json|xml|xhtml))/i.test(type)) {
-    logger.warn(
-      { type: type.split(';')[0], host: url.hostname },
-      'guest source is not media'
-    );
-    throw sourceError(
-      502,
-      "The source didn't return a media file",
-      'source_failed'
-    );
-  }
-}
 /** Probe failures a second try can get past: a slow or dropped connection. */
 const TRANSIENT =
   /timed out|refused|reset|broken pipe|i\/o error|end of file|server returned 5\d\d/i;
 /**
- * Checks the source, then probes it, trying once more if the probe failed in
- * a way that can change. Bad data won't, and neither will a down or full
- * transcoder.
+ * Opens the source through its reader (resolving it, and checking it's the file and not a
+ * placeholder clip or an error page, which would otherwise be converted as if it were the
+ * episode), then probes it, trying once more if the probe failed in a way that can change. Bad
+ * data won't, and neither will a down or full transcoder.
  */
 async function probeMedia(source: Source): Promise<GuestMedia> {
-  await checkSource(source);
+  await readerFor(source).describe();
   try {
     return await worker('/probe', { input: input(source) });
   } catch (error) {
@@ -1289,12 +1474,27 @@ async function probeMedia(source: Source): Promise<GuestMedia> {
     return await worker('/probe', { input: input(source) });
   }
 }
+/**
+ * Serves a source to one reader: from its shared reader, or, for a source that doesn't serve
+ * ranges or say its size, passed through per request (`forward`).
+ */
+async function serveSource(source: Source, req: Request, res: Response) {
+  const reader = readerFor(source);
+  await reader.describe();
+  if (!reader.shareable()) return forward(source, req, res);
+  await serveRangeStream(req, res, {
+    open: (range, signal) => reader.open(range, signal),
+    disposition: 'none',
+  });
+}
 async function forward(source: Source, req: Request, res: Response) {
   const { upstream, url: next } = await openSource(
     source,
     req.method === 'HEAD' ? 'HEAD' : 'GET',
     req.headers.range
   );
+  // AIOStreams' own usenet streams always serve ranges, so they're never passed through.
+  if (!upstream) fail(500, 'The source is read through its reader');
   // A clip in place of the file must not reach FFmpeg as the episode.
   const placeholder = placeholderOf(next);
   if (placeholder) {
@@ -1347,7 +1547,16 @@ router.all('/source/:handle', async (req, res) => {
   else if (!bindings.has(source.party)) refuse('party no longer shared');
   else if (!(await guestPartyState(source.party))) refuse('party ended');
   if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Method not allowed');
-  await forward(source, req, res);
+  await serveSource(source, req, res);
+});
+/**
+ * How the source's reader stands: `ok`, `resolving`, or `failed {class, code}`, for the
+ * transcoder to tell a source that failed from its own failure.
+ */
+router.get('/source/:handle/status', (req, res) => {
+  const handle = String(req.params.handle);
+  if (!sources.has(handle)) fail(404, 'Source expired');
+  res.json(readers.get(handle)?.status() ?? { state: 'idle' });
 });
 /**
  * How a subtitle reaches the browser, as the transcoder serves it: text as
@@ -1551,7 +1760,7 @@ router.all('/media/original', async (req, res) => {
       });
   }, 2000);
   try {
-    await forward(source, req, res);
+    await serveSource(source, req, res);
   } finally {
     clearInterval(timer);
     revoke();
@@ -1593,7 +1802,7 @@ const sweep = setInterval(() => {
         if (!p || b.expiresAt <= Date.now()) {
           bindings.delete(id);
           guestSessions.revokeParty(id);
-          for (const [h, s] of sources) if (s.party === id) sources.delete(h);
+          for (const [h, s] of sources) if (s.party === id) dropSource(h);
         }
       })
       .catch(() => {});

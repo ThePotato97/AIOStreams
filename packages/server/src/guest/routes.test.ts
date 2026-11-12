@@ -38,6 +38,10 @@ const fixture = vi.hoisted(() => ({
   probeError: 'Source probe failed: Invalid data found when processing input',
   scopes: [] as (string | undefined)[],
   chain: { hits: 0, expireA: false, thenTo: '/media/B' },
+  /** The list's Drive-style token: list N sends `token-N`; the file takes tokens from `fresh` on. */
+  tokens: { fresh: 1, seen: [] as string[] },
+  /** The Basic logins a file was asked with. */
+  logins: [] as string[],
   // What the transcoder prepares, and how it sends a segment.
   prepared: { mode: 'direct' } as {
     mode: string;
@@ -66,7 +70,25 @@ const fixture = vi.hoisted(() => ({
     key?: string;
   }[],
 }));
-vi.mock('@aiostreams/core', () => ({
+// The shared reader's disk cache is core's real one; core's logger, which loads all of core, is not.
+vi.mock('../../../core/src/logging/logger.js', () => ({
+  createLogger: () => ({
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    debug: () => {},
+  }),
+}));
+vi.mock('@aiostreams/core', async () => ({
+  DiskBackedCache: (
+    await import('../../../core/src/utils/disk-backed-cache.js')
+  ).DiskBackedCache,
+  openNativeUsenetStream: async () => {
+    throw new Error('no usenet in these tests');
+  },
+  // For serveRangeStream: core's own.
+  mimeForFilename: (await import('../../../core/src/shares/mime.js'))
+    .mimeForFilename,
   lookupFor: (descriptor: unknown, runtimeMs?: number) =>
     descriptor ? { descriptor, runtimeMs } : null,
   msToTicks: (ms: number) => ms * 10_000,
@@ -107,6 +129,7 @@ vi.mock('@aiostreams/core', () => ({
         return fixture.upstream;
       },
     },
+    builtins: { debrid: { downloadMaxWaitTime: { '*': 120000 } } },
   },
 }));
 vi.mock('../routes/jellyfin/context.js', () => ({
@@ -163,6 +186,9 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
                   : `${fixture.upstream}${fixture.sourcePath}`,
                 filename: 'episode.mkv',
                 container: 'mkv',
+                requestHeaders: {
+                  authorization: `Bearer token-${fixture.memoCalls}`,
+                },
                 subtitles: [],
                 extension: { bingeGroup: 'series' },
               },
@@ -289,6 +315,33 @@ beforeAll(async () => {
     res.status(206).type('video/mp4').send(req.params.name);
   });
   files.get('/loop', (_req, res) => res.redirect(302, '/loop'));
+  // A file that serves ranges, as a debrid CDN does.
+  const ranged = (res: express.Response, body: string) =>
+    res
+      .status(206)
+      .set({
+        'content-type': 'video/mp4',
+        'content-range': `bytes 0-${body.length - 1}/${body.length}`,
+      })
+      .send(body);
+  // A WebDAV file behind a login (NzbDAV, AltMount).
+  files.get('/webdav/file', (req, res) => {
+    fixture.logins.push(String(req.headers.authorization ?? ''));
+    if (
+      req.headers.authorization !==
+      `Basic ${Buffer.from('user@x:p:ss').toString('base64')}`
+    )
+      return void res.status(401).end();
+    ranged(res, 'W');
+  });
+  // A Drive file: an expired token is refused.
+  files.get('/drive/file', (req, res) => {
+    const token = String(req.headers.authorization ?? '');
+    fixture.tokens.seen.push(token);
+    const n = Number(/token-(\d+)/.exec(token)?.[1] ?? 0);
+    if (n < fixture.tokens.fresh) return void res.status(401).end();
+    ranged(res, 'D');
+  });
   upstream = files.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => upstream.on('listening', resolve));
   fixture.upstream = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
@@ -428,6 +481,8 @@ beforeEach(() => {
     'Source probe failed: Invalid data found when processing input';
   fixture.scopes = [];
   fixture.chain = { hits: 0, expireA: false, thenTo: '/media/B' };
+  fixture.tokens = { fresh: 1, seen: [] };
+  fixture.logins = [];
   fixture.prepared = { mode: 'direct' };
   fixture.segment = 'slow';
   fixture.segmentAborts = 0;
@@ -851,6 +906,26 @@ describe('guest playback authorization', () => {
       expect(await response.text()).toBe('B');
       expect(fixture.chain.hits).toBe(2);
       expect(await (await read(handle)).text()).toBe('B');
+    });
+    it('sends a login written into the URL as Basic auth', async () => {
+      const port = fixture.upstream.split(':').pop();
+      fixture.sourcePath = `http://user%40x:p%3Ass@127.0.0.1:${port}/webdav/file`;
+      const handle = await handleOf();
+      expect(await (await read(handle)).text()).toBe('W');
+      expect(fixture.logins.length).toBeGreaterThan(0);
+      expect(new Set(fixture.logins)).toEqual(
+        new Set([`Basic ${Buffer.from('user@x:p:ss').toString('base64')}`])
+      );
+    });
+    it("runs the host's configuration again once when the source refuses its credentials", async () => {
+      fixture.sourcePath = '/drive/file';
+      // The list made for the guest (list 1) carries a token the file no longer takes.
+      fixture.tokens.fresh = 2;
+      const handle = await handleOf();
+      expect(fixture.tokens.seen[0]).toBe('Bearer token-1');
+      // A list made now (not the one kept) carries a token it does take.
+      expect(fixture.tokens.seen).toContain('Bearer token-2');
+      expect(await (await read(handle)).text()).toBe('D');
     });
     it('never serves a placeholder clip as the file', async () => {
       fixture.sourcePath = '/chain';
