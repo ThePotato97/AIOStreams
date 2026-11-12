@@ -765,6 +765,12 @@ export function initLayout(init) {
   return out.join(' ');
 }
 /** Whether every stream in the manifest has a segment written. */
+/** Milliseconds written, from FFmpeg's `-progress` line `out_time_us=…`; null for others and "N/A". */
+export function outTimeMs(line) {
+  if (!line.startsWith('out_time_us=')) return null;
+  const us = Number(line.slice(12));
+  return line.length > 12 && Number.isFinite(us) ? us / 1000 : null;
+}
 export function manifestReady(mpd) {
   const sets = mpd.split('<AdaptationSet').slice(1);
   return sets.length > 0 && sets.every((set) => /<S [^>]*d="/.test(set));

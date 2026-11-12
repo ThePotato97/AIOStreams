@@ -31,15 +31,6 @@ const INPUT: Record<Codec, RegExp> = {
   ac3: /codecs="?ac-3/i,
   dts: /codecs="?(mp4a\.a[9ab]|dts[cehl])\b/i,
 };
-/** Each codec as the browser would get it without the transmuxer. */
-/* eslint-disable lingui/no-unlocalized-strings -- MIME types for the browser, not UI text */
-const AS_IS: Record<Codec, string> = {
-  truehd: 'audio/mp4; codecs="mlpa"',
-  eac3: 'audio/mp4; codecs="ec-3"',
-  ac3: 'audio/mp4; codecs="ac-3"',
-  dts: 'audio/mp4; codecs="mp4a.a9"',
-};
-/* eslint-enable lingui/no-unlocalized-strings */
 /** The codecs libav.js decodes, where it was built (scripts/build-libav-eac3.sh). */
 const LIBAV: Codec[] = __LIBAV_DECODERS__ as Codec[];
 const codecOf = (mimeType: string) =>
@@ -57,16 +48,13 @@ export function clientBinauralSupported(): boolean {
 }
 
 /**
- * The codecs this browser renders to binaural itself: those it doesn't play itself (all but
- * TrueHD also need their decoder built into libav.js).
+ * The codecs this browser renders to binaural itself (all but TrueHD need their decoder built into
+ * libav.js), including those it plays itself (E-AC-3 and AC-3 in Edge and Safari): the player
+ * has Shaka transmux them anyway (`forceTransmux`), so every browser takes the same path.
  */
 export function clientBinauralCodecs(): Codec[] {
   if (!clientBinauralSupported()) return [];
-  // Shaka transmuxes only what the browser can't play itself: where it claims to, it would get
-  // the stream as it is, so the server renders that codec instead.
-  return (['truehd', ...LIBAV] as Codec[]).filter(
-    (codec) => !MediaSource.isTypeSupported(AS_IS[codec])
-  );
+  return ['truehd', ...LIBAV] as Codec[];
 }
 
 /** The worker's answer: converted bytes, and the scene snapshots taken converting them. */

@@ -101,6 +101,10 @@ const SHAKA_CONFIG = {
     rebufferingGoal: 2,
     bufferBehind: 30,
   },
+  // The audio the page renders (binaural or speakers) goes through the transmuxer even where
+  // the browser would play it as it is (E-AC-3 in Edge): what the transcoder copied for the page
+  // is rendered here. Nothing else matches a transmuxer: video and AAC/FLAC append as they are.
+  mediaSource: { forceTransmux: true },
 };
 
 /** A target this little past what is written is waited for, not re-prepared. */
@@ -613,6 +617,8 @@ export function guestEngine(
     };
     async function prepare(positionMs: number, waitedMs = 0) {
       if (!file) return;
+      // The request's own wait counts too: the transcoder holds each one up to 30 s first.
+      const began = Date.now();
       const at = ++generation;
       controller?.abort();
       controller = new AbortController();
@@ -691,15 +697,16 @@ export function guestEngine(
         };
         // A full transcoder frees a place as viewers leave: wait for one.
         const ms = Math.max(1, retryAfter ?? 0) * 1000;
+        const waited = waitedMs + (Date.now() - began) + ms;
         if (
           status === 503 &&
           retryAfter != null &&
-          waitedMs + ms <= CAPACITY_WAIT_MS
+          waited <= CAPACITY_WAIT_MS
         ) {
           preparing = false;
           void sleep(ms, signal)
             .then(() => {
-              if (at === generation) void prepare(positionMs, waitedMs + ms);
+              if (at === generation) void prepare(positionMs, waited);
             })
             .catch(() => {});
           return;

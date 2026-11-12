@@ -14,6 +14,7 @@ import {
   firstPacketTime,
   select,
   manifestReady,
+  outTimeMs,
   manifestStart,
   subtitleKind,
   videoCodec,
@@ -370,8 +371,11 @@ function startMain(job, encoder, gpu, extra) {
     progress = lines.pop() ?? '';
     for (const line of lines) {
       if (line.startsWith('speed=')) job.speed = line.slice(6);
-      if (line.startsWith('out_time_us=')) {
-        job.producedMs = job.offsetMs + Number(line.slice(12)) / 1000;
+      // "N/A" until FFmpeg has written something: NaN would match no position, and every request
+      // for this job until then would start another one.
+      const outMs = outTimeMs(line);
+      if (outMs != null) {
+        job.producedMs = job.offsetMs + outMs;
         if (!job.paused && job.producedMs > maximumPosition(job) + 120000) {
           child.kill('SIGSTOP');
           job.paused = true;

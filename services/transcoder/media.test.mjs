@@ -10,6 +10,7 @@ import {
   ffmpegArgs,
   duration,
   manifestReady,
+  outTimeMs,
   manifestStart,
   subtitleKind,
   videoCodec,
@@ -1544,4 +1545,12 @@ test('real FFmpeg: surround stays at its layout as FLAC, up to 7.1, in order', a
   const aac = await convert('aac71', '7.1', 8, { surround: true });
   assert.equal(aac.probe.codec_name, 'aac');
   assert.equal(aac.probe.channels, 6);
+});
+
+test('progress: out_time is read once FFmpeg has written something', () => {
+  assert.equal(outTimeMs('out_time_us=4000000'), 4000);
+  // before the first packet is written
+  assert.equal(outTimeMs('out_time_us=N/A'), null);
+  assert.equal(outTimeMs('out_time_us='), null);
+  assert.equal(outTimeMs('speed=4.2x'), null);
 });
