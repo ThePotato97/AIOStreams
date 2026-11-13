@@ -13,6 +13,25 @@ import type { EngineFactory, EngineFile } from './engine';
 import { afterOpenError, type OpenError } from './convert-plan';
 import { party } from '../party/party';
 
+/**
+ * Whether the party means to play: a Seek or a member's wait holds it only a moment, and its
+ * commands say whether it then plays on (a Pause or Stop says it doesn't).
+ */
+let meansToPlay = false;
+party.subscribe(() => {
+  if (party.state()?.timeline?.playing) meansToPlay = true;
+});
+party.on((event) => {
+  if (event.type !== 'command') return;
+  if (event.command.command === 'Unpause') meansToPlay = true;
+  else if (event.command.command !== 'Seek') meansToPlay = false;
+});
+export function partyWillPlay(): boolean {
+  const state = party.state();
+  if (!state?.timeline) return false;
+  return state.timeline.playing || meansToPlay;
+}
+
 /*
  * A browser plays the video of most releases but not their audio (E-AC-3,
  * DTS, TrueHD): direct play then runs silent. Those play through the
@@ -100,6 +119,7 @@ export function convertingEngine(
       convertOnDecodeError: false,
       failedMessage: (detail) => detail,
       onExpired: (message) => onExpired(message),
+      partyPlaying: partyWillPlay,
     }
   );
   const keyOf = (file: EngineFile) =>

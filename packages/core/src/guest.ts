@@ -224,4 +224,44 @@ export interface GuestPlayback {
   effective: GuestPlaybackSpec;
   /** Fonts attached to the file, for an ASS subtitle. */
   fontUrls?: string[];
+  /**
+   * A converted playback's state when it was admitted: it plays once `ready`; until then the
+   * page follows it (`/prepare/:lease/state`). A direct one is ready at once.
+   */
+  version?: number;
+  stage?: GuestPlaybackStage;
+  ready?: boolean;
+  failure?: GuestPlaybackFailure | null;
+}
+/** Where a converted playback is, as the transcoder sets it where each event happens. */
+export type GuestPlaybackStage =
+  | 'opening'
+  | 'waitingAudio'
+  | 'rendering'
+  | 'waitingSource'
+  | 'encoding'
+  | 'ready'
+  | 'paused'
+  | 'finished'
+  | 'failed';
+/**
+ * Why a converted playback won't play. `source`: the file failed (`code` says whether another try
+ * may help); `capacity`: the server is full; `encoder`, `conversion`: the conversion failed.
+ */
+export interface GuestPlaybackFailure {
+  class: 'source' | 'capacity' | 'encoder' | 'conversion';
+  status?: number;
+  code?: string;
+  reason?: string;
+}
+/** A converted playback's state, as the long poll answers it. */
+export interface GuestPlaybackState {
+  version: number;
+  stage: GuestPlaybackStage;
+  ready: boolean;
+  mode: GuestPlayback['mode'];
+  effective: GuestPlaybackSpec;
+  /** Where it plays from, in the source's time, once ready. */
+  startMs: number | null;
+  failure: GuestPlaybackFailure | null;
 }

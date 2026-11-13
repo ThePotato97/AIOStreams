@@ -1,7 +1,11 @@
 import { t } from '@lingui/core/macro';
 import { toast } from 'sonner';
 import type React from 'react';
-import type { GuestPlayback } from '@aiostreams/core';
+import type {
+  GuestPlayback,
+  GuestPlaybackFailure,
+  GuestPlaybackStage,
+} from '@aiostreams/core';
 import type {
   EngineFactory,
   EngineFile,
@@ -33,7 +37,7 @@ import {
 import { sceneStore } from '../playback/binaural/objects';
 import { browserCapabilities } from './capabilities';
 import type { GuestApi, GuestCurrent } from './api';
-import { sleep, whenReady } from './ready';
+import { whenReady } from './ready';
 import { renderAss, renderPgs, type Renderer } from './subtitle-renderer';
 import {
   afterFailure,
@@ -61,9 +65,18 @@ interface ShakaPlayer extends EventTarget {
   } | null;
   getNetworkingEngine?(): {
     registerResponseFilter(filter: DoviCapture['filter']): void;
+    addEventListener?(
+      type: 'retry',
+      listener: (event: {
+        error?: { code?: number; data?: unknown[] };
+        preventDefault(): void;
+      }) => void
+    ): void;
   } | null;
   /** The connection's estimate and the playing stream's bitrate, in bits a second. */
   getStats?(): { estimatedBandwidth?: number; streamBandwidth?: number };
+  /** Where the presentation can be played from now, in seconds: a live manifest's window. */
+  seekRange?(): { start: number; end: number };
 }
 type Shaka = {
   Player: { new (): ShakaPlayer; isBrowserSupported(): boolean };
@@ -109,8 +122,38 @@ const SHAKA_CONFIG = {
 
 /** A target this little past what is written is waited for, not re-prepared. */
 const UNWRITTEN_WAIT_MS = 60_000;
-/** The longest a full transcoder is waited for before reporting it. */
-const CAPACITY_WAIT_MS = 5 * 60_000;
+/** The longest a conversion's start is counted on when projecting where to start it. */
+const LEAD_CAP_MS = 30_000;
+/**
+ * How long each source's conversions took to start (prepare to playable), by revision: a prepare
+ * while the party plays starts that far ahead, where the party will be once it plays.
+ */
+const leads = new Map<string, number>();
+/** What a converted playback is doing while it starts, for the waiting screen. */
+function stageText(stage: GuestPlaybackStage | undefined): string {
+  switch (stage) {
+    case 'waitingAudio':
+      return t`Waiting for the audio…`;
+    case 'rendering':
+      return t`Rendering binaural audio…`;
+    case 'encoding':
+      return t`Converting…`;
+    case 'waitingSource':
+      return t`Waiting for the source: the host's server is opening it, or restarting…`;
+    default:
+      return t`Opening the source…`;
+  }
+}
+/** Why a converted playback won't play, for the failure screen. */
+function failureText(failure: GuestPlaybackFailure): string {
+  if (failure.class === 'source')
+    return (
+      failure.reason ?? t`The source couldn't be read; pick another version`
+    );
+  if (failure.class === 'capacity')
+    return failure.reason ?? t`The server is converting as much as it can`;
+  return failure.reason ?? t`The conversion failed`;
+}
 /*
  * What this page does for a playback follows its effective spec: what the server does after any
  * fallback (rendering without binaural, say), not what was asked.
@@ -150,6 +193,11 @@ export function guestEngine(
     failedMessage?: (detail: string) => string;
     /** The playback session is gone; reported as failed unless handled. */
     onExpired?: (message: string) => void;
+    /**
+     * Whether the party this plays for is playing: a prepare then starts where the party will be
+     * once it plays. Off outside a party.
+     */
+    partyPlaying?: () => boolean;
   } = {}
 ) {
   const holdUnwritten = options.holdUnwritten ?? (() => true);
@@ -187,12 +235,62 @@ export function guestEngine(
     let tries: Tries = { network: 0, media: 0 };
     /** The prepare whose playback has been reported failed, once. */
     let failedAt = -1;
+    /** The prepare started because a segment left the window: one per playback. */
+    let windowAt = -1;
     let quality: 'original' | '1080p' | '720p' = 'original';
     let audio: number | undefined, subtitle: number | undefined;
     let paused = true,
       preparing = false;
+    /** A prepare whose time to playing is still to be measured, for `leads`. */
+    let starting: {
+      revision: string;
+      asked: number;
+      generation: number;
+    } | null = null;
     /** Where the in-flight prepare should start playing; seeks move it. */
     let target = 0;
+    /** How far ahead of the asked position it was put: where the party will be once it plays. */
+    let ahead = 0;
+    /** The prepare whose stream has loaded: until then, the stream starts where it was put. */
+    let loadedAt = -1;
+    /** When the in-flight prepare's projection was made: the party reaches `target` `ahead` later. */
+    let projectedAt = 0;
+    /**
+     * A stream put ahead of the party waits there, paused, until the party reaches it: until then
+     * it doesn't play, whatever asks it to.
+     */
+    let holdUntil = 0;
+    let holdTimer: ReturnType<typeof setTimeout> | undefined;
+    const hold = (at: number) => {
+      clearTimeout(holdTimer);
+      holdUntil = ahead > 0 ? projectedAt + ahead : 0;
+      const wait = holdUntil - Date.now();
+      if (wait <= 0) return (holdUntil = 0);
+      holdTimer = setTimeout(() => {
+        holdUntil = 0;
+        if (at === generation && !preparing) raw.setPaused(paused);
+      }, wait);
+    };
+    const holding = () => holdUntil > Date.now();
+    /**
+     * How much of the lead is still to come: the party reaches `target` at `projectedAt + ahead`,
+     * so a seek to where it is now is that much short of the target.
+     */
+    const toCome = () => Math.max(0, projectedAt + ahead - Date.now());
+    /** How fast the playing conversion writes, from the heartbeat: its source's time a second. */
+    let writing: { ms: number; at: number; speed: number | null } | null = null;
+    const writtenMs = () =>
+      (player?.getManifest()?.presentationTimeline?.getMaxSegmentEndTime() ??
+        0) * 1000;
+    /** Notes what is written now; the speed is measured over at least 3 s. */
+    const sampleWriting = () => {
+      if (!playback || playback.mode === 'direct') return;
+      const ms = writtenMs();
+      const at = Date.now();
+      if (!writing || ms < writing.ms) writing = { ms, at, speed: null };
+      else if (at - writing.at >= 3000)
+        writing = { ms, at, speed: (ms - writing.ms) / (at - writing.at) };
+    };
     const position = () =>
       (video.current?.currentTime ?? 0) * 1000 + (playback?.offsetMs ?? 0);
     /** The file's audio and subtitle tracks, as the player lists them. */
@@ -381,6 +479,18 @@ export function guestEngine(
       void prepare(position());
     };
     const recover = (failure: Failure) => {
+      // A segment left the window (the conversion moved on without this viewer): a new one, here,
+      // once. A playback that's gone answers 410 too: its new prepare says so, or a fresh one's
+      // segments still answering 410 do (reported below as before).
+      if (
+        failure.kind === 'network' &&
+        failure.status === 410 &&
+        windowAt !== generation
+      ) {
+        void prepare(position());
+        windowAt = generation;
+        return;
+      }
       if (dropBinaural(failure)) return;
       const step = player ? recovery(failure, tries) : 'give-up';
       const at = generation;
@@ -423,6 +533,19 @@ export function guestEngine(
         });
       if (event.type === 'state') {
         const state = { ...event.state };
+        if (
+          starting &&
+          starting.generation === generation &&
+          state.waiting === false
+        ) {
+          const took = Math.min(Date.now() - starting.asked, LEAD_CAP_MS);
+          const before = leads.get(starting.revision);
+          leads.set(
+            starting.revision,
+            before == null ? took : Math.round(before * 0.5 + took * 0.5)
+          );
+          starting = null;
+        }
         if (state.durationMs != null)
           state.durationMs = current().media.durationMs;
         if (state.audio !== undefined)
@@ -434,7 +557,10 @@ export function guestEngine(
         if (player && state.rate === 0) delete state.rate;
         return emit({ type: 'state', state });
       }
-      if (event.type === 'loaded') listTracks();
+      if (event.type === 'loaded') {
+        loadedAt = generation;
+        listTracks();
+      }
       emit(event);
     };
     /** Refreshes why a converted stream is buffering, while it is. */
@@ -512,6 +638,13 @@ export function guestEngine(
         // Dolby Vision drawn here, from each frame's RPU, where this browser can
         const capture = new DoviCapture();
         next.getNetworkingEngine?.()?.registerResponseFilter(capture.filter);
+        // A segment the server dropped (410) won't come back: no retries, so it is reported (and
+        // prepared again) at once.
+        next.getNetworkingEngine?.()?.addEventListener?.('retry', (event) => {
+          const { code, data } = event.error ?? {};
+          // BAD_HTTP_STATUS (1001) carries the URI, then the status.
+          if (code === 1001 && data?.[1] === 410) event.preventDefault();
+        });
         capture.onSeen(() => {
           if (noDovi || at !== generation || player !== next || !video.current)
             return;
@@ -628,10 +761,8 @@ export function guestEngine(
         }
       }
     };
-    async function prepare(positionMs: number, waitedMs = 0) {
+    async function prepare(positionMs: number) {
       if (!file) return;
-      // The request's own wait counts too: the transcoder holds each one up to 30 s first.
-      const began = Date.now();
       const at = ++generation;
       controller?.abort();
       controller = new AbortController();
@@ -639,7 +770,13 @@ export function guestEngine(
       const signal = controller.signal;
       tries = { network: 0, media: 0 };
       preparing = true;
-      target = positionMs;
+      // While the party plays, start where it will be once this plays: its position plus how long
+      // this source's conversions have taken to start.
+      const playing = options.partyPlaying?.() === true;
+      ahead = playing ? (leads.get(current().revision) ?? 0) : 0;
+      target = positionMs + ahead;
+      writing = null;
+      projectedAt = Date.now();
       emit({ type: 'state', state: { waiting: true, loaded: false } });
       raw.setPaused(true);
       stopRenderer();
@@ -664,10 +801,11 @@ export function guestEngine(
         // A newer prepare started while this one asked the browser (the headphones setting read
         // as a file opens does): sent now, this one would reach the server after it and replace it.
         if (at !== generation) return;
-        const result = await api.prepare(
+        const asked = Date.now();
+        let result = await api.prepare(
           {
             revision: info.revision,
-            positionMs,
+            positionMs: target,
             quality,
             audio,
             subtitle,
@@ -677,6 +815,43 @@ export function guestEngine(
           signal
         );
         if (at !== generation) return;
+        // A conversion starts on the server: followed here until it plays, or fails.
+        // (An answer without a state, from a server that waits itself, plays at once.)
+        let state = result;
+        while (state.ready === false && !state.failure) {
+          emit({
+            type: 'state',
+            state: { waiting: true, waitingFor: stageText(state.stage) },
+          });
+          const next = await api.state(
+            result.lease,
+            state.version ?? -1,
+            signal
+          );
+          if (at !== generation) return;
+          state = { ...state, ...next };
+        }
+        if (state.failure)
+          throw Object.assign(new Error(failureText(state.failure)), {
+            status: state.failure.status ?? 502,
+            code:
+              state.failure.class === 'source'
+                ? (state.failure.code ?? 'source_failed')
+                : state.failure.class === 'capacity'
+                  ? 'transcoder_busy'
+                  : 'conversion_failed',
+          });
+        result = {
+          ...result,
+          mode: state.mode ?? result.mode,
+          effective: state.effective ?? result.effective,
+        };
+        // How long this source takes from asking to playing, measured when it plays (below), while
+        // the party plays: what a prepare adds to the party's position.
+        starting =
+          result.mode !== 'direct' && playing
+            ? { revision: info.revision, asked, generation: at }
+            : null;
         supersededTries = 0;
         playback = result;
         onMode(result.mode);
@@ -690,11 +865,12 @@ export function guestEngine(
           surround: surroundOutput(),
           trackChannels: track?.channels ?? 2,
         });
+        hold(at);
         raw.load({
           ...file,
           url: new URL(result.url, window.location.href).href,
           startMs: Math.max(0, target - result.offsetMs),
-          paused,
+          paused: paused || holding(),
           subtitles: [],
           // Rendered on the server or here: either way no virtualiser on top.
           binaural: serverRenders(result) || pageRenders(result),
@@ -703,27 +879,11 @@ export function guestEngine(
         listTracks();
       } catch (error) {
         if (at !== generation || signal.aborted) return;
-        const { status, message, retryAfter, code } = error as Error & {
+        const { status, message, code } = error as Error & {
           status?: number;
           retryAfter?: number;
           code?: string;
         };
-        // A full transcoder frees a place as viewers leave: wait for one.
-        const ms = Math.max(1, retryAfter ?? 0) * 1000;
-        const waited = waitedMs + (Date.now() - began) + ms;
-        if (
-          status === 503 &&
-          retryAfter != null &&
-          waited <= CAPACITY_WAIT_MS
-        ) {
-          preparing = false;
-          void sleep(ms, signal)
-            .then(() => {
-              if (at === generation) void prepare(positionMs, waited);
-            })
-            .catch(() => {});
-          return;
-        }
         // Another request from this guest won on the server: from a page reloaded away from, which
         // keeps running there. This page asks again, and its request is then the newest.
         if (status === 409 && code === 'superseded' && supersededTries < 2) {
@@ -821,6 +981,7 @@ export function guestEngine(
       clearInterval(heartbeat);
       heartbeat = setInterval(() => {
         if (!playback) return;
+        sampleWriting();
         const lease = playback.lease;
         void api
           .request('/touch', { positionMs: position(), lease })
@@ -866,31 +1027,39 @@ export function guestEngine(
           // A small move just changes where the prepared stream starts (the
           // companion reuses a job up to 8 s past what it has produced); a
           // larger one needs a prepare at the new position.
-          if (Math.abs(ms - target) <= 8000) target = ms;
+          // Compared with where the party will be by then: the lead still to come.
+          if (Math.abs(ms + toCome() - target) <= 8000) target = ms + toCome();
           else void prepare(ms);
+          return;
+        }
+        // Waiting at where it was put for the party: a seek near there changes nothing.
+        if (holding() && Math.abs(ms + toCome() - target) <= 8000) return;
+        clearTimeout(holdTimer);
+        holdUntil = 0;
+        // Prepared, still loading: it starts where it was put, close to a seek near there.
+        if (playback && playback.mode !== 'direct' && loadedAt !== generation) {
+          if (Math.abs(ms + toCome() - target) > 8000) void prepare(ms);
           return;
         }
         const local = ms - (playback?.offsetMs ?? 0);
         const el = video.current;
-        const ranges = el
-          ? Array.from({ length: el.seekable.length }, (_, i) => ({
-              start: el.seekable.start(i) * 1000,
-              end: el.seekable.end(i) * 1000,
-            }))
-          : [];
-        // A live manifest's seekable range follows the clock, behind a
-        // conversion that runs ahead of it: what's converted ends where the
-        // manifest's last segment does.
-        const converted = player
-          ?.getManifest()
-          ?.presentationTimeline?.getMaxSegmentEndTime();
-        if (converted != null && ranges.length) {
-          const last = ranges.at(-1)!;
-          last.end = Math.max(last.end, converted * 1000);
-        }
+        // The window the converted stream keeps, as Shaka has it from the manifest (its
+        // availability range: what's left behind is gone). Shaka seeks only inside it. Its live
+        // edge follows the clock from where the first manifest ended, so what a conversion wrote
+        // ahead of that is past the window: a prepare there reuses the job, and its new manifest
+        // starts with the edge where the writing is.
+        const window = player?.seekRange?.();
+        const written =
+          (player
+            ?.getManifest()
+            ?.presentationTimeline?.getMaxSegmentEndTime() ?? 0) * 1000;
+        // Playable up to Shaka's edge, and no further than what is written: the edge follows the
+        // clock, past the last segment of a conversion that paused ahead of its viewers.
+        const edgeMs = window ? window.end * 1000 : 0;
+        const reachable = written > 0 ? Math.min(edgeMs, written) : edgeMs;
         const available =
           playback?.mode === 'direct' ||
-          ranges.some((r) => local >= r.start && local <= r.end);
+          (!!window && local >= window.start * 1000 && local <= reachable);
         if (local >= 0 && available) return raw.seek(local);
         // A converted stream is written as it plays. Party sync asks a guest
         // who fell behind for the host's position, which often isn't written
@@ -898,23 +1067,37 @@ export function guestEngine(
         // and sync asks again. Instead, go as far as is written and let the
         // stream catch up, unless the target is far enough ahead that a fresh
         // conversion there gets to it sooner.
-        const edge = ranges.length ? Math.max(...ranges.map((r) => r.end)) : 0;
+        const edge = Math.max(reachable, written);
+        // Waited for unless the conversion is measured not to get there sooner than a new one would
+        // start: it must write faster than the party plays, and catch up within a start's time.
+        // Until its speed is known (a few seconds), it is waited for.
+        sampleWriting();
+        const speed = writing?.speed ?? null;
+        const catchUpMs =
+          speed === null
+            ? 0
+            : speed > 1
+              ? (local - edge) / (speed - 1)
+              : Infinity;
+        const startMs = leads.get(current().revision) ?? LEAD_CAP_MS;
         if (
           holdUnwritten() &&
           playback &&
           playback.mode !== 'direct' &&
           local > edge &&
-          local - edge <= UNWRITTEN_WAIT_MS
+          local - edge <= UNWRITTEN_WAIT_MS &&
+          catchUpMs <= startMs
         ) {
           const now = (el?.currentTime ?? 0) * 1000;
-          if (edge - now > EDGE_MARGIN_MS) raw.seek(edge - EDGE_MARGIN_MS);
+          if (reachable - now > EDGE_MARGIN_MS)
+            raw.seek(reachable - EDGE_MARGIN_MS);
           return;
         }
         void prepare(ms);
       },
       setPaused(next) {
         paused = next;
-        if (!preparing) raw.setPaused(next);
+        if (!preparing && !holding()) raw.setPaused(next);
       },
       setAudio(id) {
         const next = Number(id);

@@ -30,6 +30,8 @@ import { GuestSessionProvider } from '../lib/session';
 import { NO_SERVER_INFO, ServerInfoProvider } from '../lib/server-info';
 import { PartySheet, openPartySheet } from '../components/party/party-sheet';
 import { PlayerPage } from './player';
+import { waitForNoPlayer } from '../lib/party/playback';
+import { partyWillPlay } from '../lib/playback/convert';
 import { setNavigator } from '../lib/paths';
 import type { MediaSegmentDto } from '../lib/types';
 import type { EngineFactory } from '../lib/playback/engine';
@@ -251,10 +253,23 @@ function GuestParty({
   const state = useParty();
   const entry = playingEntry(state);
   const away = usePartyAway();
+  // Each (re)join, the group waits for this member until told otherwise: before a player takes
+  // over, the guest doesn't hold the party.
+  const live = state?.status === 'live';
+  React.useEffect(() => {
+    if (live) waitForNoPlayer();
+  }, [live]);
+  // The title, as a long poll: asked again as soon as answered, each time with what's known, so
+  // it answers when that changes (a title, a version, a failure, a recovery).
+  const known = React.useRef('');
   const info = useQuery({
     queryKey: ['guest-current', api.token, entry?.playlistItemId],
-    queryFn: ({ signal }) => api.current(signal),
-    refetchInterval: 2000,
+    queryFn: async ({ signal }) => {
+      const now = await api.current(signal, known.current);
+      known.current = now.token ?? '';
+      return now;
+    },
+    refetchInterval: (query) => (query.state.status === 'error' ? 2000 : 50),
     placeholderData: keepPreviousData,
     retry: false,
   });
@@ -263,9 +278,11 @@ function GuestParty({
       onLeave();
   }, [info.error, onLeave]);
   const last = React.useRef<GuestCurrent | undefined>(undefined);
-  if (info.data) last.current = info.data;
-  const current = info.data ?? last.current;
-  playing.current = current;
+  // Only a title resolved and probed plays; one resolving or failed is shown while waiting.
+  const ready = info.data?.state == null || info.data.state === 'ready';
+  if (info.data && ready) last.current = info.data;
+  const current = ready ? (info.data ?? last.current) : undefined;
+  playing.current = current ?? last.current;
   /** The quality the guest chose, kept from one title to the next. */
   const [quality, setQuality] = React.useState<GuestQuality>('original');
   if (!entry || !current || current.playlistItemId !== entry.playlistItemId)
@@ -274,7 +291,11 @@ function GuestParty({
         message={
           info.error
             ? (info.error as Error).message
-            : t`Waiting for the host to choose a title…`
+            : info.data?.state === 'failed'
+              ? (info.data.error ?? t`The source couldn't be opened`)
+              : info.data?.state === 'resolving'
+                ? t`Opening what the host is playing…`
+                : t`Waiting for the host to choose a title…`
         }
       />
     );
@@ -345,6 +366,9 @@ function GuestPlayer({
 }) {
   const queryClient = useQueryClient();
   const [mode, setMode] = React.useState('');
+  // Read live by the party: a converted stream doesn't hold it.
+  const modeNow = React.useRef(mode);
+  modeNow.current = mode;
   const [loaded, setLoaded] = React.useState(false);
   const [unlocked, setUnlocked] = React.useState(false);
   const currentRef = React.useRef(current);
@@ -390,7 +414,9 @@ function GuestPlayer({
   const [engine] = React.useState(
     () => (ref: React.RefObject<HTMLVideoElement | null>) => {
       video.current = ref;
-      const inner = guestEngine(ref, api, () => currentRef.current, setMode);
+      const inner = guestEngine(ref, api, () => currentRef.current, setMode, {
+        partyPlaying: partyWillPlay,
+      });
       setEngineQuality.current = inner.setQuality;
       // The engine takes a quality once the player page has made it, before it loads.
       const withQuality: EngineFactory = (emit, opts) => {
@@ -414,6 +440,8 @@ function GuestPlayer({
   const choice = React.useMemo(
     () => ({
       engine,
+      // Until it knows it plays the file itself, it doesn't hold the party: it may convert.
+      converted: () => modeNow.current !== 'direct',
       quality: {
         value: quality,
         options: [

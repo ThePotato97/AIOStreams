@@ -1300,15 +1300,38 @@ export function timelineOf(segments) {
  *
  * `parts`: [{ kind: 'video'|'audio', id, mpd, firstKept, codec }].
  */
+/** From the first kept segment's start to the last segment's end, over every part, plus one segment. */
+function keptSpanMs(parts) {
+  let first = Infinity;
+  let last = -Infinity;
+  let longest = 0;
+  for (const part of parts) {
+    const timeline = parseTimeline(part.mpd);
+    if (!timeline) continue;
+    const kept = timeline.segments.filter(
+      (s) => s.number >= (part.firstKept ?? 1)
+    );
+    if (!kept.length) continue;
+    const ms = 1000 / timeline.timescale;
+    first = Math.min(first, kept[0].t * ms);
+    const end = kept.at(-1);
+    last = Math.max(last, (end.t + end.d) * ms);
+    for (const s of kept) longest = Math.max(longest, s.d * ms);
+  }
+  return last > first ? last - first + longest : 0;
+}
+
 export function composeManifest(parts, { durationMs, windowMs }) {
   const running = parts.find((p) => /type="dynamic"/.test(p.mpd));
   const header = (running ?? parts[0]).mpd;
   let head = header.slice(0, header.search(/<AdaptationSet\b/));
   if (running) {
+    // Players seek only within timeShiftBufferDepth of the live edge, and the edge is the last
+    // segment written, which runs ahead of the viewer: the depth covers every segment kept.
     head = head.replace(/\s+timeShiftBufferDepth="[^"]*"/, '');
     head = head.replace(
       /<MPD\b/,
-      `<MPD timeShiftBufferDepth="PT${Math.round(windowMs / 1000)}S"`
+      `<MPD timeShiftBufferDepth="PT${Math.ceil(Math.max(windowMs, keptSpanMs(parts)) / 1000)}S"`
     );
   } else head = withFullDuration(head, durationMs);
   const sets = parts.map((part, i) => {

@@ -58,12 +58,27 @@ vi.mock('../guest/engine', () => ({
     };
   },
 }));
+const partyMock = vi.hoisted(() => ({
+  state: null as null | Record<string, unknown>,
+  listeners: new Set<() => void>(),
+  events: new Set<(event: unknown) => void>(),
+}));
 vi.mock('../party/party', () => ({
-  party: { state: () => (engines.inParty ? {} : null) },
+  party: {
+    state: () => partyMock.state ?? (engines.inParty ? {} : null),
+    subscribe: (listener: () => void) => {
+      partyMock.listeners.add(listener);
+      return () => partyMock.listeners.delete(listener);
+    },
+    on: (listener: (event: unknown) => void) => {
+      partyMock.events.add(listener);
+      return () => partyMock.events.delete(listener);
+    },
+  },
 }));
 
 import { toast } from 'sonner';
-import { convertingEngine } from './convert';
+import { convertingEngine, partyWillPlay } from './convert';
 import type { EngineFile } from './engine';
 import type { JellyfinClient } from '../client';
 
@@ -367,5 +382,35 @@ describe('convertingEngine', () => {
     expect(engines.guestOptions?.holdUnwritten?.()).toBe(false);
     engines.inParty = true;
     expect(engines.guestOptions?.holdUnwritten?.()).toBe(true);
+  });
+});
+
+describe('where the party will be', () => {
+  const set = (state: Record<string, unknown> | null) => {
+    partyMock.state = state;
+    for (const listener of partyMock.listeners) listener();
+  };
+  const command = (name: string) => {
+    for (const listener of partyMock.events)
+      listener({ type: 'command', command: { command: name } });
+  };
+  afterEach(() => set(null));
+  it('plays on after a seek while it played: the seek holds it only a moment', () => {
+    set({ group: 'Playing', timeline: { playing: true } });
+    expect(partyWillPlay()).toBe(true);
+    command('Seek');
+    set({ group: 'Playing', timeline: { playing: false } });
+    expect(partyWillPlay()).toBe(true);
+  });
+  it('stays paused after a seek while paused', () => {
+    set({ group: 'Playing', timeline: { playing: true } });
+    command('Pause');
+    set({ group: 'Paused', timeline: { playing: false } });
+    command('Seek');
+    expect(partyWillPlay()).toBe(false);
+  });
+  it('plays nothing without a timeline', () => {
+    set({ group: 'Idle' });
+    expect(partyWillPlay()).toBe(false);
   });
 });

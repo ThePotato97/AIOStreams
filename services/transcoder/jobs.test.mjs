@@ -124,3 +124,32 @@ test('a clean exit well before the end is a failure, not a finish', () => {
   // A source of unknown length can't be judged.
   assert.equal(transcoder.stoppedEarly(job(1_000, 0)), false);
 });
+
+test('jobs: a viewer behind the segments a job kept gets its own, not one whose segments there are gone', () => {
+  const seg = (number, sec) => ({ number, t: sec * 1000, d: 4000 });
+  const job = {
+    id: 'kept-test',
+    kind: 'video',
+    key: 'k',
+    failure: null,
+    startMs: 0,
+    writtenMs: 200_000,
+    timescale: 1000,
+    // Segments to 100 s were deleted: the window starts at 100 s.
+    segments: Array.from({ length: 50 }, (_, i) => seg(i + 1, i * 4)),
+    firstKept: 26,
+    viewers: new Set(),
+  };
+  transcoder.jobs.set(job.id, job);
+  try {
+    assert.equal(transcoder.matching('video', 'k', 120_000), job);
+    assert.equal(
+      transcoder.matching('video', 'k', 99_500),
+      job,
+      'within a second of the window'
+    );
+    assert.equal(transcoder.matching('video', 'k', 60_000), undefined);
+  } finally {
+    transcoder.jobs.delete(job.id);
+  }
+});

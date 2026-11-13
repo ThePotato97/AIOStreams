@@ -112,6 +112,9 @@ export type {
   GuestPlaybackRequest,
   GuestPlayback,
   GuestPlaybackSpec,
+  GuestPlaybackStage,
+  GuestPlaybackFailure,
+  GuestPlaybackState,
   GuestArtwork,
   GuestSegment,
 } from './guest.js';

@@ -3,6 +3,7 @@ import type {
   GuestMedia,
   GuestPlayback,
   GuestPlaybackRequest,
+  GuestPlaybackState,
 } from '@aiostreams/core';
 export interface GuestCurrent {
   revision: string;
@@ -12,6 +13,13 @@ export interface GuestCurrent {
   media: GuestMedia;
   /** The host's artwork for it, where the host's server has the item. */
   artwork?: GuestArtwork;
+  /** Where the title is (the long poll): resolved and probed, being resolved, or failed. */
+  state?: 'ready' | 'resolving' | 'failed';
+  /** What to send back as `after`, to wait for a change. */
+  token?: string;
+  /** A failure's message and code. */
+  error?: string;
+  code?: string;
 }
 export class GuestApi {
   constructor(
@@ -55,11 +63,30 @@ export class GuestApi {
       );
     return data as unknown as T;
   }
-  current(signal?: AbortSignal) {
-    return this.request<GuestCurrent>('/current', undefined, signal);
+  /**
+   * The title the party plays. With `after` (the token of the last answer), a long poll: answered
+   * when it changes (a title, a version, a failure, a recovery), within 25 s. A title still being
+   * resolved answers `resolving` at once, without its media.
+   */
+  current(signal?: AbortSignal, after?: string) {
+    return this.request<GuestCurrent>(
+      after == null
+        ? '/current'
+        : `/current?after=${encodeURIComponent(after)}`,
+      undefined,
+      signal
+    );
   }
   prepare(body: GuestPlaybackRequest, signal?: AbortSignal) {
     return this.request<GuestPlayback>('/prepare', body, signal);
+  }
+  /** A converted playback's state, once it changes past `after` (a long poll, 25 s at most). */
+  state(lease: string, after: number, signal?: AbortSignal) {
+    return this.request<GuestPlaybackState>(
+      `/prepare/${lease}/state?after=${after}`,
+      undefined,
+      signal
+    );
   }
 }
 export function guestBase() {

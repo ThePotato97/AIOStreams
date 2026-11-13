@@ -19,6 +19,8 @@ const fixture = vi.hoisted(() => ({
   prepares: [] as { resolve(): void }[],
   slow: false,
   noSources: false,
+  /** Holds the host's list being built (a slow resolve) until it settles. */
+  memoGate: null as Promise<void> | null,
   memoCalls: 0,
   /** A list run again (`current`) comes back without the version picked from it. */
   rerunLoses: false,
@@ -184,6 +186,7 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
   ),
   ensureMemo: async (_loc: unknown, opts?: { current?: boolean }) => (
     ++fixture.memoCalls,
+    await fixture.memoGate,
     {
       // the addons run again no longer return the version (one timed out, say)
       sources:
@@ -207,7 +210,11 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
     }
   ),
 }));
-import guestRouter, { MEDIA_TIMEOUT, withCredentials } from './routes.js';
+import guestRouter, {
+  CURRENT_WAIT,
+  MEDIA_TIMEOUT,
+  withCredentials,
+} from './routes.js';
 /** What the transcoder's DASH muxer writes, trimmed. */
 const MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
 <MPD type="dynamic" minimumUpdatePeriod="PT4S">
@@ -532,7 +539,9 @@ beforeEach(() => {
   fixture.slow = false;
   fixture.prepares = [];
   fixture.noSources = false;
+  fixture.memoGate = null;
   fixture.memoCalls = 0;
+  CURRENT_WAIT.ms = 25_000;
   fixture.rerunLoses = false;
   fixture.workerDown = false;
   fixture.logs = [];
@@ -713,6 +722,80 @@ describe('guest playback authorization', () => {
     expect(((await res.json()) as { error: string }).error).toBe(
       'Guest streaming is disabled'
     );
+  });
+  describe('the title, as a long poll', () => {
+    type Current = {
+      state: string;
+      token: string;
+      media?: unknown;
+      error?: string;
+    };
+    const poll = async (token: string, after: string) => {
+      const started = Date.now();
+      const res = await api(
+        `/current?after=${encodeURIComponent(after)}`,
+        token
+      );
+      return {
+        status: res.status,
+        body: (await res.json()) as Current,
+        ms: Date.now() - started,
+      };
+    };
+    it('answers a title still resolving at once, then when it is ready', async () => {
+      let open = () => {};
+      fixture.memoGate = new Promise<void>((r) => (open = r));
+      const secret = await invitation(),
+        token = await guest(secret);
+      join(token);
+      const first = await poll(token, '');
+      expect(first.status).toBe(200);
+      expect(first.body.state).toBe('resolving');
+      expect(first.body.token).toMatch(/^[0-9a-f]{64}:resolving$/);
+      expect(first.ms).toBeLessThan(2000);
+      // Waits for it, and answers once it's resolved and probed.
+      const next = poll(token, first.body.token);
+      await new Promise((r) => setTimeout(r, 300));
+      open();
+      const ready = await next;
+      expect(ready.body.state).toBe('ready');
+      expect(ready.body.token).toBe(
+        first.body.token.replace(':resolving', ':ready')
+      );
+      expect(ready.body.media).toBeTruthy();
+      expect(fixture.memoCalls).toBe(1);
+    });
+    it('holds a title the page already has, then answers what it is', async () => {
+      CURRENT_WAIT.ms = 1500;
+      const secret = await invitation(),
+        token = await guest(secret);
+      join(token);
+      // Followed until ready, as the page does.
+      let first = await poll(token, '');
+      for (let i = 0; i < 5 && first.body.state !== 'ready'; i++)
+        first = await poll(token, first.body.token);
+      expect(first.body.state).toBe('ready');
+      const held = await poll(token, first.body.token);
+      expect(held.body.token).toBe(first.body.token);
+      expect(held.ms).toBeGreaterThanOrEqual(1400);
+    });
+    it('answers a failure with its message, holds it, and backs off its resolve', async () => {
+      CURRENT_WAIT.ms = 1500;
+      fixture.noSources = true;
+      const secret = await invitation(),
+        token = await guest(secret);
+      join(token);
+      // The resolve fails behind the first answer; the next sees the failure.
+      let failed = await poll(token, '');
+      for (let i = 0; i < 20 && failed.body.state !== 'failed'; i++)
+        failed = await poll(token, failed.body.token);
+      expect(failed.body.state).toBe('failed');
+      expect(failed.body.error).toBeTruthy();
+      const held = await poll(token, failed.body.token);
+      expect(held.body.state).toBe('failed');
+      expect(held.ms).toBeGreaterThanOrEqual(1400);
+      expect(fixture.memoCalls).toBe(1);
+    });
   });
   it('does not re-resolve a failed source on every poll', async () => {
     fixture.noSources = true;
@@ -1231,47 +1314,69 @@ describe('converted media', () => {
       });
     return { token, prepare };
   }
-  it('waits for a conversion to play, following its state', async () => {
+  it('answers at once with the playback and its state; the page follows it', async () => {
     fixture.prepared = { mode: 'audio', id: 'job-starting' };
     fixture.starting = true;
     fixture.states = [{ version: 1, stage: 'encoding', ready: false }];
-    const { prepare } = await ownPlayback();
+    const { token, prepare } = await ownPlayback();
     const res = await prepare();
     expect(res.status).toBe(200);
-    expect(fixture.states).toHaveLength(0);
+    const playback = (await res.json()) as {
+      lease: string;
+      ready: boolean;
+      stage: string;
+      version: number;
+    };
+    // Not waited for here: still starting.
+    expect(playback).toMatchObject({
+      ready: false,
+      stage: 'opening',
+      version: 0,
+    });
+    expect(fixture.states).toHaveLength(1);
+    // Followed through the relay, its own lease only.
+    const follow = await api(
+      `/own/prepare/${playback.lease}/state?after=0`,
+      token
+    );
+    expect(follow.status).toBe(200);
+    expect(await follow.json()).toMatchObject({
+      stage: 'encoding',
+      ready: false,
+    });
+    expect(
+      (await api(`/own/prepare/${'x'.repeat(43)}/state?after=0`, token)).status
+    ).toBe(410);
     expect(fixture.releases).toEqual([]);
   });
-  it('passes a source failure on with its code, and releases the playback', async () => {
+  it('relays a failure with its class and code', async () => {
     fixture.prepared = { mode: 'audio', id: 'job-failing' };
     fixture.starting = true;
-    fixture.states = [
-      {
-        version: 1,
-        stage: 'failed',
-        ready: false,
-        failure: {
-          class: 'source',
-          status: 502,
-          code: 'source_unreachable',
-          reason: 'The usenet source could not be read',
-        },
-      },
-    ];
-    const { prepare } = await ownPlayback();
-    const res = await prepare();
-    expect(res.status).toBe(502);
-    expect(((await res.json()) as { code: string }).code).toBe(
-      'source_unreachable'
-    );
-    expect(fixture.releases).toEqual(['job-failing']);
+    const failure = {
+      class: 'source',
+      status: 502,
+      code: 'source_unreachable',
+      reason: 'The usenet source could not be read',
+    };
+    fixture.states = [{ version: 1, stage: 'failed', ready: false, failure }];
+    const { token, prepare } = await ownPlayback();
+    const { lease } = (await (await prepare()).json()) as { lease: string };
+    const state = (await (
+      await api(`/own/prepare/${lease}/state?after=0`, token)
+    ).json()) as { stage: string; failure: unknown };
+    expect(state.stage).toBe('failed');
+    expect(state.failure).toEqual(failure);
   });
   it('releases a playback whose admission failed, which the transcoder may hold', async () => {
     fixture.prepared = { mode: 'audio', id: 'job-refused' };
     fixture.full = true;
     const { prepare } = await ownPlayback();
+    // Opening the item again released the earlier playback of it: count from here.
+    const before = fixture.releasedLeases.length;
     expect((await prepare()).status).toBe(503);
-    expect(fixture.releasedLeases).toHaveLength(1);
-    expect(fixture.releasedLeases[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const released = fixture.releasedLeases.slice(before);
+    expect(released).toHaveLength(1);
+    expect(released[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
   it('takes over the earlier playback, and names the file it plays', async () => {
     fixture.prepared = { mode: 'audio', id: 'job-a' };

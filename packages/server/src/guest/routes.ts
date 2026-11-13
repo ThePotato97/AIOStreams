@@ -93,6 +93,8 @@ interface Source {
   title: string;
   record: MediaSourceRecord;
   media?: Promise<GuestMedia>;
+  /** Probed: its media are known, and /current answers with them at once. */
+  probed?: boolean;
   /** The host's item, found under the host's configuration: its artwork and segments. */
   host?: Located;
   artwork?: Promise<GuestArtwork>;
@@ -422,12 +424,7 @@ async function current(req: Request) {
   if (!playing) fail(409, 'Waiting for the host to choose a title');
   const entry = state.binding.entries.get(playing.ref);
   if (!entry) fail(409, 'Waiting for the host to share this title');
-  const revision = digest([
-    playing.playlistItemId,
-    entry.itemId,
-    entry.sourceId,
-    entry.filename,
-  ]);
+  const revision = revisionOf(playing, entry);
   // Kept after it expires, so the next failure backs off longer.
   const failure = state.binding.failures.get(revision);
   if (failure && failure.until > Date.now()) throw failure.error;
@@ -505,6 +502,8 @@ async function current(req: Request) {
       return source;
     })();
     state.binding.sources.set(revision, pending);
+    const started = pending;
+    started.then((source) => settled.set(started, source)).catch(() => {});
     pending.catch((error) => {
       if (state.binding.sources.get(revision) === pending)
         state.binding.sources.delete(revision);
@@ -524,10 +523,47 @@ async function current(req: Request) {
     }
     throw error;
   }
+  source.probed = true;
   // Working again: the next failure starts from the shortest wait.
   state.binding.failures.delete(revision);
   return { ...state, source, media };
 }
+/** A title's identity: the item playing, and the host's version of it. */
+function revisionOf(
+  playing: { playlistItemId: string },
+  entry: { itemId: string; sourceId?: string; filename?: string }
+): string {
+  return digest([
+    playing.playlistItemId,
+    entry.itemId,
+    entry.sourceId,
+    entry.filename,
+  ]);
+}
+/** Each resolved source, by the resolve that found it: whether one has finished, without waiting. */
+const settled = new WeakMap<Promise<Source>, Source>();
+/**
+ * Where the title playing is, without waiting for it: `ready` (resolved and probed), `resolving`,
+ * or `failed` (backing off after a failure). Null if there is none to play yet.
+ */
+function peek(state: Awaited<ReturnType<typeof active>>) {
+  const playing = state.party.playing;
+  const entry = playing && state.binding.entries.get(playing.ref);
+  if (!playing || !entry) return null;
+  const revision = revisionOf(playing, entry);
+  const failure = state.binding.failures.get(revision);
+  const pending = state.binding.sources.get(revision);
+  const source = pending && settled.get(pending);
+  const now: 'ready' | 'resolving' | 'failed' =
+    failure && failure.until > Date.now()
+      ? 'failed'
+      : source?.probed
+        ? 'ready'
+        : 'resolving';
+  return { revision, playing, entry, state: now, failure };
+}
+/** How long /current waits for the title to change before answering what it is. */
+export const CURRENT_WAIT = { ms: 25_000 };
 function ownSession(token: string): OwnSession {
   const session = owns.get(digest(token));
   if (!session || session.expiresAt <= Date.now() || !transcoderReady())
@@ -605,12 +641,11 @@ function fileKey(source: Source): string {
     readers.get(source.handle)?.size() ?? null,
   ]);
 }
-/** How long /prepare waits for a converted playback to start before the player asks again. */
-const PLAYING_WAIT_MS = 60_000;
 /**
  * Starts a playback at the transcoder: admitted at once (`replaces`: the playback it takes over,
- * whose jobs it may use or free), then, until the page follows the state itself, waited on here
- * until it plays. Any failure, or the wait running out, releases its lease.
+ * whose jobs it may use or free). The answer carries its state; the page follows it from there
+ * (`/prepare/:lease/state`). An admission that fails releases its lease: the transcoder may have
+ * admitted it before failing to answer (the 75 s timeout).
  */
 async function startPlayback(
   source: Source,
@@ -618,48 +653,14 @@ async function startPlayback(
   body: z.infer<typeof playbackSchema>,
   replaces?: string
 ) {
-  let answer;
   try {
-    answer = await worker('/prepare', {
+    return await worker('/prepare', {
       input: input(source),
       viewer: lease,
       request: body,
       replaces,
       file: fileKey(source),
     });
-  } catch (error) {
-    // The transcoder may have admitted it before failing to answer (the 75 s timeout).
-    await releaseLease(lease);
-    throw error;
-  }
-  if (answer.mode === 'direct') return answer;
-  try {
-    const started = Date.now();
-    let state = answer;
-    while (!state.ready && !state.failure) {
-      if (Date.now() - started > PLAYING_WAIT_MS)
-        throw Object.assign(
-          new Error('Conversion is still starting; retry shortly'),
-          { status: 503, retryAfter: 2, code: 'transcoder_busy' }
-        );
-      state = await worker(
-        `/viewers/${lease}/state?after=${state.version ?? -1}`
-      );
-    }
-    if (state.failure) {
-      const sourceFailed = state.failure.class === 'source';
-      throw Object.assign(
-        new Error(state.failure.reason ?? 'Conversion failed'),
-        {
-          status: 502,
-          class: state.failure.class,
-          code: sourceFailed
-            ? (state.failure.code ?? 'source_failed')
-            : 'conversion_failed',
-        }
-      );
-    }
-    return { ...answer, ...state };
   } catch (error) {
     await releaseLease(lease);
     throw error;
@@ -758,18 +759,61 @@ router.post('/exchange', async (req, res) => {
   });
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });
+/**
+ * The title the party plays, its media and artwork. With `after` (what the page has: its token,
+ * `<revision>:<ready|resolving|failed>`), a long poll: it answers at once when that's changed (a
+ * title change, a host's version switch, a failure, a recovery), otherwise when it changes, within
+ * 25 s. A title still resolving is answered as `resolving` at once, its resolve going on behind;
+ * a failure as `failed`, with its message and code.
+ */
 router.get('/current', async (req, res) => {
-  const { source, media } = await current(req);
-  // Found once per title, shared by every guest's poll.
-  const artwork = await (source.artwork ??= artworkOf(source));
-  res.json({
-    revision: source.revision,
-    playlistItemId: source.playlistItemId,
-    itemId: source.itemId,
-    title: source.title,
-    media,
-    artwork,
-  });
+  const after = typeof req.query.after === 'string' ? req.query.after : null;
+  const answer = async () => {
+    const { source, media } = await current(req);
+    // Found once per title, shared by every guest's poll.
+    const artwork = await (source.artwork ??= artworkOf(source));
+    res.json({
+      state: 'ready',
+      token: `${source.revision}:ready`,
+      revision: source.revision,
+      playlistItemId: source.playlistItemId,
+      itemId: source.itemId,
+      title: source.title,
+      media,
+      artwork,
+    });
+  };
+  if (after === null) return answer();
+  const deadline = Date.now() + CURRENT_WAIT.ms;
+  for (;;) {
+    const now = peek(await active(req));
+    // Nothing to play yet (no title, or not shared): as without `after`.
+    if (!now) return answer();
+    // Resolve it (once, shared), or again once a failure's back-off has passed.
+    if (now.state === 'resolving') void current(req).catch(() => {});
+    const token = `${now.revision}:${now.state}`;
+    if (token !== after || Date.now() >= deadline) {
+      if (now.state === 'ready') return answer();
+      const failure = now.failure?.error as
+        { message?: string; status?: number; code?: string } | undefined;
+      return void res.json({
+        state: now.state,
+        token,
+        revision: now.revision,
+        playlistItemId: now.playing.playlistItemId,
+        itemId: now.entry.itemId,
+        title: now.entry.title,
+        ...(now.state === 'failed'
+          ? {
+              error: failure?.message ?? 'The source failed',
+              status: failure?.status,
+              code: failure?.code,
+            }
+          : {}),
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 });
 /** The host's intro, recap and credits for the title playing, as their own player gets them. */
 router.get('/segments', async (req, res) => {
@@ -915,6 +959,10 @@ function playbackResponse(
     offsetMs?: number;
     spec: GuestPlaybackSpec;
     effective: GuestPlaybackSpec;
+    version?: number;
+    stage?: GuestPlayback['stage'];
+    ready?: boolean;
+    failure?: GuestPlayback['failure'];
   }
 ): GuestPlayback {
   const query = `?token=${encodeURIComponent(token)}&lease=${lease}`;
@@ -931,6 +979,11 @@ function playbackResponse(
     url: `${base}${result.mode === 'direct' ? 'original' : `v/${lease}/manifest.mpd`}${query}`,
     spec: result.spec,
     effective: result.effective,
+    // Converted: where it is now (the page follows it until ready). Direct: ready at once.
+    version: result.version ?? 0,
+    stage: result.stage ?? 'ready',
+    ready: result.mode === 'direct' ? true : !!result.ready,
+    failure: result.failure ?? null,
   };
   const track =
     body.subtitle == null

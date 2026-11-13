@@ -43,7 +43,28 @@ interface Report {
   at: number;
 }
 
-class Follower {
+/**
+ * What this device last told the group about waiting for it (`IgnoreWait`), when a guest page or
+ * a player that doesn't hold the party told it: a player starts from it, so it knows to turn
+ * waiting back on.
+ */
+let told: boolean | null = null;
+function tellWaiting(ignoreWait: boolean): void {
+  party.request({ type: 'IgnoreWait', ignoreWait });
+  told = ignoreWait;
+}
+/** Players following the party on this device. */
+let following = 0;
+
+/**
+ * A guest has no player until what the party plays has resolved, and whether it converts isn't
+ * known before: it doesn't hold the party meanwhile. Its player takes over once it starts.
+ */
+export function waitForNoPlayer(): void {
+  if (following === 0) tellWaiting(true);
+}
+
+export class Follower {
   private sample: Report = { positionMs: 0, at: performance.now() };
   private reports: Report[] = [];
   private rate = 1;
@@ -60,14 +81,38 @@ class Follower {
   private lastResume = 0;
   private offSince: number | null = null;
   private stopped = false;
+  /** What this member last told the group about waiting for it (`IgnoreWait`), if anything. */
+  private ignoring: boolean | null = told;
 
   constructor(
     private readonly player: () => PlayerController,
     private readonly speed: ((rate: number) => void) | undefined,
-    readonly playlistItemId: string
+    readonly playlistItemId: string,
+    /**
+     * Whether the group waits for this player (read live). A stream converted as it plays doesn't
+     * hold the party: the group plays on, and it catches up.
+     */
+    private readonly holds: () => boolean = () => true
   ) {
+    following++;
     this.own = { paused: true, at: performance.now() };
     this.restart(player().playhead.positionMs);
+    this.syncWaiting(true);
+  }
+
+  /**
+   * Tells the group not to wait for this player while it doesn't hold the party, again whenever
+   * the group forgets (a seek, a (re)join), and to wait again once it does.
+   */
+  syncWaiting(again = false): void {
+    if (!this.holds()) {
+      if (again || this.ignoring !== true) tellWaiting(true);
+      this.ignoring = true;
+    } else if (this.ignoring === true && !this.awaitingReady) {
+      // While a start or a seek settles, its Ready turns waiting back on (below), once.
+      tellWaiting(false);
+      this.ignoring = false;
+    }
   }
 
   private get timeline(): Timeline | null {
@@ -146,6 +191,8 @@ class Follower {
   }
 
   private send(type: 'Buffer' | 'Ready'): void {
+    // The group doesn't wait for a player that doesn't hold it.
+    if (type === 'Buffer' && !this.holds()) return;
     const clock = party.clock();
     const { state } = this.player();
     const when = clock ? clock.now() : Date.now();
@@ -190,6 +237,7 @@ class Follower {
         this.setPaused(true);
         this.seekTo(command.positionMs);
         this.awaitingReady = true;
+        this.syncWaiting(true);
         return;
       case 'Stop':
         return this.setPaused(true);
@@ -213,6 +261,20 @@ class Follower {
   onState(state: PlayerState, previous: PlayerState | null): void {
     if (!state.loaded) return;
     const now = performance.now();
+    // The group resumes a member it waits for once it's ready. One it isn't waiting for (it
+    // doesn't hold the party, or hasn't yet told the group it does) gets no such resume: as it
+    // loads (joining, or loading again), it plays if the party does.
+    const timelineNow = this.timeline;
+    if (
+      !previous?.loaded &&
+      (!this.holds() || this.ignoring === true) &&
+      party.state()?.status === 'live' &&
+      timelineNow?.playing &&
+      state.paused
+    ) {
+      this.setPaused(false);
+      this.seekIfOff(this.expected(timelineNow));
+    }
     // The playhead is quiet while paused, so its last report would count the pause as play.
     if (
       previous &&
@@ -259,9 +321,13 @@ class Follower {
     // Some seeks finish inside what is buffered, without the player ever waiting.
     if (this.awaitingReady && !state.waiting && now - this.lastSeekAt > 300) {
       this.awaitingReady = false;
-      party.request({ type: 'IgnoreWait', ignoreWait: false });
+      if (this.holds()) {
+        tellWaiting(false);
+        this.ignoring = false;
+      }
       this.send('Ready');
     }
+    this.syncWaiting();
     const timeline = this.timeline;
     if (!timeline) return;
     if (!state.paused && now - this.lastResume >= RESUME_MS) {
@@ -304,6 +370,7 @@ class Follower {
   }
 
   stop(): void {
+    if (!this.stopped) following--;
     this.stopped = true;
     this.clearScheduled();
     clearTimeout(this.bufferTimer);
@@ -317,9 +384,14 @@ class Follower {
  */
 export function usePartyPlayer(
   player: PlayerController,
-  playlistItemId: string | null
+  playlistItemId: string | null,
+  options: {
+    /** Whether the group waits for this player (read live); by default it does. */
+    holds?: () => boolean;
+  } = {}
 ): PlayerController {
   const latest = useLatest(player);
+  const holds = useLatest(options.holds);
   const state = useParty();
   const [follower, setFollower] = React.useState<Follower | null>(null);
   const speed = player.setRate;
@@ -331,7 +403,8 @@ export function usePartyPlayer(
     const follower = new Follower(
       () => latest.current,
       hasSpeed && raw ? (rate) => latest.current.setRate?.(rate) : undefined,
-      playlistItemId
+      playlistItemId,
+      () => holds.current?.() ?? true
     );
     setFollower(follower);
     const stopPlayhead = latest.current.playhead.subscribe(() =>
@@ -349,6 +422,12 @@ export function usePartyPlayer(
       setFollower(null);
     };
   }, [playlistItemId, latest, hasSpeed]);
+
+  // Each (re)join resets what the group knows about waiting for this member.
+  const live = state?.status === 'live';
+  React.useEffect(() => {
+    if (live) follower?.syncWaiting(true);
+  }, [live, follower]);
 
   const previous = React.useRef<PlayerState | null>(null);
   React.useEffect(() => {

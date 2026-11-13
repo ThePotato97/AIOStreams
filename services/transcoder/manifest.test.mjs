@@ -138,3 +138,16 @@ test('manifest: an audio job started after its video finished keeps the manifest
   assert.match(out, /availabilityStartTime="2026-11-12T23:03:00.000Z"/);
   assert.equal(out.match(/<AdaptationSet\b/g).length, 2);
 });
+
+test('manifest: a viewer’s window reaches back to the first segment kept, however far ahead the job writes', () => {
+  const out = composeManifest(
+    [
+      { kind: 'video', id: 'VID', mpd: video, firstKept: 3, codec: null },
+      { kind: 'audio', id: 'AUD', mpd: audio, firstKept: 2, codec: null },
+    ],
+    { durationMs: 1800_000, windowMs: 10_000 }
+  );
+  // Kept: audio from 60.01 s, video to 83.87 s, plus a segment (4 s): players seek within the
+  // depth behind the live edge, the last segment written.
+  assert.match(out, /<MPD timeShiftBufferDepth="PT28S"/);
+});

@@ -770,12 +770,23 @@ function positionsOf(job) {
   const furthest = all[0];
   return { furthest, counted: all.filter((p) => p >= furthest - STRAGGLER_MS) };
 }
+/** Where a job's kept segments start: its start until the window deletes some. */
+function keptStartOf(job) {
+  const first =
+    (job.firstKept ?? 1) > 1
+      ? job.segments.find((s) => s.number >= job.firstKept)
+      : null;
+  return first
+    ? Math.round((first.t / job.timescale) * 1000)
+    : (job.startMs ?? job.offsetMs);
+}
 /** An existing job a viewer at `positionMs` can play: same key, working, covering it. */
-function matching(kind, key, positionMs) {
+export function matching(kind, key, positionMs) {
   return [...jobs.values()].find((j) => {
     if (j.kind !== kind || j.key !== key || j.failure) return false;
     if (kind === 'subtitle') return true;
-    const start = j.startMs ?? j.offsetMs;
+    // From its first segment still kept: those behind it were deleted.
+    const start = keptStartOf(j);
     if (positionMs < start - 1000 || positionMs > endOf(j) + MARGIN_MS)
       return false;
     // Too far behind its viewers: it would hold the window back. A job of its own.

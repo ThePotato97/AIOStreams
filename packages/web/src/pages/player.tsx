@@ -700,7 +700,11 @@ function Player({
     launched,
     startPaused,
   });
-  const player = usePartyPlayer(own, playlistItemId);
+  // A stream converted as it plays (a guest's, or this user's own conversion) doesn't hold the
+  // party: the group plays on while it catches up.
+  const player = usePartyPlayer(own, playlistItemId, {
+    holds: () => !(override?.converted?.() ?? convert),
+  });
   close.current = player.close;
   const segments = useShownSegments(
     item,

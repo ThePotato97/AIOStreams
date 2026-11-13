@@ -11,6 +11,24 @@ const fakes = vi.hoisted(() => {
     retryStreaming = vi.fn(() => fakes.retryWorks);
     /** Where the manifest's last segment ends. */
     maxSegmentEnd: number | null = null;
+    /** The live window Shaka has from the manifest, in seconds. */
+    range = { start: 0, end: 0 };
+    seekRange() {
+      return this.range;
+    }
+    /** Shaka's networking engine: its response filters, and its retry event. */
+    net = Object.assign(new EventTarget(), { registerResponseFilter() {} });
+    getNetworkingEngine() {
+      return this.net;
+    }
+    /** A retry Shaka is about to make after `error`; whether a listener stopped it. */
+    retry(error: { code: number; data: unknown[] }) {
+      const event = Object.assign(new Event('retry', { cancelable: true }), {
+        error,
+      });
+      this.net.dispatchEvent(event);
+      return event.defaultPrevented;
+    }
     getManifest() {
       return {
         presentationTimeline: {
@@ -49,7 +67,8 @@ const fakes = vi.hoisted(() => {
     raw: undefined as
       | {
           emit: (event: unknown) => void;
-          loads: { url: string; startMs: number }[];
+          loads: { url: string; startMs: number; paused?: boolean }[];
+          setPaused: ReturnType<typeof vi.fn>;
           seek: (ms: number) => void;
           addServerSubtitle: ReturnType<typeof vi.fn>;
           setSubtitle: ReturnType<typeof vi.fn>;
@@ -141,13 +160,13 @@ vi.mock('../playback/video', () => ({
     (emit: (event: unknown) => void) => {
       const raw = {
         emit,
-        loads: [] as { url: string; startMs: number }[],
-        load(file: { url: string; startMs: number }) {
+        loads: [] as { url: string; startMs: number; paused?: boolean }[],
+        load(file: { url: string; startMs: number; paused?: boolean }) {
           raw.loads.push(file);
           attach(video.current, file.url);
         },
         close() {},
-        setPaused() {},
+        setPaused: vi.fn(),
         setSubtitle: vi.fn(),
         addServerSubtitle: vi.fn(),
         seek: vi.fn(),
@@ -443,20 +462,84 @@ describe('buffering', () => {
 });
 
 describe('seeking in a converted stream', () => {
-  // The live manifest's seekable range follows the clock: 40 s to 78 s,
-  // though segments to 148 s are written.
+  // The live window follows the clock: 40 s to 78 s, though segments to 148 s are written.
   const live = () => {
-    el.seekable = { length: 1, start: () => 40, end: () => 78 };
+    player().range = { start: 40, end: 78 };
     player().maxSegmentEnd = 148;
+    // Its stream has loaded (the element's loadedmetadata).
+    fakes.raw!.emit({ type: 'loaded' });
   };
-  it('seeks in place to what the manifest lists, past the seekable range', async () => {
+  it('prepares again for what is written past the seekable range, which Shaka will not seek to', async () => {
     const { engine } = setup();
     await start(engine, 45_000);
     live();
     engine.seek(125_000);
     await vi.advanceTimersByTimeAsync(0);
-    expect(fakes.raw!.seek).toHaveBeenCalledWith(125_000);
+    expect(fakes.raw!.seek).not.toHaveBeenCalled();
+    expect(prepares).toHaveLength(2);
+    expect(prepares.at(-1)?.positionMs).toBe(125_000);
+  });
+  it('waits at what is written for a spot past it, when its conversion catches up sooner than a new one starts', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    live();
+    // Shaka's edge runs on by the clock; segments are written to 100 s, then 200 s 10 s later (10x).
+    player().range = { start: 20, end: 300 };
+    player().maxSegmentEnd = 100;
+    await vi.advanceTimersByTimeAsync(10_000);
+    player().maxSegmentEnd = 200;
+    await vi.advanceTimersByTimeAsync(10_000);
+    // 30 s past what is written: caught up in about 3 s.
+    engine.seek(230_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fakes.raw!.seek).not.toHaveBeenCalledWith(230_000);
     expect(prepares).toHaveLength(1);
+  });
+  it('waits at what is written for a spot past it while its conversion’s speed is not yet known', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    live();
+    player().range = { start: 20, end: 300 };
+    player().maxSegmentEnd = 100;
+    // Just started: no speed measured yet. Party sync asks for a spot 20 s past what is written.
+    engine.seek(120_000);
+    engine.seek(120_300);
+    engine.seek(120_600);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(1);
+  });
+  it('converts again for a spot past what is written when its conversion only keeps pace', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    live();
+    player().range = { start: 20, end: 300 };
+    player().maxSegmentEnd = 100;
+    await vi.advanceTimersByTimeAsync(10_000);
+    player().maxSegmentEnd = 110;
+    await vi.advanceTimersByTimeAsync(10_000);
+    engine.seek(140_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)?.positionMs).toBe(140_000);
+  });
+  it('while its stream still loads, starts where it was put: only a far seek prepares again', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    engine.seek(48_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(1);
+    expect(fakes.raw!.seek).not.toHaveBeenCalled();
+    engine.seek(120_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)?.positionMs).toBe(120_000);
+  });
+  it('converts from a spot behind the window, which the server no longer keeps', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    live();
+    engine.seek(10_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fakes.raw!.seek).not.toHaveBeenCalled();
+    expect(prepares.at(-1)?.positionMs).toBe(10_000);
   });
   it('converts from a spot past what the manifest lists', async () => {
     const { engine } = setup();
@@ -466,6 +549,16 @@ describe('seeking in a converted stream', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(fakes.raw!.seek).not.toHaveBeenCalled();
     expect(prepares.at(-1)?.positionMs).toBe(900_000);
+  });
+});
+
+describe('a segment the server dropped', () => {
+  it('is not fetched again: a 410 is final, other failures are retried', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    expect(player().retry({ code: 1001, data: ['u/chunk', 410] })).toBe(true);
+    expect(player().retry({ code: 1001, data: ['u/chunk', 503] })).toBe(false);
+    expect(player().retry({ code: 1002, data: ['u/chunk'] })).toBe(false);
   });
 });
 
@@ -793,10 +886,16 @@ describe('a stream the browser cannot decode', () => {
 });
 
 describe('a playback the server dropped', () => {
-  it('is not fetched again, and is handed to whoever handles it', async () => {
+  it('starts again once where a segment left the window, then is handed on if still gone', async () => {
     const onExpired = vi.fn();
     const { engine, failures } = setup({ onExpired });
     await start(engine);
+    // 410: the window moved on, or the playback is gone. Prepared again here first.
+    player().fire('error', notFound(410));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(2);
+    expect(onExpired).not.toHaveBeenCalled();
+    // Its fresh segments answer 410 too: gone.
     player().fire('error', notFound(410));
     await vi.advanceTimersByTimeAsync(10_000);
     expect(player().retryStreaming).not.toHaveBeenCalled();
@@ -890,31 +989,234 @@ describe('a prepare the server turned down as stale', () => {
   });
 });
 
+describe('a conversion starting on the server', () => {
+  /** Admitted at once, still opening: the page follows its state. */
+  const starting = (api: GuestApi, states: object[]) => {
+    const prepare = vi.mocked(api.prepare).getMockImplementation()!;
+    vi.mocked(api.prepare).mockImplementationOnce(async (body) => ({
+      ...(await prepare(body)),
+      ready: false,
+      stage: 'opening',
+      version: 0,
+    }));
+    const state = vi.fn(async () => states.shift());
+    (api as unknown as { state: typeof state }).state = state;
+    return state;
+  };
+  it('is followed, its stage shown, and played once ready', async () => {
+    const { engine, api, events, failures } = setup();
+    const state = starting(api, [
+      { version: 1, stage: 'rendering', ready: false },
+      { version: 2, stage: 'ready', ready: true, failure: null },
+    ]);
+    await start(engine);
+    expect(state).toHaveBeenCalledTimes(2);
+    // Asked from what it last saw, each time.
+    expect(state.mock.calls.map((c) => (c as unknown[])[1])).toEqual([0, 1]);
+    expect(events).toContainEqual({
+      type: 'state',
+      state: { waiting: true, waitingFor: 'Rendering binaural audio…' },
+    });
+    expect(player().loads).toHaveLength(1);
+    expect(failures()).toHaveLength(0);
+  });
+  it('fails with what failed, as the source', async () => {
+    const { engine, api, failures } = setup();
+    starting(api, [
+      {
+        version: 1,
+        stage: 'failed',
+        ready: false,
+        failure: {
+          class: 'source',
+          status: 502,
+          code: 'source_failed',
+          reason: 'The download failed',
+        },
+      },
+    ]);
+    await start(engine);
+    expect(fakes.players.at(-1)?.loads ?? []).toHaveLength(0);
+    expect(failures()).toHaveLength(1);
+    expect(failures()[0].error).toContain('The download failed');
+  });
+  it('starts where the party will be once it plays, from how long this source took to play', async () => {
+    let playing = false;
+    const { engine, api } = setup({ partyPlaying: () => playing });
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    const first = start(engine, 10_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await first;
+    expect(prepares.at(-1)?.positionMs).toBe(10_000);
+    // While the party plays: a prepare, then the player plays 6 s after it was asked for.
+    playing = true;
+    vi.setSystemTime(Date.now());
+    const asked = Date.now();
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    engine.seek(200_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)?.positionMs).toBe(200_000);
+    vi.setSystemTime(asked + 6000);
+    fakes.raw!.emit({
+      type: 'state',
+      state: { paused: false, waiting: false },
+    });
+    // The next prepare the party plays through starts that far ahead (and is still starting).
+    starting(api, []);
+    (api as unknown as { state: () => Promise<never> }).state = () =>
+      new Promise<never>(() => {});
+    engine.seek(400_000);
+    await vi.advanceTimersByTimeAsync(0);
+    const lead = (prepares.at(-1)?.positionMs ?? 0) - 400_000;
+    expect(lead).toBeGreaterThanOrEqual(5000);
+    expect(lead).toBeLessThanOrEqual(7000);
+    // Party sync asking again while it prepares, a little further on, doesn't prepare again.
+    const count = prepares.length;
+    // (Within 8 s of where it was asked, though more than 8 s short of where it was put.)
+    engine.seek(397_000);
+    engine.seek(396_500);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(count);
+  });
+  it('waits, paused where it was put, until the party gets there', async () => {
+    let playing = false;
+    const { engine, api } = setup({ partyPlaying: () => playing });
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    const first = start(engine, 10_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await first;
+    playing = true;
+    vi.setSystemTime(Date.now());
+    const asked = Date.now();
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    engine.seek(200_000);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(asked + 6000);
+    fakes.raw!.emit({ type: 'state', state: { waiting: false } });
+    // Put 6 s ahead, ready at once: it loads paused, and a resume meanwhile waits.
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    engine.seek(400_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fakes.raw!.loads.at(-1)?.paused).toBe(true);
+    fakes.raw!.setPaused.mockClear();
+    engine.setPaused(false);
+    expect(fakes.raw!.setPaused).not.toHaveBeenCalledWith(false);
+    await vi.advanceTimersByTimeAsync(6500);
+    expect(fakes.raw!.setPaused).toHaveBeenCalledWith(false);
+  });
+  /**
+   * A guest that learned its source takes about 20 s from asking to playable, while the party
+   * plays (learned three times over: leads are kept per title, across engines).
+   */
+  async function withLead(
+    api: GuestApi,
+    engine: ReturnType<typeof setup>['engine']
+  ): Promise<void> {
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    const first = start(engine, 10_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await first;
+    for (let i = 0; i < 3; i++) {
+      vi.setSystemTime(Date.now());
+      const asked = Date.now();
+      starting(api, [
+        { version: 1, stage: 'ready', ready: true, failure: null },
+      ]);
+      engine.seek(200_000 + i * 100_000);
+      await vi.advanceTimersByTimeAsync(0);
+      vi.setSystemTime(asked + 20_000);
+      fakes.raw!.emit({ type: 'state', state: { waiting: false } });
+    }
+  }
+  it('with a long lead, a seek to where the party is now, while it prepares, keeps the projection', async () => {
+    const { engine, api } = setup({ partyPlaying: () => true });
+    await withLead(api, engine);
+    let answer!: (state: object) => void;
+    starting(api, []);
+    (api as unknown as { state: () => Promise<object> }).state = () =>
+      new Promise((resolve) => (answer = resolve));
+    const asked = Date.now();
+    engine.seek(1_000_000);
+    await vi.advanceTimersByTimeAsync(0);
+    const count = prepares.length;
+    const lead = (prepares.at(-1)?.positionMs ?? 0) - 1_000_000;
+    expect(lead).toBeGreaterThan(15_000);
+    // 12 s on, party sync asks for where the party is.
+    vi.setSystemTime(asked + 12_000);
+    engine.seek(1_012_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(count);
+    answer({ version: 1, stage: 'ready', ready: true, failure: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fakes.raw!.loads.at(-1)?.startMs).toBe(1_000_000 + lead);
+  });
+  it('with a long lead, a seek to where the party is now leaves the stream waiting for it', async () => {
+    const { engine, api } = setup({ partyPlaying: () => true });
+    await withLead(api, engine);
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    const asked = Date.now();
+    engine.seek(1_000_000);
+    await vi.advanceTimersByTimeAsync(0);
+    const count = prepares.length;
+    expect(prepares.at(-1)!.positionMs - 1_000_000).toBeGreaterThan(15_000);
+    vi.setSystemTime(asked + 12_000);
+    const seeks = (fakes.raw!.seek as unknown as ReturnType<typeof vi.fn>).mock
+      .calls.length;
+    engine.seek(1_012_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(count);
+    expect(
+      (fakes.raw!.seek as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    ).toBe(seeks);
+  });
+  it('with a long lead, a stream that has yet to load starts where it was put', async () => {
+    const { engine, api } = setup({ partyPlaying: () => true });
+    await withLead(api, engine);
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    const asked = Date.now();
+    engine.seek(1_000_000);
+    await vi.advanceTimersByTimeAsync(0);
+    const count = prepares.length;
+    const lead = prepares.at(-1)!.positionMs - 1_000_000;
+    expect(lead).toBeGreaterThan(15_000);
+    // The party is there: the hold is over, and the stream hasn't loaded yet.
+    vi.setSystemTime(asked + lead + 1000);
+    await vi.advanceTimersByTimeAsync(0);
+    engine.seek(1_000_000 + lead + 1000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(count);
+  });
+  it('learns nothing from a prepare while the party is paused', async () => {
+    const { engine, api } = setup({ partyPlaying: () => false });
+    starting(api, [{ version: 1, stage: 'ready', ready: true, failure: null }]);
+    const first = start(engine, 10_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await first;
+    vi.setSystemTime(Date.now() + 20_000);
+    fakes.raw!.emit({
+      type: 'state',
+      state: { paused: false, waiting: false },
+    });
+    engine.seek(400_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)?.positionMs).toBe(400_000);
+  });
+});
+
 describe('a full transcoder', () => {
   const full = (retryAfter?: number) =>
     Object.assign(new Error('Conversion capacity reached'), {
       status: 503,
       retryAfter,
     });
-  it('is waited for, as it says, then the stream starts', async () => {
+  it('is reported at once, with a retry, rather than waited for', async () => {
     const { engine, api, failures } = setup();
-    vi.mocked(api.prepare)
-      .mockRejectedValueOnce(full(10))
-      .mockRejectedValueOnce(full(10));
+    vi.mocked(api.prepare).mockRejectedValueOnce(full(10));
     await start(engine);
-    expect(failures()).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(api.prepare).toHaveBeenCalledTimes(3);
-    expect(fakes.players).toHaveLength(1);
-    expect(failures()).toHaveLength(0);
-  });
-  it('is reported after five minutes', async () => {
-    const { engine, api, failures } = setup();
-    vi.mocked(api.prepare).mockRejectedValue(full(10));
-    await start(engine);
-    await vi.advanceTimersByTimeAsync(5 * 60_000 + 20_000);
-    expect(api.prepare).toHaveBeenCalledTimes(31);
+    expect(api.prepare).toHaveBeenCalledTimes(1);
     expect(failures()).toHaveLength(1);
+    expect(failures()[0].retry).toBeTruthy();
   });
   it('is reported at once when it gives no time to come back', async () => {
     const { engine, api, failures } = setup();

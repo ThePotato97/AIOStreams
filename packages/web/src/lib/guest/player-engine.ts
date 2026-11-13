@@ -14,6 +14,11 @@ export interface PlayerEngineChoice {
     video: React.RefObject<HTMLVideoElement | null>,
     client: JellyfinClient
   ): EngineFactory;
+  /**
+   * Whether the engine plays a stream converted as it plays (read live): such a player doesn't
+   * hold the party, which plays on while it catches up.
+   */
+  converted?(): boolean;
   /** The qualities the engine converts to, offered with the player's other options. */
   quality?: {
     options: Track[];
