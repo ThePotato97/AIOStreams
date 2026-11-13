@@ -4,6 +4,22 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
+# atmos-render as WebAssembly, for the web app's in-browser binaural rendering
+# (scripts/build-atmos-wasm.sh does the same outside Docker).
+FROM rust:1-bookworm AS atmos-wasm
+WORKDIR /src
+RUN rustup target add wasm32-unknown-unknown
+COPY services/atmos-render ./
+RUN cargo build --lib --release --locked --target wasm32-unknown-unknown
+
+# FFmpeg's E-AC-3, AC-3 and DTS decoders as libav.js, for the same with those (decoded in the page).
+FROM emscripten/emsdk:6.0.5 AS libav-eac3
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-libav-eac3.sh /build-libav-eac3.sh
+RUN sh /build-libav-eac3.sh /out
+
 FROM base AS builder
 
 WORKDIR /build
@@ -46,7 +62,9 @@ COPY packages/web ./packages/web
 COPY packages/crypto ./packages/crypto
 COPY scripts ./scripts
 COPY resources ./resources
-
+COPY --from=atmos-wasm /src/target/wasm32-unknown-unknown/release/atmos_render.wasm \
+  ./packages/web/src/lib/playback/binaural/atmos_render.wasm
+COPY --from=libav-eac3 /out ./packages/web/src/lib/playback/binaural/libav
 
 # Build the project.
 RUN pnpm run build

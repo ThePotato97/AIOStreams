@@ -1,13 +1,16 @@
 import { t } from '@lingui/core/macro';
 import type React from 'react';
 import { checkSubtitleFile, readSubtitleFile } from '../subtitles/files';
+import { toast } from 'sonner';
 import { subtitleLine } from '../subtitles/style';
-import { ownTrackLabel } from './controller';
+import { corsFor, setServerBinaural, virtualSurround } from './headphones';
+import { ofType, ownTrackLabel } from './controller';
 import type {
   EngineFactory,
   EngineFile,
   EngineState,
   EngineTrack,
+  ServerSubtitle,
 } from './engine';
 import { isFullscreen, toggleDocumentFullscreen } from './fullscreen';
 
@@ -52,6 +55,7 @@ export function videoEngine(
     let delayMs = 0;
     let line = subtitleLine();
     let detach = () => {};
+    let surround: (() => void) | null = null;
     // A text track's cues load late, so each one remembers the shift it has.
     const shifted = new WeakMap<TextTrack, number>();
     // Browsers disagree on where a cue the file leaves unplaced goes.
@@ -89,6 +93,10 @@ export function videoEngine(
     const listTracks = () => {
       const audio = video.current && audioTracksOf(video.current);
       const audioTracks = audio ? listed(audio) : [];
+      // The server's streams in the same order, where the browser lists as many: their format.
+      const streams = file ? ofType(file.source, 'Audio') : [];
+      const stream = (i: number) =>
+        streams.length === audioTracks.length ? streams[i] : undefined;
       const tracks: EngineTrack[] = [
         ...audioTracks.map((t, i) => ({
           id: String(i),
@@ -96,6 +104,11 @@ export function videoEngine(
           label: ownTrackLabel(t.label, t.language, i + 1),
           lang: t.language,
           title: t.label,
+          codec: stream(i)?.Codec ?? undefined,
+          profile: stream(i)?.Profile ?? undefined,
+          channels: stream(i)?.Channels ?? undefined,
+          layout: stream(i)?.ChannelLayout ?? undefined,
+          default: stream(i)?.IsDefault ?? undefined,
         })),
         ...files.map(({ id, label }) => ({
           id,
@@ -131,12 +144,22 @@ export function videoEngine(
       set({ subtitle: id });
     };
     const set = (state: EngineState) => emit({ type: 'state', state });
+    const trackFor = (el: HTMLVideoElement, s: ServerSubtitle) => {
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.src = s.url;
+      track.label = s.label;
+      if (s.lang) track.srclang = s.lang;
+      el.append(track);
+      return track;
+    };
     const removeElements = () => {
       for (const e of elements) e.remove();
       elements = [];
     };
 
     return {
+      virtualSurround: typeof AudioContext !== 'undefined',
       load(next) {
         const el = video.current;
         if (!el) return;
@@ -144,15 +167,7 @@ export function videoEngine(
         removeElements();
         file = next;
         delayMs = next.subtitleDelayMs;
-        elements = next.subtitles.map((s) => {
-          const track = document.createElement('track');
-          track.kind = 'subtitles';
-          track.src = s.url;
-          track.label = s.label;
-          if (s.lang) track.srclang = s.lang;
-          el.append(track);
-          return track;
-        });
+        elements = next.subtitles.map((s) => trackFor(el, s));
         if (next.volume) {
           el.volume = Math.min(1, next.volume.volume);
           el.muted = next.volume.muted;
@@ -165,8 +180,12 @@ export function videoEngine(
             endMs: ranges.end(i) * 1000,
           }));
         };
+        // Tried with CORS for a player rendering for headphones: refused, it
+        // plays without, and without sound until the page loads again.
+        let cors = corsFor(el, next.url);
         const handlers: Record<string, () => void> = {
           loadedmetadata: () => {
+            cors = false;
             if (next.startMs) el.currentTime = next.startMs / 1000;
             set({ durationMs: el.duration * 1000 || 0 });
             listTracks();
@@ -188,7 +207,16 @@ export function videoEngine(
           volumechange: () => set({ volume: el.volume, muted: el.muted }),
           ratechange: () => set({ rate: el.playbackRate }),
           ended: () => emit({ type: 'ended' }),
-          error: () =>
+          error: () => {
+            if (cors) {
+              cors = false;
+              toast.warning(
+                t`This stream can't play through virtual surround, so it's silent until the page is reloaded.`
+              );
+              el.removeAttribute('crossorigin');
+              el.src = next.url;
+              return;
+            }
             emit({
               type: 'failed',
               error: t({
@@ -196,7 +224,8 @@ export function videoEngine(
                 message:
                   'this browser cannot play this version. Nothing is converted on the server, so try another version, an external player or the desktop app.',
               }),
-            }),
+            });
+          },
         };
         for (const [event, handler] of Object.entries(handlers))
           el.addEventListener(event, handler);
@@ -218,6 +247,8 @@ export function videoEngine(
         onFullscreen();
         el.autoplay = !next.paused;
         if (next.paused) set({ paused: true });
+        setServerBinaural(el, !!next.binaural);
+        surround ??= virtualSurround(el);
         if (attach) attach(el, next.url);
         else el.src = next.url;
       },
@@ -225,6 +256,8 @@ export function videoEngine(
       close() {
         detach();
         detach = () => {};
+        surround?.();
+        surround = null;
         removeElements();
         const el = video.current;
         if (!el) return;
@@ -267,6 +300,15 @@ export function videoEngine(
       },
       toggleFullscreen: toggleDocumentFullscreen,
       ownText: (id) => files.find((f) => f.id === id)?.text ?? null,
+      // A server subtitle that became ready after the file opened.
+      addServerSubtitle(added) {
+        const el = video.current;
+        if (!el || !file) return;
+        const track = trackFor(el, added);
+        track.addEventListener('load', onTrackLoad);
+        elements = [...elements, track];
+        file = { ...file, subtitles: [...file.subtitles, added] };
+      },
       subtitleFiles: {
         types: SUBTITLE_TYPES,
         add: async (added) => {

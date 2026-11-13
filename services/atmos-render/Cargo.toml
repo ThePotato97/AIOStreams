@@ -1,0 +1,28 @@
+[package]
+name = "atmos-render"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Renders Dolby Atmos (TrueHD, E-AC-3 JOC) objects to binaural stereo, as Dolby Atmos for Headphones does"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+anyhow = "1"
+libm = "0.2"
+oamd = "0.1"
+serde_json = "1"
+# The repository's truehd uses the oamd crate (the published 0.7.2 still has its own copy).
+truehd = { git = "https://github.com/truehdd/truehdd", rev = "57fc8491dee22dac93b05c374e5e5ad231b41e22" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# The oamd crate clamps the per-object headphone render code to 0-2, which turns Mid (3) into
+# Far (2); the vendored copy passes the code through. It replaces the crate for truehd as well.
+[patch.crates-io]
+oamd = { path = "vendor/oamd" }

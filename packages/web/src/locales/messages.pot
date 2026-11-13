@@ -58,6 +58,18 @@ msgstr ""
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr ""
 
+#: src/lib/playback/controller.ts
+msgid "{count} channels"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "{count} switched off, rendered again from here"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "{detail}. Try another quality or ask the host to select another source."
+msgstr ""
+
 #: src/pages/downloads.tsx
 msgid "{downloaded} downloaded"
 msgstr ""
@@ -215,6 +227,10 @@ msgstr ""
 
 #: src/components/player/keys.ts
 msgid "{shown}×"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "{sounding} of {total} with signal"
 msgstr ""
 
 #: src/components/player/controls.tsx
@@ -495,6 +511,10 @@ msgstr ""
 msgid "All fields"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "All on"
+msgstr ""
+
 #: src/components/playlists.tsx
 msgid "All playlists"
 msgstr ""
@@ -596,6 +616,10 @@ msgstr ""
 msgid "Artwork"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "As mixed"
+msgstr ""
+
 #: src/components/party/party-sheet.tsx
 msgid "As the host"
 msgstr ""
@@ -624,6 +648,10 @@ msgstr ""
 
 #: src/pages/settings/audio.tsx
 msgid "Audio languages"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Audio objects"
 msgstr ""
 
 #: src/pages/settings/audio.tsx
@@ -665,8 +693,16 @@ msgstr ""
 msgid "Back button"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Back centre"
+msgstr ""
+
 #: src/pages/settings/playback.tsx
 msgid "Back in the player"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Back to the party"
 msgstr ""
 
 #: src/components/version-settings.tsx
@@ -688,6 +724,10 @@ msgstr ""
 msgid "Bar"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Bed {bed}"
+msgstr ""
+
 #: src/pages/settings/playback.tsx
 msgid "Before the end"
 msgstr ""
@@ -699,6 +739,10 @@ msgstr ""
 #: src/components/player/options.tsx
 #: src/lib/input/actions.ts
 msgid "Bigger subtitles"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Binaural audio couldn't play, so it's off for this audio track"
 msgstr ""
 
 #: src/lib/i18n.ts
@@ -857,6 +901,10 @@ msgstr ""
 msgid "Channel"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Channel {code}"
+msgstr ""
+
 #: src/pages/settings/audio.tsx
 msgid "Channels"
 msgstr ""
@@ -1007,6 +1055,18 @@ msgstr ""
 
 #: src/pages/settings/playback.tsx
 msgid "Controls"
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "conversion is unavailable on this server"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Converted where your browser needs it"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Converting…"
 msgstr ""
 
 #: src/components/version-settings.tsx
@@ -1271,6 +1331,7 @@ msgstr ""
 #. No colour of its own
 #: src/components/version-settings.tsx
 #: src/lib/i18n.ts
+#: src/lib/playback/controller.ts
 #: src/pages/settings/subtitles.tsx
 #: src/pages/settings/theme.tsx
 msgid "Default"
@@ -1394,8 +1455,16 @@ msgstr ""
 msgid "Doesn't match the video's own subtitles"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Dolby Atmos distance"
+msgstr ""
+
 #: src/pages/settings/playback.tsx
 msgid "Dolby Vision"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Dolby Vision couldn't be shown here, so the server converts it"
 msgstr ""
 
 #: src/pages/settings/index.tsx
@@ -1488,6 +1557,10 @@ msgstr ""
 
 #: src/components/player/controls.tsx
 msgid "Drop to add subtitles"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Dynamic {n}"
 msgstr ""
 
 #. An episode number, as in E04
@@ -1610,6 +1683,11 @@ msgstr ""
 
 #: src/pages/downloads.tsx
 msgid "Failed"
+msgstr ""
+
+#: src/components/player/options.tsx
+#: src/components/player/scene-overlay.tsx
+msgid "Far"
 msgstr ""
 
 #: src/components/remote-sheet.tsx
@@ -1741,6 +1819,18 @@ msgstr ""
 msgid "From the start"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "front"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Front left of centre"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Front right of centre"
+msgstr ""
+
 #: src/pages/settings/interface.tsx
 msgid "Frosted glass"
 msgstr ""
@@ -1752,6 +1842,10 @@ msgstr ""
 #: src/components/player/options.tsx
 #: src/lib/input/actions.ts
 msgid "Full screen"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Gain dB"
 msgstr ""
 
 #: src/lib/input/actions.ts
@@ -1802,6 +1896,10 @@ msgstr ""
 msgid "Has a PIN"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Headphones"
+msgstr ""
+
 #: src/components/player/subtitle-sync.tsx
 msgid "Heard"
 msgstr ""
@@ -1838,16 +1936,16 @@ msgstr ""
 msgid "Hide"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Hide audio objects"
+msgstr ""
+
 #: src/pages/history.tsx
 msgid "Hide episodes"
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
 msgid "Hide QR code"
-msgstr ""
-
-#: src/lib/guest/engine.ts
-msgid "HLS playback failed"
 msgstr ""
 
 #. Holding the next key down, as in Hold + Enter
@@ -1913,6 +2011,14 @@ msgstr ""
 msgid "How to use the app and what each setting does."
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "HRIR: {custom}"
+msgstr ""
+
+#: src/components/player/options.tsx
+msgid "HRIR: Dolby Atmos for Headphones (HeSuVi)"
+msgstr ""
+
 #: src/lib/subtitles/style.ts
 msgid "Huge"
 msgstr ""
@@ -1951,6 +2057,18 @@ msgstr ""
 msgid "In this collection"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "inactive"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Input"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Input {input}"
+msgstr ""
+
 #: src/lib/hosts/shell/index.ts
 msgid "Install"
 msgstr ""
@@ -1983,6 +2101,10 @@ msgstr ""
 msgid "Invite link copied"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "ISF {n}"
+msgstr ""
+
 #: src/components/licenses.tsx
 msgid "It came with no licence text."
 msgstr ""
@@ -1995,12 +2117,20 @@ msgstr ""
 msgid "It didn't reach the developer, only this server: {forwardError}"
 msgstr ""
 
+#: src/lib/playback/convert.ts
+msgid "It isn't reachable right now; playback starts when it is."
+msgstr ""
+
 #: src/pages/settings/theme.tsx
 msgid "It will be undone unless you keep it."
 msgstr ""
 
 #: src/pages/settings/about.tsx
 msgid "Its Metal and AVFoundation video outputs."
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Its slot in Windows' renderer with only this player using spatial audio"
 msgstr ""
 
 #: src/pages/settings/about.tsx
@@ -2160,6 +2290,18 @@ msgstr ""
 msgid "Lets the TV's decoder keep picture and sound in step itself, which plays 4K and HDR more smoothly on some TVs. Turn it off if video stutters or stays black."
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Level dB"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "LFE"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "LFE2"
+msgstr ""
+
 #: src/components/licenses.tsx
 msgid "Licences"
 msgstr ""
@@ -2184,8 +2326,16 @@ msgstr ""
 msgid "Listening…"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Load your own HRIR…"
+msgstr ""
+
 #: src/components/party/party-sheet.tsx
 msgid "Loading"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Loading what the host is playing…"
 msgstr ""
 
 #: src/components/version-settings.tsx
@@ -2210,6 +2360,10 @@ msgstr ""
 
 #: src/components/party/party-sheet.tsx
 msgid "Lost the connection to {relay}. Reconnecting… Your player carries on, and gets back in step once it's back."
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "Lost the converted stream; reconnecting…"
 msgstr ""
 
 #: src/components/player/options.tsx
@@ -2288,6 +2442,10 @@ msgstr ""
 msgid "Messages"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Mid"
+msgstr ""
+
 #: src/pages/settings/theme.tsx
 msgid "Midnight"
 msgstr ""
@@ -2302,6 +2460,14 @@ msgstr ""
 
 #: src/lib/format.ts
 msgid "Missing"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Mode"
+msgstr ""
+
+#: src/lib/playback/controller.ts
+msgid "Mono"
 msgstr ""
 
 #: src/pages/settings/subtitles.tsx
@@ -2408,6 +2574,11 @@ msgstr ""
 
 #: src/pages/settings/interface.tsx
 msgid "Navigation"
+msgstr ""
+
+#: src/components/player/options.tsx
+#: src/components/player/scene-overlay.tsx
+msgid "Near"
 msgstr ""
 
 #: src/pages/sign-in.tsx
@@ -2693,6 +2864,7 @@ msgid "Ocean"
 msgstr ""
 
 #: src/components/player/options.tsx
+#: src/components/player/scene-overlay.tsx
 #: src/components/remote-sheet.tsx
 #: src/lib/playback/sound.ts
 #: src/pages/settings/audio.tsx
@@ -2710,6 +2882,11 @@ msgstr ""
 
 #: src/pages/settings/cache.tsx
 msgid "Older ones wait for the server instead. Without a connection, everything saved is shown."
+msgstr ""
+
+#: src/components/player/options.tsx
+#: src/components/player/scene-overlay.tsx
+msgid "On"
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
@@ -2734,6 +2911,10 @@ msgstr ""
 
 #: src/components/shortcut-settings.tsx
 msgid "Once one of the controls is selected, the arrow keys move between the controls instead."
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "only"
 msgstr ""
 
 #: src/lib/subtitles/files.ts
@@ -2766,6 +2947,10 @@ msgstr ""
 
 #: src/pages/settings/audio.tsx
 msgid "Only the ones your TV or receiver decodes; this app decodes the rest. DTS-HD needs DTS too."
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Only this"
 msgstr ""
 
 #: src/lib/i18n.ts
@@ -2810,6 +2995,14 @@ msgstr ""
 msgid "Open the app's downloads"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "Opening the source…"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Opening what the host is playing…"
+msgstr ""
+
 #: src/lib/input/actions.ts
 msgid "Opens the menu of what is selected, as a right click does."
 msgstr ""
@@ -2824,10 +3017,6 @@ msgstr ""
 
 #: src/pages/settings/playback.tsx
 msgid "Opens versions in {target}. It can't tell this app where you stopped, so you mark what you watched yourself."
-msgstr ""
-
-#: src/pages/guest.tsx
-msgid "Optimized for your browser"
 msgstr ""
 
 #: src/components/send-report.tsx
@@ -2872,10 +3061,6 @@ msgstr ""
 
 #: src/pages/settings/audio.tsx
 msgid "Original language"
-msgstr ""
-
-#: src/pages/guest.tsx
-msgid "Original stream"
 msgstr ""
 
 #: src/lib/playback/player-choice.ts
@@ -3206,10 +3391,6 @@ msgstr ""
 msgid "Playback failed: {failure}"
 msgstr ""
 
-#: src/lib/guest/engine.ts
-msgid "Playback failed. Try another quality or ask the host to select another source."
-msgstr ""
-
 #: src/pages/history.tsx
 msgid "Played here"
 msgstr ""
@@ -3358,7 +3539,7 @@ msgstr ""
 msgid "QR code"
 msgstr ""
 
-#: src/pages/guest.tsx
+#: src/components/player/options.tsx
 msgid "Quality"
 msgstr ""
 
@@ -3538,6 +3719,18 @@ msgstr ""
 msgid "Rename"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Render {label}"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Render only {label}"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Rendering binaural audio…"
+msgstr ""
+
 #: src/components/playlists.tsx
 msgid "Repeat"
 msgstr ""
@@ -3551,6 +3744,7 @@ msgid "Report copied"
 msgstr ""
 
 #: src/lib/client.ts
+#: src/lib/guest/guest-client.ts
 msgid "Request failed ({status})"
 msgstr ""
 
@@ -3898,6 +4092,10 @@ msgstr ""
 msgid "Show a skip button"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Show audio objects"
+msgstr ""
+
 #: src/pages/history.tsx
 msgid "Show episodes"
 msgstr ""
@@ -4122,6 +4320,10 @@ msgstr ""
 msgid "Skipping"
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Slot"
+msgstr ""
+
 #: src/components/party/reaction-setting.tsx
 msgid "Slot {n}: {emoji}"
 msgstr ""
@@ -4224,8 +4426,21 @@ msgstr ""
 msgid "Status"
 msgstr ""
 
+#: src/lib/playback/controller.ts
 #: src/pages/settings/audio.tsx
 msgid "Stereo"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Stereo bypass L"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Stereo bypass R"
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "Still downloading; it starts when it's ready."
 msgstr ""
 
 #: src/components/remote-sheet.tsx
@@ -4472,6 +4687,10 @@ msgstr ""
 msgid "That is not a valid regular expression."
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "That isn't a HeSuVi HRIR file: it needs 14 channels, in HeSuVi's order."
+msgstr ""
+
 #: src/lib/party/party.ts
 msgid "That party has ended."
 msgstr ""
@@ -4554,6 +4773,14 @@ msgstr ""
 
 #: src/lib/hosts/jellyfin-android.ts
 msgid "The app's player and its options, such as starting videos in landscape."
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "The conversion failed"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "The file as it is"
 msgstr ""
 
 #: src/lib/party/party.ts
@@ -4644,8 +4871,32 @@ msgstr ""
 msgid "The rest wait their turn."
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "The room in 3D: drag to turn it, double-click to reset"
+msgstr ""
+
 #: src/pages/settings/playback.tsx
 msgid "The same for episodes marked as a recap."
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "The server is converting as much as it can"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "The server restarted; rejoin with the link"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "The source couldn't be opened"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "The source couldn't be read; pick another version"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "The stream couldn't be fetched [{detail}]"
 msgstr ""
 
 #. Follows "Playback failed:"
@@ -4722,6 +4973,10 @@ msgstr ""
 msgid "This app decodes Dolby and DTS audio itself, which loses Atmos."
 msgstr ""
 
+#: src/lib/playback/convert.ts
+msgid "This browser can't play this file's audio, and it couldn't be converted: {why}"
+msgstr ""
+
 #. Follows "Playback failed:"
 #: src/lib/playback/video.ts
 msgid "this browser cannot play this version. Nothing is converted on the server, so try another version, an external player or the desktop app."
@@ -4733,6 +4988,10 @@ msgstr ""
 
 #: src/lib/hosts/shell/index.ts
 msgid "This copy does not update itself."
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "This device converts the audio slower than it plays ({speed}× real time)"
 msgstr ""
 
 #: src/lib/party/follow.ts
@@ -4781,6 +5040,10 @@ msgstr ""
 
 #: src/components/random-pick.tsx
 msgid "This show has no episodes to pick from yet."
+msgstr ""
+
+#: src/lib/playback/video.ts
+msgid "This stream can't play through virtual surround, so it's silent until the page is reloaded."
 msgstr ""
 
 #: src/pages/trailer.tsx
@@ -4861,8 +5124,20 @@ msgstr ""
 msgid "Too many tries. Wait a moment, then try again."
 msgstr ""
 
+#: src/components/player/scene-overlay.tsx
+msgid "Top back centre"
+msgstr ""
+
 #: src/pages/settings/interface.tsx
 msgid "Top bar"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Top centre"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Top front centre"
 msgstr ""
 
 #: src/pages/settings/interface.tsx
@@ -4897,6 +5172,7 @@ msgstr ""
 #: src/components/party/party-sheet.tsx
 #: src/components/random-pick.tsx
 #: src/components/version-picker.tsx
+#: src/lib/playback/convert.ts
 #: src/pages/downloads.tsx
 #: src/pages/sign-in.tsx
 msgid "Try again"
@@ -5023,6 +5299,10 @@ msgstr ""
 msgid "Use Quick Connect, or the configuration’s password."
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Use the bundled HRIR"
+msgstr ""
+
 #: src/pages/sign-in.tsx
 msgid "Use the configuration’s password."
 msgstr ""
@@ -5125,6 +5405,10 @@ msgstr ""
 msgid "View"
 msgstr ""
 
+#: src/components/player/options.tsx
+msgid "Virtual surround"
+msgstr ""
+
 #: src/components/licenses.tsx
 #: src/pages/settings/about.tsx
 msgid "Visit"
@@ -5179,8 +5463,28 @@ msgstr ""
 msgid "Waiting for approval…"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "Waiting for the audio…"
+msgstr ""
+
 #: src/pages/guest.tsx
 msgid "Waiting for the host to choose a title…"
+msgstr ""
+
+#: src/components/player/scene-overlay.tsx
+msgid "Waiting for the renderer…"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Waiting for the server, which hasn't converted this far yet"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Waiting for the source: the host's server is opening it, or restarting…"
+msgstr ""
+
+#: src/lib/playback/convert.ts
+msgid "Waiting for the transcoder to come back…"
 msgstr ""
 
 #: src/components/party/party-sheet.tsx
@@ -5429,6 +5733,10 @@ msgid "You left the party."
 msgstr ""
 
 #: src/pages/guest.tsx
+msgid "You left the party's playback."
+msgstr ""
+
+#: src/pages/guest.tsx
 msgid "You're invited to watch together"
 msgstr ""
 
@@ -5438,6 +5746,30 @@ msgstr ""
 
 #: src/components/version-settings.tsx
 msgid "Your badges"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the audio"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the audio ({codecs})"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the stream"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the video"
+msgstr ""
+
+#: src/lib/guest/explain.ts
+msgid "Your browser couldn't decode the video ({codecs})"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Your connection ({have} Mb/s) is slower than this stream ({need} Mb/s): try a lower quality"
 msgstr ""
 
 #: src/pages/guest.tsx

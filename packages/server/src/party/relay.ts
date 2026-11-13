@@ -1,7 +1,7 @@
 import { guestSessions } from '../guest/sessions.js';
 import type { IncomingMessage, Server as HttpServer } from 'http';
 import type { Duplex } from 'stream';
-import { createHmac, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import proxyaddr from 'proxy-addr';
 import { ipKeyGenerator } from 'express-rate-limit';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
@@ -85,8 +85,6 @@ interface Seat {
   key: string;
   name: string;
   avatar?: string;
-  /** Its address, keyed, for bans. */
-  address: string;
   /** The replica holding its connection; null while it is away. */
   at: string | null;
   /** Its connection's id; one taking the seat over closes the older. */
@@ -105,7 +103,6 @@ interface Party {
   lock: PartyLock;
   home: Home | null;
   seats: Map<string, Seat>;
-  banned: string[];
   lastActivity: number;
 }
 
@@ -180,19 +177,6 @@ let stopping = false;
 let current:
   { party: Party; tx: SharedTx; by?: string; chat?: PartyChat[] } | undefined;
 
-let addressKey: Buffer | undefined;
-/** An address as a party keeps it, so the store holds no addresses. */
-const keyedAddress = (address: string) =>
-  createHmac(
-    'sha256',
-    (addressKey ??= Buffer.from(
-      `party-address:${appConfig.bootstrap.secretKey}`
-    ))
-  )
-    .update(address)
-    .digest('base64url')
-    .slice(0, 22);
-
 const ticketOf = (party: Party) => ticketFor(party.id, party.expiresAt);
 const hostTicketOf = (party: Party) =>
   ticketFor(party.id, party.expiresAt, 'host');
@@ -204,7 +188,6 @@ function saveParty(party: Party): SavedParty {
     lock: party.lock,
     home: party.home,
     seats: [...party.seats.values()],
-    banned: party.banned,
     lastActivity: party.lastActivity,
     group: party.group.save(),
   };
@@ -514,7 +497,6 @@ function newSeat(
     key: key(),
     name,
     avatar,
-    address: keyedAddress(conn.address),
     at: store.replica,
     conn: conn.id,
   };
@@ -534,7 +516,6 @@ function newParty(
     lock: { control: false, joins: false },
     home,
     seats: new Map([[seat.id, seat]]),
-    banned: [],
     lastActivity: Date.now(),
   };
 }
@@ -582,13 +563,13 @@ function unseat(conn: Conn | null | undefined, closeCode?: number): void {
 }
 
 function close(party: Party, tx: SharedTx, reason: PartyCloseReason): void {
-  guestSessions.revokeParty(party.id);
+  void guestSessions.revokeParty(party.id);
   tx.send(everyone(party), encode({ t: 'closed', reason }), RESEAT);
   tx.drop();
 }
 
 function removeSeat(party: Party, tx: SharedTx, seat: Seat): void {
-  guestSessions.revokeMember(party.id, seat.id);
+  void guestSessions.revokeMember(party.id, seat.id);
   if (!party.seats.delete(seat.id)) return;
   party.group.leave(seat.id);
   if (!party.seats.size) return tx.drop();
@@ -670,11 +651,12 @@ async function join(
   m: Extract<PartyClientMessage, { t: 'join' | 'resume' }>
 ): Promise<void> {
   if (!addresses.join(conn.address)) return refuse(conn, 'rate');
-  if (
-    m.token?.startsWith('guest.') &&
-    (!appConfig.party.guestStreaming || !guestSessions.get(m.token))
-  )
-    return refuse(conn, 'denied');
+  const guest = m.token?.startsWith('guest.')
+    ? appConfig.party.guestStreaming
+      ? await guestSessions.load(m.token)
+      : undefined
+    : null;
+  if (guest === undefined) return refuse(conn, 'denied');
   localOf(m.party);
   try {
     const [found, entries] = await Promise.all([
@@ -696,18 +678,19 @@ async function join(
     }
     const chat = chatOf(entries);
     const seatId = held?.id ?? randomId();
-    const guest = guestSessions.get(m.token ?? '');
-    // A guest session holds one seat. It claims the seat before the update so
-    // a concurrent join with the same token is refused, and gives the claim
-    // back if the party turns it away (full, locked, ...).
+    // A guest session holds one seat. It claims the seat (in the store, compare-and-set) before
+    // the update so a concurrent join with the same token is refused, and gives the claim back
+    // if the party turns it away (full, locked, ...).
     const claimed = !!guest && !guest.member;
     if (guest) {
-      if (guest.party !== m.party || (guest.member && guest.member !== seatId))
+      if (
+        guest.party !== m.party ||
+        !(await guestSessions.claimSeat(guest.token, seatId))
+      )
         return refuse(conn, 'denied');
-      guest.member = seatId;
     }
     const unclaim = () => {
-      if (claimed && guest?.member === seatId) guest.member = undefined;
+      if (claimed && guest) void guestSessions.releaseSeat(guest.token, seatId);
     };
     const replaced = seatHere(conn, m.party, seatId);
     let result;
@@ -732,7 +715,7 @@ async function join(
               { chat }
             );
           }
-          const barred = barredIn(party, conn, m.t === 'resume');
+          const barred = barredIn(party, m.t === 'resume');
           if (barred) return barred;
           if (party.seats.size >= PARTY_LIMITS.members) return 'full';
           return changing(
@@ -765,7 +748,7 @@ async function join(
         conn.ws.close(4000)
       );
       // Revoked while the update was running.
-      if (!guestSessions.get(guest.token)) conn.ws.close(4000);
+      if (!(await guestSessions.load(guest.token))) conn.ws.close(4000);
     }
     unseat(replaced, 4000);
   } finally {
@@ -786,12 +769,7 @@ async function settled<T>(
 }
 
 /** Why someone new may not join the party as it is. */
-function barredIn(
-  party: Party,
-  conn: Conn,
-  member: boolean
-): PartyErrorCode | null {
-  if (party.banned.includes(keyedAddress(conn.address))) return 'denied';
+function barredIn(party: Party, member: boolean): PartyErrorCode | null {
   if (party.lock.joins && !member) return 'locked';
   return null;
 }
@@ -807,12 +785,13 @@ async function barredFrom(
     relayMode() === 'off' &&
     !(
       appConfig.party.guestStreaming &&
-      guestSessions.get(token ?? '')?.party === party.id
+      !!token?.startsWith('guest.') &&
+      (await guestSessions.load(token))?.party === party.id
     ) &&
     !(await userOf(token))
   )
     return 'denied';
-  return barredIn(party, conn, member);
+  return barredIn(party, member);
 }
 
 async function peek(
@@ -986,7 +965,9 @@ function inParty(conn: Conn, m: PartyClientMessage): void {
               encode({ t: 'closed', reason: 'removed' }),
               RESEAT
             );
-            party.banned.push(target.address);
+            // Removed, not banned: banning their address locked out everyone on their
+            // network, the host's too when it was the host's own other session. Locking
+            // joins keeps people out.
             removeSeat(party, tx, target);
           });
         })

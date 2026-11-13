@@ -111,4 +111,11 @@ export type {
   GuestCapabilities,
   GuestPlaybackRequest,
   GuestPlayback,
+  GuestPlaybackSpec,
+  GuestPlaybackStage,
+  GuestPlaybackFailure,
+  GuestPlaybackState,
+  GuestArtwork,
+  GuestSegment,
 } from './guest.js';
+export { guestPlaybackSpecSchema } from './guest.js';

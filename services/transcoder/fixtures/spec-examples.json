@@ -1,0 +1,434 @@
+[
+  {
+    "name": "page renders Atmos, Dolby Vision drawn, ASS drawn",
+    "meta": {
+      "durationMs": 7200000,
+      "container": "matroska,webm",
+      "tracks": [
+        {
+          "index": 0,
+          "type": "video",
+          "codec": "hevc",
+          "width": 3840,
+          "height": 2160,
+          "hdr": true,
+          "pixelFormat": "yuv420p10le",
+          "dovi": {
+            "profile": 5,
+            "compatibility": 0,
+            "layers": {
+              "base": true,
+              "enhancement": false,
+              "rpu": true
+            }
+          }
+        },
+        {
+          "index": 1,
+          "type": "audio",
+          "codec": "truehd",
+          "channels": 8,
+          "sampleRate": 48000,
+          "default": true
+        },
+        {
+          "index": 2,
+          "type": "subtitle",
+          "codec": "ass"
+        }
+      ]
+    },
+    "request": {
+      "positionMs": 1668993,
+      "quality": "original",
+      "subtitle": 2,
+      "capabilities": {
+        "video": true,
+        "audio": false,
+        "container": false,
+        "hdr": true,
+        "surround": true,
+        "lossless": true,
+        "clientBinaural": ["truehd", "eac3", "ac3", "dts"],
+        "picture": ["dovi"],
+        "display": "hdr",
+        "demux": [],
+        "subtitles": ["ass", "pgs"],
+        "binaural": true
+      }
+    },
+    "spec": {
+      "video": {
+        "track": 0,
+        "where": "server-copy",
+        "encode": null,
+        "picture": "dovi",
+        "reason": null
+      },
+      "audio": {
+        "track": 1,
+        "where": "server-copy",
+        "pageRenders": true,
+        "convert": null,
+        "render": null,
+        "reason": null
+      },
+      "subtitle": {
+        "track": 2,
+        "where": "page",
+        "format": "ass"
+      }
+    }
+  },
+  {
+    "name": "server renders binaural (far), FLAC",
+    "meta": {
+      "durationMs": 7200000,
+      "container": "matroska,webm",
+      "tracks": [
+        {
+          "index": 0,
+          "type": "video",
+          "codec": "hevc",
+          "width": 3840,
+          "height": 2160,
+          "hdr": true,
+          "transfer": "smpte2084",
+          "pixelFormat": "yuv420p10le"
+        },
+        {
+          "index": 1,
+          "type": "audio",
+          "codec": "eac3",
+          "channels": 6,
+          "sampleRate": 48000,
+          "default": true
+        }
+      ]
+    },
+    "request": {
+      "positionMs": 1668993,
+      "quality": "original",
+      "capabilities": {
+        "video": true,
+        "audio": true,
+        "container": false,
+        "hdr": true,
+        "surround": true,
+        "lossless": true,
+        "clientBinaural": ["truehd"],
+        "picture": ["dovi"],
+        "display": "hdr",
+        "demux": [],
+        "subtitles": ["ass", "pgs"],
+        "binaural": true,
+        "binauralMode": "far"
+      }
+    },
+    "spec": {
+      "video": {
+        "track": 0,
+        "where": "server-copy",
+        "encode": null,
+        "picture": "none",
+        "reason": null
+      },
+      "audio": {
+        "track": 1,
+        "where": "server-render",
+        "pageRenders": false,
+        "convert": null,
+        "render": {
+          "binaural": true,
+          "mode": "far",
+          "codec": "flac",
+          "bitrate": null
+        },
+        "reason": "binaural rendering"
+      },
+      "subtitle": null
+    }
+  },
+  {
+    "name": "renderer failed on the track: converted to 5.1 FLAC",
+    "meta": {
+      "durationMs": 7200000,
+      "container": "matroska,webm",
+      "tracks": [
+        {
+          "index": 0,
+          "type": "video",
+          "codec": "hevc",
+          "width": 3840,
+          "height": 2160,
+          "hdr": true,
+          "transfer": "smpte2084",
+          "pixelFormat": "yuv420p10le"
+        },
+        {
+          "index": 1,
+          "type": "audio",
+          "codec": "eac3",
+          "channels": 6,
+          "sampleRate": 48000,
+          "default": true
+        }
+      ]
+    },
+    "request": {
+      "positionMs": 1668993,
+      "quality": "original",
+      "capabilities": {
+        "video": true,
+        "audio": false,
+        "container": false,
+        "hdr": true,
+        "surround": true,
+        "lossless": true,
+        "clientBinaural": [],
+        "picture": ["dovi"],
+        "display": "hdr",
+        "demux": [],
+        "subtitles": ["ass", "pgs"],
+        "binaural": true
+      }
+    },
+    "inputs": {
+      "binauralFailed": true
+    },
+    "spec": {
+      "video": {
+        "track": 0,
+        "where": "server-copy",
+        "encode": null,
+        "picture": "none",
+        "reason": null
+      },
+      "audio": {
+        "track": 1,
+        "where": "server-convert",
+        "pageRenders": false,
+        "convert": {
+          "codec": "flac",
+          "layout": "5.1",
+          "channels": 6,
+          "bitrate": null
+        },
+        "render": null,
+        "reason": "browser can't decode the audio"
+      },
+      "subtitle": null
+    }
+  },
+  {
+    "name": "SDR screen: tone-mapped encode at 720p, PGS burned in, 5.1 AAC",
+    "meta": {
+      "durationMs": 7200000,
+      "container": "matroska,webm",
+      "tracks": [
+        {
+          "index": 0,
+          "type": "video",
+          "codec": "hevc",
+          "width": 3840,
+          "height": 2160,
+          "hdr": true,
+          "transfer": "smpte2084",
+          "pixelFormat": "yuv420p10le"
+        },
+        {
+          "index": 1,
+          "type": "audio",
+          "codec": "truehd",
+          "channels": 8,
+          "sampleRate": 48000,
+          "default": true
+        },
+        {
+          "index": 2,
+          "type": "subtitle",
+          "codec": "hdmv_pgs_subtitle"
+        }
+      ]
+    },
+    "request": {
+      "positionMs": 1668993,
+      "quality": "720p",
+      "subtitle": 2,
+      "capabilities": {
+        "video": true,
+        "audio": false,
+        "container": false,
+        "hdr": false,
+        "surround": true,
+        "lossless": false,
+        "display": "sdr",
+        "subtitles": ["ass"]
+      }
+    },
+    "spec": {
+      "video": {
+        "track": 0,
+        "where": "server-encode",
+        "encode": {
+          "codec": "h264",
+          "range": "sdr",
+          "tonemap": "server",
+          "deinterlace": false,
+          "scale": 720,
+          "maxBitrate": "4M"
+        },
+        "picture": "none",
+        "reason": "subtitle burn-in"
+      },
+      "audio": {
+        "track": 1,
+        "where": "server-convert",
+        "pageRenders": false,
+        "convert": {
+          "codec": "aac",
+          "layout": "5.1",
+          "channels": 6,
+          "bitrate": "384k"
+        },
+        "render": null,
+        "reason": "quality 720p"
+      },
+      "subtitle": {
+        "track": 2,
+        "where": "server-burn",
+        "format": "pgs"
+      }
+    }
+  },
+  {
+    "name": "the original file, played as it is",
+    "meta": {
+      "durationMs": 7200000,
+      "container": "matroska,webm",
+      "tracks": [
+        {
+          "index": 0,
+          "type": "video",
+          "codec": "h264",
+          "width": 3840,
+          "height": 2160,
+          "pixelFormat": "yuv420p"
+        },
+        {
+          "index": 1,
+          "type": "audio",
+          "codec": "aac",
+          "channels": 2,
+          "sampleRate": 48000,
+          "default": true
+        }
+      ]
+    },
+    "request": {
+      "positionMs": 1668993,
+      "quality": "original",
+      "capabilities": {
+        "video": true,
+        "audio": true,
+        "container": true,
+        "hdr": false,
+        "display": "sdr"
+      }
+    },
+    "spec": {
+      "video": {
+        "track": 0,
+        "where": "page-original",
+        "encode": null,
+        "picture": "none",
+        "reason": null
+      },
+      "audio": {
+        "track": 1,
+        "where": "page-original",
+        "pageRenders": false,
+        "convert": null,
+        "render": null,
+        "reason": null
+      },
+      "subtitle": null
+    }
+  },
+  {
+    "name": "VobSub burned in, stereo AAC",
+    "meta": {
+      "durationMs": 7200000,
+      "container": "matroska,webm",
+      "tracks": [
+        {
+          "index": 0,
+          "type": "video",
+          "codec": "h264",
+          "width": 3840,
+          "height": 2160,
+          "pixelFormat": "yuv420p"
+        },
+        {
+          "index": 1,
+          "type": "audio",
+          "codec": "ac3",
+          "channels": 6,
+          "sampleRate": 48000,
+          "default": true
+        },
+        {
+          "index": 2,
+          "type": "subtitle",
+          "codec": "dvd_subtitle"
+        }
+      ]
+    },
+    "request": {
+      "positionMs": 1668993,
+      "quality": "original",
+      "subtitle": 2,
+      "capabilities": {
+        "video": true,
+        "audio": false,
+        "container": false,
+        "hdr": false,
+        "subtitles": ["ass", "pgs"]
+      }
+    },
+    "spec": {
+      "video": {
+        "track": 0,
+        "where": "server-encode",
+        "encode": {
+          "codec": "h264",
+          "range": "sdr",
+          "tonemap": "none",
+          "deinterlace": false,
+          "scale": null,
+          "maxBitrate": null
+        },
+        "picture": "none",
+        "reason": "subtitle burn-in"
+      },
+      "audio": {
+        "track": 1,
+        "where": "server-convert",
+        "pageRenders": false,
+        "convert": {
+          "codec": "aac",
+          "layout": "stereo",
+          "channels": 2,
+          "bitrate": "192k"
+        },
+        "render": null,
+        "reason": "browser can't decode the audio"
+      },
+      "subtitle": {
+        "track": 2,
+        "where": "server-burn",
+        "format": "vobsub"
+      }
+    }
+  }
+]

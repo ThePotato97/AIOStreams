@@ -109,6 +109,8 @@ export interface PartyIdentity {
   userId: string;
   /** Proves the member to a relay on that same server. */
   token?: string;
+  /** A seat this member held, to take back rather than join again (a page reloaded). */
+  seat?: string;
 }
 
 const PROTOCOL: PartyProtocol = 1;
@@ -240,6 +242,7 @@ class Session {
       timeline: null,
       unread: 0,
     };
+    this.seat = identity.seat;
     this.connection = new RelayConnection(invite.relay, {
       hello: () => this.hello(),
       message: (m) => this.receive(m),
@@ -697,6 +700,8 @@ export const party = {
         }
       : null,
   clock: () => session?.connection.clock ?? null,
+  /** This member's seat key, which takes the seat back on joining again. */
+  seat: () => session?.seat ?? null,
 
   start: (relay: string, identity: PartyIdentity) =>
     enter({ relay, code: newCode() }, identity, 'create'),

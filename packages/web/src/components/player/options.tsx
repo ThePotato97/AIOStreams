@@ -1,8 +1,10 @@
 import { plural, t } from '@lingui/core/macro';
 import { Trans } from '@lingui/react/macro';
 import React from 'react';
+import { toast } from 'sonner';
 import {
   LuActivity,
+  LuOrbit,
   LuAudioLines,
   LuCaptions,
   LuCaptionsOff,
@@ -13,6 +15,7 @@ import {
   LuCrop,
   LuEar,
   LuFilePlus,
+  LuHeadphones,
   LuGalleryVerticalEnd,
   LuGauge,
   LuLayers,
@@ -20,6 +23,7 @@ import {
   LuListVideo,
   LuMaximize,
   LuMinimize,
+  LuMonitorPlay,
   LuMinus,
   LuPlus,
   LuRatio,
@@ -38,6 +42,7 @@ import {
 } from '@aiostreams/ui/dropdown-menu';
 import { cn } from '@aiostreams/ui/core/styling';
 import { currentHost } from '../../lib/hosts';
+import { customHrir, setCustomHrir } from '../../lib/playback/headphones';
 import type { PlayerController, Track } from '../../lib/playback/controller';
 import {
   settings,
@@ -63,7 +68,9 @@ import {
 } from '../../lib/subtitles/style';
 import { splitByLanguage } from '../../lib/subtitles/tracks';
 import { subtitleLanguages, usePlaybackPrefs } from '../../lib/user-config';
+import { PlayerEngineOverride } from '../../lib/guest/player-engine';
 import { ControlButton } from './buttons';
+import { useSceneView } from './scene-overlay';
 import { useParty } from '../../lib/party/party';
 import { RATES, rateLabel } from './keys';
 import { useLatest } from '../../lib/use-latest';
@@ -477,6 +484,90 @@ function SoundControls() {
   );
 }
 
+/** Renders surround for headphones, with the bundled HRIR set or the user's. */
+function HeadphoneControls() {
+  const [on, setOn] = useSetting(settings.audio.headphones);
+  const [mode, setMode] = useSetting(settings.audio.headphoneMode);
+  const modes = [
+    { value: 'mixed', label: t`As mixed` },
+    { value: 'near', label: t`Near` },
+    { value: 'far', label: t`Far` },
+  ] as const;
+  const [custom, setCustom] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    void customHrir().then((saved) => setCustom(saved?.name ?? null));
+  }, []);
+  const choose = () => {
+    // Made here, not in the menu, which closes while the file is picked.
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.wav,audio/wav';
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      setCustomHrir(file).then(
+        () => {
+          setCustom(file.name);
+          setOn(true);
+        },
+        () =>
+          toast.error(
+            t`That isn't a HeSuVi HRIR file: it needs 14 channels, in HeSuVi's order.`
+          )
+      );
+    };
+    input.click();
+  };
+  return (
+    <>
+      <DropdownMenuItem onSelect={keepOpen} onClick={() => setOn(!on)}>
+        <LuCheck
+          className={cn('flex-none', on ? 'opacity-100' : 'opacity-0')}
+        />
+        <Trans>Virtual surround</Trans>
+      </DropdownMenuItem>
+      <DropdownMenuLabel className="text-xs font-normal text-[--muted]">
+        <Trans>Dolby Atmos distance</Trans>
+      </DropdownMenuLabel>
+      {modes.map((m) => (
+        <DropdownMenuItem
+          key={m.value}
+          onSelect={keepOpen}
+          onClick={() => setMode(m.value)}
+        >
+          <LuCheck
+            className={cn(
+              'flex-none',
+              mode === m.value ? 'opacity-100' : 'opacity-0'
+            )}
+          />
+          {m.label}
+        </DropdownMenuItem>
+      ))}
+      <DropdownMenuLabel className="text-xs font-normal text-[--muted]">
+        {custom ? (
+          <Trans>HRIR: {custom}</Trans>
+        ) : (
+          <Trans>HRIR: Dolby Atmos for Headphones (HeSuVi)</Trans>
+        )}
+      </DropdownMenuLabel>
+      <DropdownMenuItem onSelect={keepOpen} onClick={choose}>
+        <LuFilePlus className="flex-none" />
+        <Trans>Load your own HRIR…</Trans>
+      </DropdownMenuItem>
+      {custom && (
+        <DropdownMenuItem
+          onSelect={keepOpen}
+          onClick={() => void setCustomHrir(null).then(() => setCustom(null))}
+        >
+          <LuUndo2 className="flex-none rtl:-scale-x-100" />
+          <Trans>Use the bundled HRIR</Trans>
+        </DropdownMenuItem>
+      )}
+    </>
+  );
+}
+
 function SubtitleTiming({
   delayMs,
   onChange,
@@ -576,6 +667,7 @@ export function OptionButtons({
   const { state } = player;
   const { prefs } = usePlaybackPrefs();
   const [subtitleSize] = useSetting(settings.subtitle.size);
+  const [headphones] = useSetting(settings.audio.headphones);
   const subtitles =
     prefs.ListPreferredSubtitlesOnly === false
       ? { shown: player.subtitleTracks, hidden: [] }
@@ -586,6 +678,8 @@ export function OptionButtons({
         );
   const tv = !!currentHost().tv;
   const unread = useParty()?.unread ?? 0;
+  const scene = useSceneView();
+  const quality = React.useContext(PlayerEngineOverride)?.quality;
   const hidden = subtitles.hidden.length;
   // One at a time: a menu opened over another leaves the first open.
   const [openMenu, setOpenMenu] = React.useState<string | null>(null);
@@ -625,7 +719,9 @@ export function OptionButtons({
           <LuLayers />
         </ControlButton>
       )}
-      {(player.audioTracks.length > 1 || player.sound) && (
+      {(player.audioTracks.length > 1 ||
+        player.sound ||
+        player.virtualSurround) && (
         <Menu
           name="audio"
           label={t`Audio`}
@@ -634,8 +730,8 @@ export function OptionButtons({
           value={state.audio}
           onSelect={(id) => id && player.setAudio(id)}
           {...menuState('audio')}
-          pages={
-            player.sound
+          pages={[
+            ...(player.sound
               ? [
                   {
                     name: 'sound',
@@ -644,8 +740,19 @@ export function OptionButtons({
                     content: <SoundControls />,
                   },
                 ]
-              : []
-          }
+              : []),
+            ...(player.virtualSurround
+              ? [
+                  {
+                    name: 'headphones',
+                    label: t`Headphones`,
+                    icon: <LuHeadphones className="flex-none" />,
+                    value: headphones ? t`On` : t`Off`,
+                    content: <HeadphoneControls />,
+                  },
+                ]
+              : []),
+          ]}
         />
       )}
       {(player.subtitleTracks.length > 0 || player.subtitleFiles) && (
@@ -727,6 +834,17 @@ export function OptionButtons({
           {...menuState('speed')}
         />
       )}
+      {quality && (
+        <Menu
+          name="quality"
+          label={t`Quality`}
+          icon={<LuMonitorPlay />}
+          options={quality.options}
+          value={quality.value}
+          onSelect={(id) => id && quality.onChange(id)}
+          {...menuState('quality')}
+        />
+      )}
       {player.fit && <FitButton notice={notice} />}
       {onParty && (
         <ControlButton
@@ -753,6 +871,16 @@ export function OptionButtons({
               {unread > 9 ? '9+' : unread}
             </span>
           )}
+        </ControlButton>
+      )}
+      {scene.live && (
+        <ControlButton
+          name="audio-objects"
+          label={scene.shown ? t`Hide audio objects` : t`Show audio objects`}
+          aria-pressed={scene.shown}
+          onClick={scene.toggle}
+        >
+          <LuOrbit />
         </ControlButton>
       )}
       {player.stats && (

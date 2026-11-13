@@ -5,5 +5,8 @@
 **/out
 **/.next
 **/data
+# atmos-render's tables, built into its WebAssembly
+!services/atmos-render/data
 .env
 .git
+**/target

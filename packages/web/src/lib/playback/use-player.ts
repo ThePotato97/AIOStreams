@@ -18,10 +18,10 @@ import {
   saveSubtitleDelay,
   SUBTITLE_DELAY_LIMIT_MS,
 } from '../subtitles/delay';
-import { subtitleUrl, textSubtitles } from '../subtitles/tracks';
 import { SUBTITLE_LIFT_MS, subtitleHeight } from '../subtitles/style';
 import type { MediaStream, SourceInfo } from '../types';
 import { useLatest } from '../use-latest';
+import { serverSubtitles } from './server-subtitles';
 import type { Chapter } from './chapters';
 import {
   initialState,
@@ -59,30 +59,6 @@ const THUMBNAIL_INDEX_MS = 5_000;
 /** How long subtitles stay at a newly picked height while the controls show. */
 const PLACING_MS = 3_000;
 
-function serverSubtitles(
-  client: JellyfinClient,
-  source: SourceInfo,
-  ownSubtitles: boolean,
-  urlOf?: (stream: MediaStream) => string | null
-): ServerSubtitle[] {
-  return textSubtitles(source)
-    .filter((s) => !ownSubtitles || s.IsExternal)
-    .flatMap((stream, i) => {
-      const url = urlOf ? urlOf(stream) : subtitleUrl(client, stream);
-      return url
-        ? [
-            {
-              id: `server:${stream.Index}`,
-              url,
-              label: trackLabel(stream, i + 1),
-              lang: stream.Language ?? undefined,
-              stream,
-            },
-          ]
-        : [];
-    });
-}
-
 const asTrack = (track: EngineTrack): Track => ({
   id: track.id,
   lang: track.lang,
@@ -96,6 +72,7 @@ const serverTrack = (s: ServerSubtitle): Track => ({
     {
       lang: s.stream.Language,
       title: s.stream.Title,
+      codec: s.stream.Codec,
       forced: s.stream.IsForced,
       hearingImpaired: s.stream.IsHearingImpaired,
     },
@@ -168,6 +145,12 @@ export function usePlayer(
   }));
   // Engines report several things in one go, before the page draws again.
   const live = React.useRef({ ...state, tracks: [] as EngineTrack[] });
+  /**
+   * The open file's tracks were picked from the user's settings. Once per file: an engine that
+   * loads again (a converting one does for every track switch and seek) keeps what the user
+   * chose since.
+   */
+  const picked = React.useRef(false);
   const patch = React.useCallback((next: Partial<PlayerState>) => {
     live.current = { ...live.current, ...next };
     setState((s) => ({ ...s, ...next }));
@@ -181,12 +164,15 @@ export function usePlayer(
   const [statsPage, setStatsPage] = React.useState<string | null>(null);
   const [statsText, setStatsText] = React.useState<string>();
   const [retry, setRetry] = React.useState<PlayerController['retry']>();
+  const [transcoderFailure, setTranscoderFailure] = React.useState(false);
   const [lift, setLift] = React.useState(0);
   const [fit] = useSetting(settings.video.fit);
+  // Read on every render: an engine can hand over to another that lists
+  // subtitles differently (a conversion falling back to direct play).
+  const ownSubtitles = !!engine.ownSubtitles;
   const servers = React.useMemo(
-    () =>
-      serverSubtitles(client, source, !!engine.ownSubtitles, opts.subtitleUrl),
-    [client, source, engine, opts.subtitleUrl]
+    () => serverSubtitles(client, source, ownSubtitles, opts.subtitleUrl),
+    [client, source, ownSubtitles, opts.subtitleUrl]
   );
   const latestServers = useLatest(servers);
   const heard = React.useRef<Heard | null>(null);
@@ -260,6 +246,8 @@ export function usePlayer(
       case 'loaded': {
         patch({ loaded: true, error: null });
         setRetry(undefined);
+        if (picked.current) return;
+        picked.current = true;
         const { tracks, audio, subtitle } = live.current;
         const shown = shownSubtitle(tracks, subtitle, retimed);
         const picks = chooseTracks(
@@ -295,6 +283,7 @@ export function usePlayer(
       }
       case 'failed': {
         patch({ error: event.error });
+        setTranscoderFailure(!!event.transcoder);
         const again = event.retry;
         return setRetry(
           again && {
@@ -382,6 +371,7 @@ export function usePlayer(
     setRetimed({});
     const file = latestFile.current(startMs);
     if (file.volume) patch(file.volume);
+    picked.current = false;
     engine.load(file);
     return () => engine.close();
     // Reloading restarts playback, so only a new url or start does it.
@@ -643,7 +633,9 @@ export function usePlayer(
     close: engine.closeWindow && (() => engine.closeWindow!()),
     queueNext: engine.queueNext && ((next) => engine.queueNext!(next)),
     sound: engine.sound,
+    virtualSurround: engine.virtualSurround,
     fit: engine.fits,
     retry,
+    transcoderFailure,
   };
 }

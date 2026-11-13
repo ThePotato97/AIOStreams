@@ -1,5 +1,6 @@
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -9,6 +10,8 @@ import {
 } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
+import type { GuestPlaybackSpec } from '@aiostreams/core';
+import * as nodeCrypto from 'node:crypto';
 
 const fixture = vi.hoisted(() => ({
   enabled: true,
@@ -18,9 +21,179 @@ const fixture = vi.hoisted(() => ({
   prepares: [] as { resolve(): void }[],
   slow: false,
   noSources: false,
+  /** Holds the host's list being built (a slow resolve) until it settles. */
+  memoGate: null as Promise<void> | null,
   memoCalls: 0,
+  /** A list run again (`current`) comes back without the version picked from it. */
+  rerunLoses: false,
+  workerDown: false,
+  logs: [] as { level: string; data: unknown; message: string }[],
+  // A fake source server, so the pre-probe check sees real HTTP answers.
+  upstream: '',
+  // This server's internal address: a second port on the same fake server.
+  internal: '',
+  hits: { public: 0, internal: 0 },
+  probeInputs: [] as string[],
+  /** The capabilities each prepare forwarded to the transcoder. */
+  prepareCapabilities: [] as Record<string, unknown>[],
+  sourcePath: '/media/private-token',
+  probes: 0,
+  probeFailures: 0,
+  probeError: 'Source probe failed: Invalid data found when processing input',
+  scopes: [] as (string | undefined)[],
+  chain: { hits: 0, expireA: false, thenTo: '/media/B' },
+  /** The list's Drive-style token: list N sends `token-N`; the file takes tokens from `fresh` on. */
+  tokens: { fresh: 1, seen: [] as string[] },
+  /** The Basic logins a file was asked with. */
+  logins: [] as string[],
+  // What the transcoder prepares, and how it sends a segment.
+  prepared: { mode: 'direct' } as {
+    mode: string;
+    id?: string;
+    spec?: GuestPlaybackSpec;
+    effective?: GuestPlaybackSpec;
+  },
+  segment: 'slow' as 'slow' | 'silent',
+  segmentAborts: 0,
+  // What the transcoder answers: a full one, released jobs, extraction.
+  full: false,
+  releases: [] as string[],
+  /** Every lease released, admitted or not. */
+  releasedLeases: [] as string[],
+  /** Each lease the transcoder admitted, and its (video) job. */
+  leases: new Map<string, string>(),
+  /** What each prepare sent besides the request: the playback it replaces, the file. */
+  prepareBodies: [] as { replaces?: string; file?: string }[],
+  /** Whether an admitted playback is still starting, and the states it then goes through. */
+  starting: false,
+  states: [] as Record<string, unknown>[],
+  /** What each subtitle request sent. */
+  subtitleBodies: [] as Record<string, unknown>[],
+  /** What the transcoder answers a heartbeat with: 404 once it no longer has the job. */
+  touchStatus: 200,
+  extraction: [] as { status: number; body: string }[],
+  subtitleCodec: 'subrip',
+  /** The host's item, as the host's configuration builds it. */
+  hostItem: null as Record<string, unknown> | null,
+  hostUserData: {} as Record<string, unknown>,
+  segmentsEnabled: true,
+  /** What the host's segment providers find, and what they were asked. */
+  providerSegments: [] as { type: string; startMs: number; endMs: number }[],
+  segmentQueries: [] as {
+    runtimeMs?: number;
+    types?: string[];
+    key?: string;
+  }[],
+  /** The server's key: what sealed values in the store are sealed with. */
+  secretKey: 'k'.repeat(64),
 }));
-vi.mock('@aiostreams/core', () => ({
+// The shared reader's disk cache is core's real one; core's logger, which loads all of core, is not.
+vi.mock('../../../core/src/logging/logger.js', () => ({
+  createLogger: () => ({
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    debug: () => {},
+  }),
+}));
+// The shared store as a server without Redis has it (kept in its database, SQLite here), and
+// sealing as core's (AES-GCM, by the key). A restart stops the store and starts another on the
+// same database, as a new process does.
+interface Store {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  flush(): Promise<void>;
+}
+const shared = vi.hoisted(() => ({
+  backend: undefined as unknown as Store,
+  db: undefined as unknown as {
+    query(text: string): Promise<Record<string, unknown>[]>;
+  },
+  make: undefined as unknown as () => Store,
+}));
+vi.mock('@aiostreams/core', async () => ({
+  sharedBackend: await (async () => {
+    const { PersistedBackend } =
+      await import('../../../core/src/sync/store/persisted.js');
+    const { SqliteDriver } =
+      await import('../../../core/src/db/driver/sqlite.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const db = new SqliteDriver(
+      `${mkdtempSync(`${tmpdir()}/guest-store-`)}/db.sqlite`
+    );
+    shared.db = db as never;
+    shared.make = () => new PersistedBackend(() => db) as never;
+    shared.backend = shared.make();
+    await shared.backend.start();
+    return () => shared.backend;
+  })(),
+  encryptString: (value: string) => {
+    const { createCipheriv, createHash, randomBytes } = nodeCrypto;
+    const key = createHash('sha256').update(fixture.secretKey).digest();
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const data = Buffer.concat([cipher.update(value), cipher.final()]);
+    return {
+      success: true,
+      data: [iv, cipher.getAuthTag(), data]
+        .map((b) => b.toString('base64url'))
+        .join('.'),
+    };
+  },
+  decryptString: (sealed: string) => {
+    const { createDecipheriv, createHash } = nodeCrypto;
+    try {
+      const [iv, tag, data] = sealed
+        .split('.')
+        .map((p) => Buffer.from(p, 'base64url'));
+      const key = createHash('sha256').update(fixture.secretKey).digest();
+      const decipher = createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAuthTag(tag);
+      return {
+        success: true,
+        data: Buffer.concat([
+          decipher.update(data),
+          decipher.final(),
+        ]).toString(),
+      };
+    } catch {
+      return { success: false, data: null };
+    }
+  },
+  DiskBackedCache: (
+    await import('../../../core/src/utils/disk-backed-cache.js')
+  ).DiskBackedCache,
+  openNativeUsenetStream: async () => {
+    throw new Error('no usenet in these tests');
+  },
+  // For serveRangeStream: core's own.
+  mimeForFilename: (await import('../../../core/src/shares/mime.js'))
+    .mimeForFilename,
+  lookupFor: (descriptor: unknown, runtimeMs?: number) =>
+    descriptor ? { descriptor, runtimeMs } : null,
+  msToTicks: (ms: number) => ms * 10_000,
+  segmentsEnabled: () => fixture.segmentsEnabled,
+  segmentsFor: async (
+    lookup: { runtimeMs?: number },
+    opts: { pmdbApiKey?: string },
+    types?: string[]
+  ) => {
+    fixture.segmentQueries.push({
+      runtimeMs: lookup.runtimeMs,
+      types,
+      key: opts.pmdbApiKey,
+    });
+    return fixture.providerSegments;
+  },
+  createLogger: () =>
+    Object.fromEntries(
+      ['warn', 'error', 'info', 'debug'].map((level) => [
+        level,
+        (data: unknown, message: string) =>
+          fixture.logs.push({ level, data, message }),
+      ])
+    ),
   config: {
     party: {
       get guestStreaming() {
@@ -28,9 +201,19 @@ vi.mock('@aiostreams/core', () => ({
       },
       transcoderUrl: 'http://worker',
       transcoderSecret: 's'.repeat(32),
-      internalUrl: 'http://internal',
+      get internalUrl() {
+        return fixture.internal;
+      },
     },
-    bootstrap: { baseUrl: 'http://internal' },
+    bootstrap: {
+      get baseUrl() {
+        return fixture.upstream;
+      },
+      get secretKey() {
+        return fixture.secretKey;
+      },
+    },
+    builtins: { debrid: { downloadMaxWaitTime: { '*': 120000 } } },
   },
 }));
 vi.mock('../routes/jellyfin/context.js', () => ({
@@ -50,7 +233,7 @@ vi.mock('../party/relay.js', () => ({
           id,
           host: 'host',
           homeUuid: 'owner',
-          expiresAt: Date.now() + 60000,
+          expiresAt: Date.now() + 3_600_000,
           joinsClosed: false,
           playing: fixture.playing,
           queue: [fixture.playing],
@@ -61,35 +244,94 @@ vi.mock('../party/relay.js', () => ({
 vi.mock('../party/ticket.js', () => ({
   ticketExpiry: () => Date.now() + 60000,
 }));
+vi.mock('../routes/jellyfin/items.js', () => ({
+  itemFromDescriptor: async () => fixture.hostItem,
+}));
 vi.mock('../routes/jellyfin/playback.js', () => ({
-  locate: async () => ({}),
-  ensureMemo: async () => (
-    ++fixture.memoCalls,
+  locate: async (req: { jf?: { scope?: () => string } }) => (
+    fixture.scopes.push(req.jf?.scope?.()),
     {
-      sources: fixture.noSources
-        ? []
-        : [
-            {
-              msid: 'source',
-              url: 'https://provider.invalid/private-token',
-              filename: 'episode.mkv',
-              container: 'mkv',
-              subtitles: [],
-              extension: { bingeGroup: 'series' },
-            },
-          ],
+      ctx: { userData: fixture.hostUserData },
+      descriptor: { type: 'series', id: 'tt1', season: 1, episode: 2 },
+    }
+  ),
+  ensureMemo: async (_loc: unknown, opts?: { current?: boolean }) => (
+    ++fixture.memoCalls,
+    await fixture.memoGate,
+    {
+      // the addons run again no longer return the version (one timed out, say)
+      sources:
+        fixture.noSources || (fixture.rerunLoses && opts?.current)
+          ? []
+          : [
+              {
+                msid: 'source',
+                url: /^https?:/.test(fixture.sourcePath)
+                  ? fixture.sourcePath
+                  : `${fixture.upstream}${fixture.sourcePath}`,
+                filename: 'episode.mkv',
+                container: 'mkv',
+                requestHeaders: {
+                  authorization: `Bearer token-${fixture.memoCalls}`,
+                },
+                subtitles: [],
+                extension: { bingeGroup: 'series' },
+              },
+            ],
     }
   ),
 }));
-import guestRouter from './routes.js';
+import guestRouter, {
+  CURRENT_WAIT,
+  MEDIA_TIMEOUT,
+  withCredentials,
+} from './routes.js';
+/** What the transcoder's DASH muxer writes, trimmed. */
+const MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
+<MPD type="dynamic" minimumUpdatePeriod="PT4S">
+\t<Period id="0" start="PT0.0S">
+\t\t<AdaptationSet id="0" contentType="video">
+\t\t\t<Representation id="0" mimeType="video/mp4" codecs="hvc1.2.4.L153.B0">
+\t\t\t\t<SegmentTemplate timescale="24000" initialization="init-$RepresentationID$.m4s" media="chunk-$RepresentationID$-$Number%05d$.m4s" startNumber="1">
+\t\t\t\t\t<SegmentTimeline><S t="240360" d="236208" /></SegmentTimeline>
+\t\t\t\t</SegmentTemplate>
+\t\t\t</Representation>
+\t\t</AdaptationSet>
+\t</Period>
+</MPD>`;
 import { guestSessions } from './sessions.js';
+/** The guest sessions of the server running now (a restart imports them anew). */
+let liveSessions = guestSessions;
+/** A converted playback's state at the transcoder, once it plays. */
+const readyState = (job: string) => ({
+  version: 1,
+  stage: 'ready',
+  ready: true,
+  mode: fixture.prepared.mode,
+  spec: fixture.prepared.spec,
+  effective: fixture.prepared.effective,
+  startMs: 0,
+  failure: null,
+  jobs: { video: { id: job, stage: 'ready' }, audio: null, subtitle: null },
+});
 const originalFetch = globalThis.fetch;
 let server: Server, base: string;
 const media = {
   durationMs: 12000,
   container: 'matroska',
   bitrate: 1000000,
-  tracks: [{ index: 0, type: 'video', codec: 'h264', title: 'Video' }],
+  tracks: [
+    { index: 0, type: 'video', codec: 'h264', title: 'Video' },
+    {
+      index: 2,
+      type: 'subtitle',
+      get codec() {
+        return fixture.subtitleCodec;
+      },
+      title: 'English',
+    },
+  ],
+  fonts: [{ index: 5, filename: 'Font.ttf', mimetype: 'font/ttf' }],
   chapters: [{ title: 'Opening', startMs: 0 }],
 };
 const proof = () => ({
@@ -108,6 +350,8 @@ async function api(path: string, token = '', body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
+const errorOf = async (response: Response) =>
+  ((await response.json()) as { error?: string }).error;
 async function invitation() {
   const result = await api('/host', 'host-token', proof());
   expect(result.status).toBe(200);
@@ -129,25 +373,85 @@ async function guest(secret: string) {
   expect(result.status).toBe(200);
   return ((await result.json()) as { token: string }).token as string;
 }
-function join(token: string) {
-  const session = guestSessions.get(token)!;
-  session.member = 'guest';
+async function join(token: string) {
+  expect(await liveSessions.claimSeat(token, 'guest')).toBe(true);
   fixture.members.push({ id: 'guest', key: 'g'.repeat(22) });
 }
+let upstream: Server, internalServer: Server;
+let filesApp: express.Express;
 beforeAll(async () => {
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = String(input);
-    if (!url.startsWith('http://worker')) return originalFetch(input, init);
-    if (url.endsWith('/probe')) return Response.json(media);
-    if (url.endsWith('/prepare')) {
-      if (fixture.slow)
-        await new Promise<void>((resolve) =>
-          fixture.prepares.push({ resolve })
-        );
-      return Response.json({ mode: 'direct', meta: media });
-    }
-    return Response.json({ ok: true });
+  // What a source can answer: the file, AIOStreams' placeholder clips (as
+  // the real playback route redirects to them), an error page, or a 404.
+  const files = express();
+  files.use((req, _res, next) => {
+    const internal =
+      String(req.socket.localPort) === fixture.internal.split(':').pop();
+    fixture.hits[internal ? 'internal' : 'public']++;
+    next();
   });
+  files.get('/media/private-token', (_req, res) =>
+    res.status(206).type('video/mp4').send('x')
+  );
+  files.get('/downloading', (_req, res) =>
+    res.redirect(307, '/static/downloading.mp4')
+  );
+  files.get('/failed', (_req, res) =>
+    res.redirect(307, `${fixture.upstream}/static/download_failed.mp4`)
+  );
+  files.get('/static/:file', (_req, res) => res.type('video/mp4').send('x'));
+  files.get('/html', (_req, res) => res.type('html').send('<html></html>'));
+  // A failover chain: the first resolve picks A, later ones whatever thenTo is.
+  files.get('/chain', (_req, res) =>
+    res.redirect(
+      307,
+      `${fixture.upstream}${fixture.chain.hits++ === 0 ? '/media/A' : fixture.chain.thenTo}`
+    )
+  );
+  files.get('/media/:name', (req, res) => {
+    if (
+      req.params.name === 'A' &&
+      fixture.chain.expireA &&
+      fixture.chain.hits > 0
+    )
+      return void res.status(410).end();
+    res.status(206).type('video/mp4').send(req.params.name);
+  });
+  files.get('/loop', (_req, res) => res.redirect(302, '/loop'));
+  // A file that serves ranges, as a debrid CDN does.
+  const ranged = (res: express.Response, body: string) =>
+    res
+      .status(206)
+      .set({
+        'content-type': 'video/mp4',
+        'content-range': `bytes 0-${body.length - 1}/${body.length}`,
+      })
+      .send(body);
+  // A WebDAV file behind a login (NzbDAV, AltMount).
+  files.get('/webdav/file', (req, res) => {
+    fixture.logins.push(String(req.headers.authorization ?? ''));
+    if (
+      req.headers.authorization !==
+      `Basic ${Buffer.from('user@x:p:ss').toString('base64')}`
+    )
+      return void res.status(401).end();
+    ranged(res, 'W');
+  });
+  // A Drive file: an expired token is refused.
+  files.get('/drive/file', (req, res) => {
+    const token = String(req.headers.authorization ?? '');
+    fixture.tokens.seen.push(token);
+    const n = Number(/token-(\d+)/.exec(token)?.[1] ?? 0);
+    if (n < fixture.tokens.fresh) return void res.status(401).end();
+    ranged(res, 'D');
+  });
+  upstream = files.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => upstream.on('listening', resolve));
+  fixture.upstream = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
+  internalServer = files.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => internalServer.on('listening', resolve));
+  fixture.internal = `http://127.0.0.1:${(internalServer.address() as { port: number }).port}`;
+  filesApp = files;
+  spyFetch();
   const app = express();
   app.use(express.json());
   app.use('/party/guest', guestRouter);
@@ -158,9 +462,146 @@ beforeAll(async () => {
   });
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}/party/guest`;
 });
+function spyFetch() {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (!url.startsWith('http://worker')) return originalFetch(input, init);
+    if (fixture.workerDown)
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: { code: 'ECONNREFUSED' },
+      });
+    if (url.endsWith('/probe')) {
+      fixture.probes++;
+      fixture.probeInputs.push(
+        (JSON.parse(String(init?.body ?? '{}')) as { input: string }).input
+      );
+      if (fixture.probeFailures > 0) {
+        fixture.probeFailures--;
+        return Response.json({ error: fixture.probeError }, { status: 400 });
+      }
+      return Response.json(media);
+    }
+    const viewer =
+      /\/viewers\/([^/]+)\/(touch|release|state|manifest\.mpd)/.exec(url);
+    if (viewer) {
+      const [, lease, what] = viewer;
+      const job = fixture.leases.get(lease);
+      if (what === 'release') {
+        fixture.releasedLeases.push(lease);
+        if (job) fixture.releases.push(job);
+        fixture.leases.delete(lease);
+        return Response.json({ released: !!job });
+      }
+      if (!job)
+        return Response.json({ error: 'Unknown viewer' }, { status: 404 });
+      if (what === 'touch') {
+        if (fixture.touchStatus !== 200)
+          return new Response(null, { status: fixture.touchStatus });
+        return Response.json({ ok: true });
+      }
+      if (what === 'state')
+        return Response.json({
+          ...readyState(job),
+          ...(fixture.states.shift() ?? {}),
+        });
+      // The viewer's manifest: its job's segments, named under the job.
+      return new Response(
+        MANIFEST.replace(
+          'init-$RepresentationID$.m4s',
+          `${job}/init-0.m4s`
+        ).replace(
+          'chunk-$RepresentationID$-$Number%05d$.m4s',
+          `${job}/chunk-0-$Number%05d$.m4s`
+        ),
+        { headers: { 'Content-Type': 'application/dash+xml' } }
+      );
+    }
+    if (url.endsWith('/subtitle') || url.endsWith('/font')) {
+      if (url.endsWith('/subtitle'))
+        fixture.subtitleBodies.push(JSON.parse(String(init?.body ?? '{}')));
+      const next = fixture.extraction.shift() ?? {
+        status: 200,
+        body: 'WEBVTT',
+      };
+      return new Response(next.body, {
+        status: next.status,
+        headers: next.status === 425 ? { 'Retry-After': '5' } : {},
+      });
+    }
+    if (url.endsWith('/prepare')) {
+      const sent = JSON.parse(String(init?.body ?? '{}')) as {
+        viewer: string;
+        replaces?: string;
+        file?: string;
+        request?: { capabilities?: Record<string, unknown> };
+      };
+      fixture.prepareCapabilities.push(sent.request?.capabilities ?? {});
+      fixture.prepareBodies.push({ replaces: sent.replaces, file: sent.file });
+      if (fixture.full)
+        return Response.json(
+          {
+            error: 'Conversion capacity reached; try Original or retry later',
+            retryAfter: 10,
+          },
+          { status: 503 }
+        );
+      if (fixture.slow)
+        await new Promise<void>((resolve) =>
+          fixture.prepares.push({ resolve })
+        );
+      if (fixture.prepared.mode === 'direct')
+        return Response.json({ ...fixture.prepared, meta: media });
+      // Admitted at once, and (here) already playing.
+      const job = fixture.prepared.id!;
+      fixture.leases.set(sent.viewer, job);
+      if (sent.replaces && fixture.leases.has(sent.replaces)) {
+        fixture.releases.push(fixture.leases.get(sent.replaces)!);
+        fixture.leases.delete(sent.replaces);
+      }
+      return Response.json({
+        lease: sent.viewer,
+        ...readyState(job),
+        ...(fixture.starting
+          ? { version: 0, stage: 'opening', ready: false }
+          : {}),
+        meta: media,
+      });
+    }
+    if (/\/jobs\/[^/]+\/chunk-0-\d+\.m4s$/.test(url)) {
+      const signal = init?.signal;
+      // Like a real fetch, an abort ends the answer, or the body mid-way.
+      if (fixture.segment === 'silent')
+        return new Promise<never>((_resolve, reject) =>
+          signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          )
+        );
+      let sent = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal?.addEventListener('abort', () => {
+            fixture.segmentAborts++;
+            controller.error(new DOMException('aborted', 'AbortError'));
+          });
+        },
+        async pull(controller) {
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          if (sent++ === 5) return controller.close();
+          controller.enqueue(new Uint8Array(1000).fill(sent));
+        },
+      });
+      return new Response(body, {
+        headers: { 'Content-Type': 'video/mp4', 'Content-Length': '5000' },
+      });
+    }
+    return Response.json({ ok: true });
+  });
+}
 afterAll(async () => {
   vi.restoreAllMocks();
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  await new Promise<void>((resolve) => internalServer.close(() => resolve()));
 });
 beforeEach(() => {
   fixture.party = crypto.randomUUID().replaceAll('-', '').slice(0, 22);
@@ -170,7 +611,45 @@ beforeEach(() => {
   fixture.slow = false;
   fixture.prepares = [];
   fixture.noSources = false;
+  fixture.memoGate = null;
   fixture.memoCalls = 0;
+  CURRENT_WAIT.ms = 25_000;
+  fixture.rerunLoses = false;
+  fixture.workerDown = false;
+  fixture.logs = [];
+  fixture.sourcePath = '/media/private-token';
+  fixture.probes = 0;
+  fixture.probeFailures = 0;
+  fixture.hits = { public: 0, internal: 0 };
+  fixture.probeInputs = [];
+  fixture.probeError =
+    'Source probe failed: Invalid data found when processing input';
+  fixture.scopes = [];
+  fixture.chain = { hits: 0, expireA: false, thenTo: '/media/B' };
+  fixture.tokens = { fresh: 1, seen: [] };
+  fixture.logins = [];
+  fixture.prepared = { mode: 'direct' };
+  fixture.segment = 'slow';
+  fixture.segmentAborts = 0;
+  fixture.full = false;
+  fixture.releases = [];
+  fixture.leases = new Map();
+  fixture.releasedLeases = [];
+  fixture.prepareBodies = [];
+  fixture.starting = false;
+  fixture.states = [];
+  fixture.subtitleBodies = [];
+  fixture.touchStatus = 200;
+  fixture.extraction = [];
+  fixture.subtitleCodec = 'subrip';
+  fixture.hostItem = null;
+  fixture.hostUserData = {};
+  fixture.segmentsEnabled = true;
+  fixture.providerSegments = [];
+  fixture.segmentQueries = [];
+  MEDIA_TIMEOUT.headersMs = 30_000;
+  vi.restoreAllMocks();
+  spyFetch();
 });
 describe('guest playback authorization', () => {
   it('requires host credentials and rejects malformed invitations', async () => {
@@ -186,7 +665,7 @@ describe('guest playback authorization', () => {
     ).toBe(410);
     const token = await guest(secret);
     expect((await api('/current', token)).status).toBe(403);
-    join(token);
+    await join(token);
     const response = await api('/current', token);
     expect(response.status).toBe(200);
     const text = await response.text();
@@ -197,7 +676,7 @@ describe('guest playback authorization', () => {
   it('scopes playback to membership and revokes invites and sessions', async () => {
     const secret = await invitation(),
       token = await guest(secret);
-    join(token);
+    await join(token);
     const current = (await (await api('/current', token)).json()) as {
       revision: string;
     };
@@ -211,7 +690,7 @@ describe('guest playback authorization', () => {
     const playback = (await response.json()) as { url: string };
     expect(playback.url).toContain('/media/original');
     expect(playback.url).not.toContain('provider');
-    guestSessions.revokeMember(fixture.party, 'guest');
+    await guestSessions.revokeMember(fixture.party, 'guest');
     expect((await api('/current', token)).status).toBe(401);
     await api('/disable', 'host-token', proof());
     expect(
@@ -221,7 +700,7 @@ describe('guest playback authorization', () => {
   it('rejects media URLs from a previous playback lease', async () => {
     const secret = await invitation(),
       token = await guest(secret);
-    join(token);
+    await join(token);
     const current = (await (await api('/current', token)).json()) as {
       revision: string;
     };
@@ -245,7 +724,7 @@ describe('guest playback authorization', () => {
   it('rejects an old revision and disabled streaming', async () => {
     const secret = await invitation(),
       token = await guest(secret);
-    join(token);
+    await join(token);
     const current = (await (await api('/current', token)).json()) as {
       revision: string;
     };
@@ -271,7 +750,7 @@ describe('guest playback authorization', () => {
   it('does not let an older preparation replace a newer seek', async () => {
     const secret = await invitation(),
       token = await guest(secret);
-    join(token);
+    await join(token);
     const current = (await (await api('/current', token)).json()) as {
       revision: string;
     };
@@ -289,13 +768,112 @@ describe('guest playback authorization', () => {
     fixture.prepares[1].resolve();
     expect((await second).status).toBe(200);
     fixture.prepares[0].resolve();
-    expect((await first).status).toBe(409);
+    const lost = await first;
+    expect(lost.status).toBe(409);
+    expect(((await lost.json()) as { code?: string }).code).toBe('superseded');
+  });
+  it('reports what went wrong while it started, not a title change', async () => {
+    const secret = await invitation(),
+      token = await guest(secret);
+    await join(token);
+    const current = (await (await api('/current', token)).json()) as {
+      revision: string;
+    };
+    fixture.slow = true;
+    const pending = api('/prepare', token, {
+      revision: current.revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: true, container: true, hdr: false },
+    });
+    await vi.waitFor(() => expect(fixture.prepares.length).toBe(1));
+    fixture.enabled = false;
+    fixture.prepares[0].resolve();
+    const res = await pending;
+    expect(res.status).toBe(410);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'Guest streaming is disabled'
+    );
+  });
+  describe('the title, as a long poll', () => {
+    type Current = {
+      state: string;
+      token: string;
+      media?: unknown;
+      error?: string;
+    };
+    const poll = async (token: string, after: string) => {
+      const started = Date.now();
+      const res = await api(
+        `/current?after=${encodeURIComponent(after)}`,
+        token
+      );
+      return {
+        status: res.status,
+        body: (await res.json()) as Current,
+        ms: Date.now() - started,
+      };
+    };
+    it('answers a title still resolving at once, then when it is ready', async () => {
+      let open = () => {};
+      fixture.memoGate = new Promise<void>((r) => (open = r));
+      const secret = await invitation(),
+        token = await guest(secret);
+      await join(token);
+      const first = await poll(token, '');
+      expect(first.status).toBe(200);
+      expect(first.body.state).toBe('resolving');
+      expect(first.body.token).toMatch(/^[0-9a-f]{64}:resolving$/);
+      expect(first.ms).toBeLessThan(2000);
+      // Waits for it, and answers once it's resolved and probed.
+      const next = poll(token, first.body.token);
+      await new Promise((r) => setTimeout(r, 300));
+      open();
+      const ready = await next;
+      expect(ready.body.state).toBe('ready');
+      expect(ready.body.token).toBe(
+        first.body.token.replace(':resolving', ':ready')
+      );
+      expect(ready.body.media).toBeTruthy();
+      expect(fixture.memoCalls).toBe(1);
+    });
+    it('holds a title the page already has, then answers what it is', async () => {
+      CURRENT_WAIT.ms = 1500;
+      const secret = await invitation(),
+        token = await guest(secret);
+      await join(token);
+      // Followed until ready, as the page does.
+      let first = await poll(token, '');
+      for (let i = 0; i < 5 && first.body.state !== 'ready'; i++)
+        first = await poll(token, first.body.token);
+      expect(first.body.state).toBe('ready');
+      const held = await poll(token, first.body.token);
+      expect(held.body.token).toBe(first.body.token);
+      expect(held.ms).toBeGreaterThanOrEqual(1400);
+    });
+    it('answers a failure with its message, holds it, and backs off its resolve', async () => {
+      CURRENT_WAIT.ms = 1500;
+      fixture.noSources = true;
+      const secret = await invitation(),
+        token = await guest(secret);
+      await join(token);
+      // The resolve fails behind the first answer; the next sees the failure.
+      let failed = await poll(token, '');
+      for (let i = 0; i < 20 && failed.body.state !== 'failed'; i++)
+        failed = await poll(token, failed.body.token);
+      expect(failed.body.state).toBe('failed');
+      expect(failed.body.error).toBeTruthy();
+      const held = await poll(token, failed.body.token);
+      expect(held.body.state).toBe('failed');
+      expect(held.ms).toBeGreaterThanOrEqual(1400);
+      expect(fixture.memoCalls).toBe(1);
+    });
   });
   it('does not re-resolve a failed source on every poll', async () => {
     fixture.noSources = true;
     const secret = await invitation(),
       token = await guest(secret);
-    join(token);
+    await join(token);
     expect((await api('/current', token)).status).toBe(404);
     expect((await api('/current', token)).status).toBe(404);
     expect(fixture.memoCalls).toBe(1);
@@ -304,5 +882,1162 @@ describe('guest playback authorization', () => {
     await invitation();
     expect((await api('/current', token)).status).toBe(200);
     expect(fixture.memoCalls).toBe(2);
+  });
+  it('logs why the transcoder is unavailable, without the guest token', async () => {
+    const secret = await invitation(),
+      token = await guest(secret);
+    await join(token);
+    fixture.workerDown = true;
+    const response = await api('/current', token);
+    // usually restarting: a retryable 503 that says why
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('5');
+    expect(await response.json()).toEqual({
+      error: "The transcoder isn't reachable",
+      retryAfter: 5,
+      code: 'transcoder_unreachable',
+    });
+    expect(fixture.logs).toContainEqual({
+      level: 'warn',
+      data: { path: '/probe', cause: 'ECONNREFUSED', url: 'http://worker' },
+      message: 'transcoder unreachable',
+    });
+    expect(JSON.stringify(fixture.logs)).not.toContain(token);
+  });
+  it("converts a signed-in user's own playback without a party", async () => {
+    expect(
+      (await api('/own/open', '', { itemId: 'c'.repeat(32) })).status
+    ).toBe(401);
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    expect(opened.status).toBe(200);
+    const {
+      token,
+      revision,
+      media: probed,
+    } = (await opened.json()) as {
+      token: string;
+      revision: string;
+      media: { tracks: unknown[] };
+    };
+    expect(token).toMatch(/^own\./);
+    expect(probed.tracks).toHaveLength(2);
+    const prepared = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: false, container: false, hdr: false },
+    });
+    expect(prepared.status).toBe(200);
+    const playback = (await prepared.json()) as { url: string; lease: string };
+    expect(playback.url).toContain('/media/original');
+    expect(playback.url).toContain(encodeURIComponent(token));
+    expect(playback.url).not.toContain('provider');
+    // A heartbeat for its own lease is accepted.
+    const touched = await api('/own/touch', token, {
+      positionMs: 1000,
+      lease: playback.lease,
+    });
+    expect(touched.status).toBe(200);
+    // The wrong revision is refused, and a made-up session is unknown.
+    expect(
+      (
+        await api('/own/prepare', token, {
+          revision: 'f'.repeat(64),
+          quality: 'original',
+          positionMs: 0,
+          capabilities: {
+            video: true,
+            audio: true,
+            container: true,
+            hdr: false,
+          },
+        })
+      ).status
+    ).toBe(409);
+    expect(
+      (
+        await api('/own/prepare', `own.${'x'.repeat(43)}`, {
+          revision,
+          quality: 'original',
+          positionMs: 0,
+          capabilities: {
+            video: true,
+            audio: true,
+            container: true,
+            hdr: false,
+          },
+        })
+      ).status
+    ).toBe(401);
+  });
+  it('allows app requests from another origin', async () => {
+    const response = await originalFetch(`${base}/available`, {
+      headers: { Origin: 'http://tv.example' },
+    });
+    expect(response.headers.get('access-control-allow-origin')).toBe(
+      'http://tv.example'
+    );
+    expect(await response.json()).toEqual({ enabled: true, conversion: true });
+  });
+  describe('sources that are not ready or not media', () => {
+    async function joined() {
+      const secret = await invitation(),
+        token = await guest(secret);
+      await join(token);
+      return token;
+    }
+    it('reports a file that is still downloading, and is not probed', async () => {
+      fixture.sourcePath = '/downloading';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(425);
+      expect(response.headers.get('retry-after')).toBe('10');
+      expect(await response.json()).toMatchObject({
+        error: 'The file is still downloading',
+        retryAfter: 10,
+      });
+      expect(fixture.probes).toBe(0);
+    });
+    it("passes on AIOStreams' own error clip as the error", async () => {
+      fixture.sourcePath = '/failed';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      // won't change on a retry: the player offers other versions
+      expect(await response.json()).toMatchObject({
+        error: 'The download failed; pick another source',
+        code: 'source_failed',
+      });
+      expect(fixture.probes).toBe(0);
+    });
+    it('refuses a page that is not media', async () => {
+      fixture.sourcePath = '/html';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({
+        error: "The source didn't return a media file",
+        code: 'source_failed',
+      });
+    });
+    it('reports a source that answers with an error', async () => {
+      fixture.sourcePath = '/missing';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      // might work on a retry
+      expect(await response.json()).toMatchObject({
+        error: 'The source answered 404',
+        code: 'source_unreachable',
+      });
+    });
+    it('stops following a source that redirects forever', async () => {
+      fixture.sourcePath = '/loop';
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        'The source redirects too many times'
+      );
+    });
+    it('retries a probe that timed out, once', async () => {
+      fixture.probeFailures = 1;
+      fixture.probeError = 'Source probe timed out';
+      const token = await joined();
+      expect((await api('/current', token)).status).toBe(200);
+      expect(fixture.probes).toBe(2);
+    });
+    it('does not retry a probe of bad data, and backs off', async () => {
+      fixture.probeFailures = 99;
+      const token = await joined();
+      const response = await api('/current', token);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        'Source probe failed: Invalid data found when processing input'
+      );
+      expect(fixture.probes).toBe(1);
+      // Within the 5 s backoff the next poll doesn't probe again.
+      expect((await api('/current', token)).status).toBe(502);
+      expect(fixture.probes).toBe(1);
+    });
+    it('backs off longer each time, and forgets a failure long past', async () => {
+      fixture.probeFailures = 99;
+      const token = await joined();
+      const start = Date.now();
+      const at = (ms: number) =>
+        vi.spyOn(Date, 'now').mockReturnValue(start + ms);
+      await api('/current', token); // fails: next try after 5 s
+      at(6_000);
+      await api('/current', token); // fails again: next after 10 s
+      expect(fixture.probes).toBe(2);
+      at(12_000);
+      await api('/current', token); // still within 10 s of the last
+      expect(fixture.probes).toBe(2);
+      at(17_000);
+      await api('/current', token); // fails a third time: next after 30 s
+      expect(fixture.probes).toBe(3);
+      // Ten minutes later it starts again from the shortest wait.
+      at(10 * 60_000);
+      await api('/current', token);
+      at(10 * 60_000 + 6_000);
+      await api('/current', token);
+      expect(fixture.probes).toBe(5);
+    });
+    it("a user's own playback reports downloading too", async () => {
+      fixture.sourcePath = '/downloading';
+      const response = await api('/own/open', 'host-token', {
+        itemId: 'c'.repeat(32),
+        sourceId: 'source',
+      });
+      expect(response.status).toBe(425);
+      expect(response.headers.get('retry-after')).toBe('10');
+    });
+  });
+  describe('where the source is read from', () => {
+    async function handleOf() {
+      const secret = await invitation(),
+        token = await guest(secret);
+      await join(token);
+      const response = await api('/current', token);
+      expect(response.status).toBe(200);
+      return fixture.probeInputs[0].split('/').pop()!;
+    }
+    const read = (handle: string) =>
+      originalFetch(`${base}/source/${handle}`, {
+        headers: { Range: 'bytes=0-' },
+      });
+    it("reads this server's own URLs through its internal address", async () => {
+      await handleOf();
+      expect(fixture.hits.internal).toBeGreaterThan(0);
+      expect(fixture.hits.public).toBe(0);
+    });
+    it('follows the redirects once, then reads the same file every time', async () => {
+      fixture.sourcePath = '/chain';
+      const handle = await handleOf();
+      expect(await (await read(handle)).text()).toBe('A');
+      expect(await (await read(handle)).text()).toBe('A');
+      // Only the check went through the failover chain.
+      expect(fixture.chain.hits).toBe(1);
+    });
+    it('resolves again when the pinned link stops working', async () => {
+      fixture.sourcePath = '/chain';
+      const handle = await handleOf();
+      fixture.chain.expireA = true;
+      const response = await read(handle);
+      expect(response.status).toBe(206);
+      expect(await response.text()).toBe('B');
+      expect(fixture.chain.hits).toBe(2);
+      expect(await (await read(handle)).text()).toBe('B');
+    });
+    it('sends a login written into the URL as Basic auth', async () => {
+      const port = fixture.upstream.split(':').pop();
+      fixture.sourcePath = `http://user%40x:p%3Ass@127.0.0.1:${port}/webdav/file`;
+      const handle = await handleOf();
+      expect(await (await read(handle)).text()).toBe('W');
+      expect(fixture.logins.length).toBeGreaterThan(0);
+      expect(new Set(fixture.logins)).toEqual(
+        new Set([`Basic ${Buffer.from('user@x:p:ss').toString('base64')}`])
+      );
+    });
+    it("runs the host's configuration again once when the source refuses its credentials", async () => {
+      fixture.sourcePath = '/drive/file';
+      // The list made for the guest (list 1) carries a token the file no longer takes.
+      fixture.tokens.fresh = 2;
+      const handle = await handleOf();
+      expect(fixture.tokens.seen[0]).toBe('Bearer token-1');
+      // A list made now (not the one kept) carries a token it does take.
+      expect(fixture.tokens.seen).toContain('Bearer token-2');
+      expect(await (await read(handle)).text()).toBe('D');
+    });
+    it('never serves a placeholder clip as the file', async () => {
+      fixture.sourcePath = '/chain';
+      const handle = await handleOf();
+      fixture.chain.expireA = true;
+      fixture.chain.thenTo = '/static/download_failed.mp4';
+      const response = await read(handle);
+      expect(response.status).toBe(502);
+      expect(await errorOf(response)).toBe(
+        'The download failed; pick another source'
+      );
+    });
+    it('refuses addresses inside the cluster, by name or by number', async () => {
+      const port = fixture.upstream.split(':').pop();
+      for (const [path, url] of [
+        ['name', `http://localhost:${port}/media/private-token`],
+        ['metadata', 'http://169.254.169.254/latest/meta-data'],
+      ]) {
+        fixture.party = crypto.randomUUID().replaceAll('-', '').slice(0, 22);
+        fixture.members = [{ id: 'host', key: 'h'.repeat(22) }];
+        const secret = await invitation(),
+          token = await guest(secret);
+        await join(token);
+        fixture.sourcePath = url;
+        const response = await api('/current', token);
+        expect(response.status, path).toBe(502);
+        expect(await errorOf(response), path).toBe(
+          'The source points at a private address'
+        );
+      }
+    });
+    it('logs why a source handle was refused', async () => {
+      const response = await originalFetch(`${base}/source/${'x'.repeat(43)}`);
+      expect(response.status).toBe(404);
+      expect(fixture.logs).toContainEqual({
+        level: 'warn',
+        data: { reason: 'unknown handle' },
+        message: 'guest source handle refused',
+      });
+    });
+  });
+  describe("a user's own playback", () => {
+    it('plays the default version, whose id is the item id', async () => {
+      const response = await api('/own/open', 'host-token', {
+        itemId: 'c'.repeat(32),
+        sourceId: 'c'.repeat(32),
+      });
+      expect(response.status).toBe(200);
+    });
+    it("uses the user's own cache, guests a separate one", async () => {
+      await api('/own/open', 'host-token', { itemId: 'c'.repeat(32) });
+      const secret = await invitation(),
+        token = await guest(secret);
+      await join(token);
+      await api('/current', token);
+      expect(fixture.scopes).toEqual(['owner-scope', 'guest:owner-scope']);
+    });
+  });
+});
+describe("the host's artwork and segments", () => {
+  const joined = async () => {
+    const token = await guest(await invitation());
+    await join(token);
+    return token;
+  };
+  it("gives a guest the host's artwork, and nothing else of the item", async () => {
+    fixture.hostItem = {
+      Id: 'item',
+      Path: 'https://debrid.example/private-token',
+      MediaSources: [{ Path: 'https://debrid.example/private-token' }],
+      ImageTags: { Primary: 'p-tag', Logo: 'l-tag' },
+      BackdropImageTags: ['b-tag'],
+      ParentLogoItemId: 'series',
+      ParentLogoImageTag: 'sl-tag',
+      Overview: 'What happens.',
+    };
+    const current = (await (await api('/current', await joined())).json()) as {
+      artwork: Record<string, unknown>;
+    };
+    expect(current.artwork).toEqual({
+      ImageTags: { Primary: 'p-tag', Logo: 'l-tag' },
+      BackdropImageTags: ['b-tag'],
+      ParentLogoItemId: 'series',
+      ParentLogoImageTag: 'sl-tag',
+      Overview: 'What happens.',
+    });
+  });
+  it('gives none where the host has no item for it', async () => {
+    const current = (await (await api('/current', await joined())).json()) as {
+      artwork: Record<string, unknown>;
+    };
+    expect(current.artwork).toEqual({});
+  });
+  it("gives the host's segments, of the types the host turned on, at the file's runtime", async () => {
+    fixture.hostUserData = {
+      pmdbApiKey: 'host-key',
+      jellyfin: { segmentTypes: ['Intro', 'Outro'] },
+    };
+    fixture.providerSegments = [
+      { type: 'Intro', startMs: 1_000, endMs: 90_000 },
+      { type: 'Recap', startMs: 90_000, endMs: 120_000 },
+      { type: 'Outro', startMs: 1_140_000, endMs: 1_200_000 },
+    ];
+    const token = await joined();
+    const current = (await (await api('/current', token)).json()) as {
+      media: { durationMs: number };
+    };
+    const response = await api('/segments', token);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      Items: [
+        { Type: 'Intro', StartTicks: 10_000_000, EndTicks: 900_000_000 },
+        { Type: 'Outro', StartTicks: 11_400_000_000, EndTicks: 12_000_000_000 },
+      ],
+    });
+    expect(fixture.segmentQueries).toEqual([
+      {
+        runtimeMs: current.media.durationMs,
+        types: ['Intro', 'Outro'],
+        key: 'host-key',
+      },
+    ]);
+    // Looked up once for every guest's request.
+    await api('/segments', token);
+    expect(fixture.segmentQueries).toHaveLength(1);
+  });
+  it('gives none where the host turned segments off', async () => {
+    fixture.hostUserData = { jellyfin: { segments: false } };
+    fixture.providerSegments = [{ type: 'Intro', startMs: 0, endMs: 1 }];
+    const response = await api('/segments', await joined());
+    expect(await response.json()).toEqual({ Items: [] });
+    expect(fixture.segmentQueries).toEqual([]);
+  });
+  it('refuses a guest without a seat', async () => {
+    const token = await guest(await invitation());
+    expect((await api('/segments', token)).status).toBe(403);
+  });
+});
+describe('converted media', () => {
+  it('asks for binaural rendering and says when the transcoder did it', async () => {
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const ask = (binaural: boolean) =>
+      api('/own/prepare', token, {
+        revision,
+        quality: 'original',
+        positionMs: 0,
+        capabilities: {
+          video: true,
+          audio: false,
+          container: true,
+          hdr: false,
+          binaural,
+        },
+      });
+    type Answer = { spec: GuestPlaybackSpec; effective: GuestPlaybackSpec };
+    const asked: GuestPlaybackSpec = {
+      video: {
+        track: 0,
+        where: 'server-copy',
+        encode: null,
+        picture: 'none',
+        reason: null,
+      },
+      audio: {
+        track: 1,
+        where: 'server-render',
+        pageRenders: false,
+        convert: null,
+        render: { binaural: true, mode: 'near', codec: 'flac', bitrate: null },
+        reason: 'binaural rendering',
+      },
+      subtitle: null,
+    };
+    // The transcoder rendered it: what was asked is what runs.
+    fixture.prepared = {
+      mode: 'audio',
+      id: 'job-binaural',
+      spec: asked,
+      effective: asked,
+    };
+    const rendered = (await (await ask(true)).json()) as Answer;
+    expect(fixture.prepareCapabilities.at(-1)?.binaural).toBe(true);
+    expect(rendered.spec).toEqual(asked);
+    expect(rendered.effective).toEqual(asked);
+    // It fell back (the renderer failed): asked for and done differ, and both are passed on.
+    const converted: GuestPlaybackSpec = {
+      ...asked,
+      audio: {
+        ...asked.audio!,
+        where: 'server-convert',
+        render: null,
+        convert: { codec: 'flac', layout: '5.1', channels: 6, bitrate: null },
+        reason: "browser can't decode the audio",
+      },
+    };
+    fixture.prepared = {
+      mode: 'audio',
+      id: 'job-fallback',
+      spec: asked,
+      effective: converted,
+    };
+    const fellBack = (await (await ask(true)).json()) as Answer;
+    expect(fellBack.spec).toEqual(asked);
+    expect(fellBack.effective).toEqual(converted);
+  });
+  async function ownPlayback() {
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const prepare = () =>
+      api('/own/prepare', token, {
+        revision,
+        quality: 'original',
+        positionMs: 0,
+        capabilities: {
+          video: true,
+          audio: false,
+          container: true,
+          hdr: false,
+        },
+      });
+    return { token, prepare };
+  }
+  it('answers at once with the playback and its state; the page follows it', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-starting' };
+    fixture.starting = true;
+    fixture.states = [{ version: 1, stage: 'encoding', ready: false }];
+    const { token, prepare } = await ownPlayback();
+    const res = await prepare();
+    expect(res.status).toBe(200);
+    const playback = (await res.json()) as {
+      lease: string;
+      ready: boolean;
+      stage: string;
+      version: number;
+    };
+    // Not waited for here: still starting.
+    expect(playback).toMatchObject({
+      ready: false,
+      stage: 'opening',
+      version: 0,
+    });
+    expect(fixture.states).toHaveLength(1);
+    // Followed through the relay, its own lease only.
+    const follow = await api(
+      `/own/prepare/${playback.lease}/state?after=0`,
+      token
+    );
+    expect(follow.status).toBe(200);
+    expect(await follow.json()).toMatchObject({
+      stage: 'encoding',
+      ready: false,
+    });
+    expect(
+      (await api(`/own/prepare/${'x'.repeat(43)}/state?after=0`, token)).status
+    ).toBe(410);
+    expect(fixture.releases).toEqual([]);
+  });
+  it('relays a failure with its class and code', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-failing' };
+    fixture.starting = true;
+    const failure = {
+      class: 'source',
+      status: 502,
+      code: 'source_unreachable',
+      reason: 'The usenet source could not be read',
+    };
+    fixture.states = [{ version: 1, stage: 'failed', ready: false, failure }];
+    const { token, prepare } = await ownPlayback();
+    const { lease } = (await (await prepare()).json()) as { lease: string };
+    const state = (await (
+      await api(`/own/prepare/${lease}/state?after=0`, token)
+    ).json()) as { stage: string; failure: unknown };
+    expect(state.stage).toBe('failed');
+    expect(state.failure).toEqual(failure);
+  });
+  it('releases a playback whose admission failed, which the transcoder may hold', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-refused' };
+    fixture.full = true;
+    const { prepare } = await ownPlayback();
+    // Opening the item again released the earlier playback of it: count from here.
+    const before = fixture.releasedLeases.length;
+    expect((await prepare()).status).toBe(503);
+    const released = fixture.releasedLeases.slice(before);
+    expect(released).toHaveLength(1);
+    expect(released[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+  it('takes over the earlier playback, and names the file it plays', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-a' };
+    const { prepare } = await ownPlayback();
+    const first = (await (await prepare()).json()) as { lease: string };
+    fixture.prepared = { mode: 'audio', id: 'job-b' };
+    expect((await prepare()).status).toBe(200);
+    const [a, b] = fixture.prepareBodies;
+    expect(a.replaces).toBeUndefined();
+    expect(b.replaces).toBe(first.lease);
+    // The file's identity, not its link: the same for both.
+    expect(a.file).toMatch(/^[0-9a-f]{64}$/);
+    expect(b.file).toBe(a.file);
+    expect(fixture.releases).toContain('job-a');
+  });
+  async function ownSegment() {
+    fixture.prepared = { mode: 'audio', id: 'job-1' };
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const prepared = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: false, container: true, hdr: false },
+    });
+    const { url } = (await prepared.json()) as { url: string };
+    // This playback's manifest, written for its lease; segments under each job.
+    expect(url).toMatch(/\/media\/v\/[A-Za-z0-9_-]{43}\/manifest\.mpd/);
+    return new URL(
+      url.replace('manifest.mpd', 'job-1/chunk-0-00001.m4s'),
+      base
+    );
+  }
+  it('serves the manifest with this playback in its segment URLs', async () => {
+    const segment = await ownSegment();
+    const manifest = new URL(
+      segment.href.replace('job-1/chunk-0-00001.m4s', 'manifest.mpd')
+    );
+    const response = await originalFetch(manifest);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain(
+      'application/dash+xml'
+    );
+    const mpd = await response.text();
+    const token = encodeURIComponent(manifest.searchParams.get('token')!);
+    const lease = manifest.searchParams.get('lease')!;
+    // The player resolves segment URLs from these templates.
+    expect(mpd).toContain(
+      `initialization="job-1/init-0.m4s?token=${token}&amp;lease=${lease}"`
+    );
+    expect(mpd).toContain(
+      `media="job-1/chunk-0-$Number%05d$.m4s?token=${token}&amp;lease=${lease}"`
+    );
+    // The rest of the manifest is untouched.
+    expect(mpd).toContain('codecs="hvc1.2.4.L153.B0"');
+    // A URL resolved from the template reaches the segment.
+    const resolved = new URL(
+      'job-1/chunk-0-00001.m4s?token=' + token + '&lease=' + lease,
+      manifest
+    );
+    expect((await originalFetch(resolved)).status).toBe(200);
+  });
+  it('refuses file names the transcoder does not write', async () => {
+    const segment = await ownSegment();
+    for (const name of [
+      'index.m3u8',
+      'init.mp4',
+      '..%2Fsecret',
+      'chunk-0.m4s',
+      'chunk-1-00001.m4s',
+    ])
+      expect(
+        (
+          await originalFetch(
+            new URL(segment.href.replace('chunk-0-00001.m4s', name))
+          )
+        ).status
+      ).toBe(404);
+    // Another job's segments: not this playback's.
+    expect(
+      (await originalFetch(new URL(segment.href.replace('job-1/', 'job-2/'))))
+        .status
+    ).toBe(410);
+  });
+  it('adds credentials to segment templates only', () => {
+    const mpd = withCredentials(
+      '<SegmentTemplate initialization="init-$RepresentationID$.m4s" media="chunk-$Number$.m4s"/><Title media="x">',
+      'own.a+b/c',
+      'L'
+    );
+    expect(mpd).toContain(
+      'initialization="init-$RepresentationID$.m4s?token=own.a%2Bb%2Fc&amp;lease=L"'
+    );
+    expect(mpd).toContain(
+      'media="chunk-$Number$.m4s?token=own.a%2Bb%2Fc&amp;lease=L"'
+    );
+    expect(mpd).toContain('<Title media="x">');
+  });
+  it('streams a segment that takes longer than the answer timeout', async () => {
+    const url = await ownSegment();
+    MEDIA_TIMEOUT.headersMs = 100;
+    const response = await originalFetch(url);
+    expect(response.status).toBe(200);
+    // The whole body arrives, though it takes three times the timeout.
+    const body = new Uint8Array(await response.arrayBuffer());
+    expect(body.length).toBe(5000);
+    expect(body[4999]).toBe(5);
+  });
+  it('answers 504 when the transcoder never answers', async () => {
+    const url = await ownSegment();
+    MEDIA_TIMEOUT.headersMs = 100;
+    fixture.segment = 'silent';
+    const started = Date.now();
+    const response = await originalFetch(url);
+    expect(response.status).toBe(504);
+    expect(await errorOf(response)).toBe('Conversion did not answer');
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(
+      fixture.logs.some((l) => l.message === 'transcoder did not answer')
+    ).toBe(true);
+  });
+  it('stops reading from the transcoder when the viewer goes away', async () => {
+    const url = await ownSegment();
+    const controller = new AbortController();
+    const response = await originalFetch(url, { signal: controller.signal });
+    const reader = response.body!.getReader();
+    await reader.read();
+    controller.abort();
+    // The server notices the closed socket and aborts its own request.
+    await vi.waitFor(() => expect(fixture.segmentAborts).toBeGreaterThan(0), {
+      timeout: 2000,
+    });
+  });
+});
+describe('own playback and a full transcoder', () => {
+  async function open() {
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    expect(opened.status).toBe(200);
+    return (await opened.json()) as { token: string; revision: string };
+  }
+  const prepare = (token: string, revision: string, subtitle?: number) =>
+    api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      subtitle,
+      capabilities: { video: true, audio: false, container: true, hdr: false },
+    });
+  it('passes on when to come back', async () => {
+    const { token, revision } = await open();
+    fixture.full = true;
+    const response = await prepare(token, revision);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('10');
+    expect(
+      ((await response.json()) as { retryAfter?: number }).retryAfter
+    ).toBe(10);
+  });
+  it('plays a picked version from the list it was picked from, without running the addons again', async () => {
+    fixture.rerunLoses = true;
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    expect(opened.status).toBe(200);
+    expect(fixture.memoCalls).toBe(1);
+  });
+  it('tells the player when the transcoder no longer has its stream', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-gone' };
+    const { token, revision } = await open();
+    const prepared = await prepare(token, revision);
+    const { lease } = (await prepared.json()) as { lease: string };
+    fixture.touchStatus = 404;
+    const touched = await api('/own/touch', token, { positionMs: 1000, lease });
+    expect(touched.status).toBe(409);
+    expect(((await touched.json()) as { code?: string }).code).toBe(
+      'stream_gone'
+    );
+    // and stops asking the transcoder about it
+    fixture.touchStatus = 200;
+    expect(
+      (await api('/own/touch', token, { positionMs: 2000, lease })).status
+    ).toBe(200);
+  });
+  it('keeps the playing job until its replacement has started', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-playing' };
+    const { token, revision } = await open();
+    expect((await prepare(token, revision)).status).toBe(200);
+    // the next one fails (a source slow to open, a full transcoder): the playing job stays watched
+    fixture.full = true;
+    expect((await prepare(token, revision)).status).toBe(503);
+    expect(fixture.releases).not.toContain('job-playing');
+    // and goes once one has started
+    fixture.full = false;
+    fixture.prepared = { mode: 'audio', id: 'job-next' };
+    expect((await prepare(token, revision)).status).toBe(200);
+    expect(fixture.releases).toContain('job-playing');
+  });
+  it('releases the earlier playback of the same item when it opens again', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-first' };
+    const first = await open();
+    expect((await prepare(first.token, first.revision)).status).toBe(200);
+    expect(fixture.releases).not.toContain('job-first');
+    await open();
+    expect(fixture.releases).toContain('job-first');
+    // The earlier playback is gone.
+    expect((await prepare(first.token, first.revision)).status).toBe(401);
+  });
+});
+
+describe('subtitles for the browser', () => {
+  async function playing(codec: string) {
+    fixture.subtitleCodec = codec;
+    fixture.prepared = { mode: 'audio', id: 'job-subs' };
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const prepared = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities: { video: true, audio: false, container: true, hdr: false },
+    });
+    const { url } = (await prepared.json()) as { url: string };
+    const query = new URL(url, base).search;
+    return (path: string, format?: string) =>
+      originalFetch(
+        new URL(`${base}${path}${query}${format ? `&format=${format}` : ''}`)
+      );
+  }
+  it('sends ASS and PGS to be drawn where the browser draws them', async () => {
+    const prepared = async (codec: string, subtitles?: string[]) => {
+      fixture.subtitleCodec = codec;
+      fixture.prepared = { mode: 'direct' };
+      const opened = await api('/own/open', 'host-token', {
+        itemId: 'c'.repeat(32),
+        sourceId: 'source',
+      });
+      const { token, revision } = (await opened.json()) as {
+        token: string;
+        revision: string;
+      };
+      return (await (
+        await api('/own/prepare', token, {
+          revision,
+          quality: 'original',
+          positionMs: 0,
+          subtitle: 2,
+          capabilities: {
+            video: true,
+            audio: true,
+            container: true,
+            hdr: false,
+            subtitles,
+          },
+        })
+      ).json()) as {
+        subtitleUrl?: string;
+        subtitleFormat?: string;
+        fontUrls?: string[];
+      };
+    };
+    const ass = await prepared('ass', ['ass', 'pgs']);
+    expect(ass.subtitleFormat).toBe('ass');
+    expect(ass.subtitleUrl).toMatch(/\/subtitle\/2\?token=.*&format=ass$/);
+    expect(ass.fontUrls).toHaveLength(1);
+    expect(ass.fontUrls![0]).toMatch(/\/font\/5\?token=/);
+    const pgs = await prepared('hdmv_pgs_subtitle', ['ass', 'pgs']);
+    expect(pgs.subtitleFormat).toBe('sup');
+    expect(pgs.fontUrls).toBeUndefined();
+    // A browser that doesn't draw them gets them burned in: no subtitle here.
+    expect((await prepared('ass', [])).subtitleUrl).toBeUndefined();
+    expect(
+      (await prepared('hdmv_pgs_subtitle', ['ass'])).subtitleUrl
+    ).toBeUndefined();
+    // Text is always served as WebVTT.
+    const text = await prepared('subrip');
+    expect(text.subtitleFormat).toBe('vtt');
+  });
+  it('says to come back while the subtitle is extracted', async () => {
+    const get = await playing('subrip');
+    fixture.extraction = [{ status: 425, body: '{}' }];
+    const waiting = await get('/subtitle/2');
+    expect(waiting.status).toBe(425);
+    expect(waiting.headers.get('retry-after')).toBe('5');
+    const ready = await get('/subtitle/2');
+    expect(ready.status).toBe(200);
+    expect(await ready.text()).toContain('WEBVTT');
+    // Kept by the file (not its link), and held by this playback's lease.
+    const sent = fixture.subtitleBodies.at(-1)!;
+    expect(sent.file).toMatch(/^[0-9a-f]{64}$/);
+    expect(sent.viewer).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(fixture.leases.has(sent.viewer as string)).toBe(true);
+  });
+  it('serves ASS as it is, and its fonts', async () => {
+    const get = await playing('ass');
+    fixture.extraction = [
+      { status: 200, body: '[Script Info]\nTitle: x' },
+      { status: 200, body: 'font bytes' },
+    ];
+    const ass = await get('/subtitle/2', 'ass');
+    expect(ass.status).toBe(200);
+    expect(await ass.text()).toContain('[Script Info]');
+    const font = await get('/font/5');
+    expect(font.status).toBe(200);
+    expect(await font.text()).toBe('font bytes');
+    expect((await get('/font/6')).status).toBe(404);
+  });
+  it('serves only the format a track is in', async () => {
+    const get = await playing('hdmv_pgs_subtitle');
+    expect((await get('/subtitle/2')).status).toBe(404);
+    fixture.extraction = [{ status: 200, body: 'PG' }];
+    expect((await get('/subtitle/2', 'sup')).status).toBe(200);
+  });
+});
+
+describe('through a restart', () => {
+  const servers: Server[] = [];
+  // The process before a restart is gone (its store stopped): later tests use the one running.
+  afterEach(() => {
+    fixture.secretKey = 'k'.repeat(64);
+  });
+  afterAll(() => {
+    for (const s of servers) s.close();
+  });
+  /** This server restarts: its routes and sessions anew, with nothing in memory, the store kept. */
+  async function restart() {
+    // The process goes (its store written out), and a new one starts on the same database.
+    await shared.backend.stop();
+    shared.backend = shared.make();
+    await shared.backend.start();
+    vi.resetModules();
+    const fresh = await import('./routes.js');
+    liveSessions = (await import('./sessions.js')).guestSessions;
+    fresh.CURRENT_WAIT.ms = 1500;
+    const routes = fresh.default;
+    const app = express();
+    app.use(express.json());
+    app.use('/party/guest', routes);
+    const next = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => next.on('listening', resolve));
+    servers.push(next);
+    base = `http://127.0.0.1:${(next.address() as { port: number }).port}/party/guest`;
+  }
+  const handleOf = (input: string) => input.split('/source/')[1];
+  const capabilities = {
+    video: true,
+    audio: false,
+    container: true,
+    hdr: false,
+  };
+  /** A guest playing a converted stream: its token, lease, and the source's handle. */
+  async function playing(sourceId: string | undefined = 'source') {
+    fixture.prepared = { mode: 'audio', id: 'job-kept' };
+    const result = await api('/host', 'host-token', proof());
+    const { secret } = (await result.json()) as { secret: string };
+    await api('/publish', 'host-token', {
+      ...proof(),
+      entries: [
+        {
+          ref: fixture.playing.ref,
+          itemId: 'c'.repeat(32),
+          title: 'Episode',
+          sourceId,
+        },
+      ],
+    });
+    const token = await guest(secret);
+    await join(token);
+    const current = (await (await api('/current', token)).json()) as {
+      revision: string;
+    };
+    const prepared = await api('/prepare', token, {
+      revision: current.revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities,
+    });
+    expect(prepared.status).toBe(200);
+    const { lease, url } = (await prepared.json()) as {
+      lease: string;
+      url: string;
+    };
+    return {
+      secret,
+      token,
+      lease,
+      url,
+      revision: current.revision,
+      handle: handleOf(fixture.probeInputs.at(-1)!),
+    };
+  }
+  it('keeps the link, the session and its playback; the page asks first', async () => {
+    const was = await playing();
+    await restart();
+    // The same link.
+    const host = await api('/host', 'host-token', proof());
+    expect(((await host.json()) as { secret: string }).secret).toBe(was.secret);
+    // The same title, from the same source: its handle, so the transcoder's jobs read on.
+    const current = await api('/current', was.token);
+    expect(current.status).toBe(200);
+    expect(((await current.json()) as { revision: string }).revision).toBe(
+      was.revision
+    );
+    expect(handleOf(fixture.probeInputs.at(-1)!)).toBe(was.handle);
+    // The playback it had: its manifest, its heartbeat, and the source its jobs read.
+    expect((await originalFetch(new URL(was.url, base))).status).toBe(200);
+    expect(
+      (await api('/touch', was.token, { positionMs: 1000, lease: was.lease }))
+        .status
+    ).toBe(200);
+    expect((await originalFetch(`${base}/source/${was.handle}`)).status).toBe(
+      206
+    );
+    expect(fixture.releasedLeases).not.toContain(was.lease);
+  });
+  it('does not tell a page playing the title that it is resolving again', async () => {
+    const was = await playing();
+    await restart();
+    let open!: () => void;
+    fixture.memoGate = new Promise<void>((resolve) => (open = resolve));
+    const started = Date.now();
+    const pending = api(
+      `/current?after=${encodeURIComponent(`${was.revision}:ready`)}`,
+      was.token
+    );
+    setTimeout(() => open(), 300);
+    const answer = (await (await pending).json()) as {
+      state: string;
+      token: string;
+    };
+    fixture.memoGate = null;
+    // Held while it reopened, then (nothing changed) until the poll's end: ready, as it was.
+    expect(answer).toMatchObject({
+      state: 'ready',
+      token: `${was.revision}:ready`,
+    });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
+    expect(handleOf(fixture.probeInputs.at(-1)!)).toBe(was.handle);
+  });
+  it('reopens the source when the transcoder asks first, once for both', async () => {
+    const was = await playing();
+    await restart();
+    const calls = fixture.memoCalls;
+    const [status, read] = await Promise.all([
+      originalFetch(`${base}/source/${was.handle}/status`),
+      originalFetch(`${base}/source/${was.handle}`),
+    ]);
+    expect(status.status).toBe(200);
+    expect(['resolving', 'ok', 'idle']).toContain(
+      ((await status.json()) as { state: string }).state
+    );
+    expect(read.status).toBe(206);
+    const current = await api('/current', was.token);
+    expect(current.status).toBe(200);
+    expect(handleOf(fixture.probeInputs.at(-1)!)).toBe(was.handle);
+    // One resolve, shared by the source route, its status and the page.
+    expect(fixture.memoCalls - calls).toBe(1);
+  });
+  it('keeps the first playable version the host had no choice for, on the same file', async () => {
+    const was = await playing(undefined);
+    await restart();
+    expect((await originalFetch(`${base}/source/${was.handle}`)).status).toBe(
+      206
+    );
+    expect((await api('/current', was.token)).status).toBe(200);
+    expect(handleOf(fixture.probeInputs.at(-1)!)).toBe(was.handle);
+  });
+  it('reads nothing sealed with another key', async () => {
+    const was = await playing();
+    fixture.secretKey = 'r'.repeat(64);
+    await restart();
+    expect((await originalFetch(`${base}/source/${was.handle}`)).status).toBe(
+      404
+    );
+    expect((await api('/current', was.token)).status).toBe(410);
+    // The host gets a new link.
+    const host = await api('/host', 'host-token', proof());
+    expect(host.status).toBe(200);
+    expect(((await host.json()) as { secret: string }).secret).not.toBe(
+      was.secret
+    );
+  });
+  it('no longer opens a source the party moved on from', async () => {
+    const was = await playing();
+    // The party plays something else: its source replaces the one kept.
+    fixture.playing = { ...fixture.playing, playlistItemId: 'e'.repeat(32) };
+    expect((await api('/current', was.token)).status).toBe(200);
+    const replaced = handleOf(fixture.probeInputs.at(-1)!);
+    expect(replaced).not.toBe(was.handle);
+    await restart();
+    expect((await originalFetch(`${base}/source/${was.handle}`)).status).toBe(
+      404
+    );
+    expect((await originalFetch(`${base}/source/${replaced}`)).status).toBe(
+      206
+    );
+  });
+  it('keeps no token, secret or handle in the clear, in the store or the logs', async () => {
+    const was = await playing();
+    await restart();
+    await api('/current', was.token);
+    await shared.backend.flush();
+    const stored = JSON.stringify(
+      await shared.db.query('SELECT * FROM fork_shared_records')
+    );
+    // The share, the guest session and the playback are what was written.
+    for (const kind of ['guest-share', 'guest-session'])
+      expect(stored).toContain(`"kind":"${kind}"`);
+    for (const secret of [was.token, was.secret, was.handle, 'host-token'])
+      expect(stored).not.toContain(secret);
+    expect(JSON.stringify(fixture.logs)).not.toContain(was.handle);
+  });
+  it('frees a playback at the transcoder when the share ends after a restart', async () => {
+    const was = await playing();
+    await restart();
+    expect((await api('/disable', 'host-token', proof())).status).toBe(200);
+    await vi.waitFor(() => expect(fixture.releasedLeases).toContain(was.lease));
+    expect((await api('/current', was.token)).status).toBe(401);
+  });
+  it("keeps a user's own playback", async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-own' };
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const prepared = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 0,
+      capabilities,
+    });
+    const { lease, url } = (await prepared.json()) as {
+      lease: string;
+      url: string;
+    };
+    const handle = handleOf(fixture.probeInputs.at(-1)!);
+    await restart();
+    expect((await originalFetch(`${base}/source/${handle}`)).status).toBe(206);
+    expect((await originalFetch(new URL(url, base))).status).toBe(200);
+    expect(
+      (await api('/own/touch', token, { positionMs: 1000, lease })).status
+    ).toBe(200);
+    expect(fixture.releasedLeases).not.toContain(lease);
+    const again = await api('/own/prepare', token, {
+      revision,
+      quality: 'original',
+      positionMs: 4000,
+      capabilities,
+    });
+    expect(again.status).toBe(200);
+    expect(handleOf(fixture.probeInputs.at(-1)!)).toBe(handle);
+  });
+  it('tells tokens a restart dropped from expired ones', async () => {
+    await restart();
+    const code = async (response: Response) => [
+      response.status,
+      ((await response.json()) as { code?: string }).code,
+    ];
+    expect(
+      await code(await api('/current', `guest.${'x'.repeat(43)}`))
+    ).toEqual([401, 'session_restarted']);
+    expect(
+      await code(await api('/current', `guest.v2.${'x'.repeat(43)}`))
+    ).toEqual([401, undefined]);
+    const touch = { positionMs: 0, lease: 'l'.repeat(43) };
+    expect(
+      await code(await api('/own/touch', `own.${'x'.repeat(43)}`, touch))
+    ).toEqual([401, 'session_restarted']);
+    expect(
+      await code(await api('/own/touch', `own.v2.${'x'.repeat(43)}`, touch))
+    ).toEqual([401, undefined]);
   });
 });

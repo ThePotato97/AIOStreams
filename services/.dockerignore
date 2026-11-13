@@ -1,0 +1,5 @@
+# The transcoder image's build context is services/ (it builds atmos-render too).
+**/target
+**/node_modules
+transcoder/fixtures
+transcoder/*.test.mjs

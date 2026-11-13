@@ -986,6 +986,17 @@ export const settings = {
       (v) => Math.abs(v) <= AUDIO_DELAY_LIMIT_MS,
       ['aiostreams-app-audio-delay']
     ),
+    /** Surround played in the browser is rendered for headphones (HRTF). */
+    headphones: device<boolean>('aiostreams-web-audio-headphones', false),
+    /**
+     * Dolby Atmos rendered for headphones: each element in the stream's own mode (Mid where it has
+     * none), or all of them Near (as Windows renders) or Far.
+     */
+    headphoneMode: device<'mixed' | 'near' | 'far'>(
+      'aiostreams-web-audio-headphone-mode',
+      'mixed',
+      ['mixed', 'near', 'far']
+    ),
     ac3Encode: device<boolean>(
       'aiostreams-web-audio-ac3-encode',
       false,

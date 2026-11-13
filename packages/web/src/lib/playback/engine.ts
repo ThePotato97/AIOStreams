@@ -16,6 +16,10 @@ export interface EngineTrack extends Track {
   type: 'audio' | 'subtitle';
   title?: string;
   codec?: string;
+  /** ffprobe's profile (Atmos, DTS-HD MA), channels and channel layout, where known. */
+  profile?: string;
+  channels?: number;
+  layout?: string;
   forced?: boolean;
   hearingImpaired?: boolean;
   visualImpaired?: boolean;
@@ -38,6 +42,8 @@ export interface EngineFile {
   prefs: PlaybackPrefs;
   subtitles: ServerSubtitle[];
   subtitleDelayMs: number;
+  /** The audio was rendered to binaural on the server: no virtualiser is added here. */
+  binaural?: boolean;
   /** Null for an engine that keeps the device's own. */
   volume: { volume: number; muted: boolean } | null;
 }
@@ -56,6 +62,7 @@ export type EngineState = Partial<
     | 'loaded'
     | 'paused'
     | 'waiting'
+    | 'waitingFor'
     | 'durationMs'
     | 'volume'
     | 'maxVolume'
@@ -77,7 +84,13 @@ export type EngineEvent =
   /** The file's tracks are listed, so the user's picks can apply. */
   | { type: 'loaded' }
   | { type: 'ended' }
-  | { type: 'failed'; error: string; retry?: { label: string; run(): void } }
+  | {
+      type: 'failed';
+      error: string;
+      retry?: { label: string; run(): void };
+      /** The transcoder failed, not the file: other versions wouldn't help. */
+      transcoder?: boolean;
+    }
   | { type: 'advanced'; next: QueuedItem }
   /** The user closed the player's own window. */
   | { type: 'closed' }
@@ -154,6 +167,8 @@ export interface PlayerEngine {
     stop(): void;
   };
   subtitleFiles?: { types: readonly string[]; add(file: File): Promise<void> };
+  /** Adds a server subtitle once it's ready, after the file opened. */
+  addServerSubtitle?(subtitle: ServerSubtitle): void;
   stats?: { pages: Track[]; show(page: string | null): void };
   /** Picks tracks from the user's settings as the file opens. */
   picksTracks?: boolean;
@@ -165,6 +180,8 @@ export interface PlayerEngine {
   fits?: boolean;
   /** The app's sound settings apply. */
   sound?: boolean;
+  /** Surround can be rendered for headphones, in the page. */
+  virtualSurround?: boolean;
   /** The player in its own window it drives. */
   external?: string;
   closeWindow?(): void;

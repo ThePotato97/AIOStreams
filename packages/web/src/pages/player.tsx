@@ -23,12 +23,17 @@ import {
 import { PlaybackReporter } from '../lib/playback/reporter';
 import { currentHost } from '../lib/hosts';
 import { useFeature } from '../lib/server-info';
+import { SceneOverlay } from '../components/player/scene-overlay';
 import {
   leaveFullscreen,
   usePlayerFullscreen,
 } from '../lib/playback/fullscreen';
 import { usePlayer } from '../lib/playback/use-player';
 import { videoEngine } from '../lib/playback/video';
+import {
+  audioNeedsConversion,
+  convertingEngine,
+} from '../lib/playback/convert';
 import { useNowPlaying } from '../lib/playback/now-playing';
 import {
   useShowPicks,
@@ -101,6 +106,7 @@ import { indexForTrack } from '../lib/remote/tracks';
 import { useLatest } from '../lib/use-latest';
 import { openPartySheet } from '../components/party/party-sheet';
 import { usePlaylistEdits, usePlaylistName } from '../lib/playlists';
+import { PlayerEngineOverride } from '../lib/guest/player-engine';
 
 interface PlayerProps {
   mini: boolean;
@@ -601,7 +607,10 @@ function Player({
 }: PlayerProps) {
   const { client } = useSession();
   const video = React.useRef<HTMLVideoElement>(null);
-  const [hostPlayer] = React.useState(() => currentHost().player);
+  const override = React.useContext(PlayerEngineOverride);
+  const [hostPlayer] = React.useState(() =>
+    override ? undefined : currentHost().player
+  );
   const close = React.useRef<() => void>(undefined);
   const ended = useEnded(item, mini, () => close.current?.());
   const { connect } = ended;
@@ -617,7 +626,7 @@ function Player({
     stopEnded();
   }, [playlistItemId, stopEnded]);
   const minimise =
-    canMinimise() && !launched
+    canMinimise() && !launched && !override
       ? () => minimisePlayback(to.item(item.Id!))
       : undefined;
   React.useEffect(() => {
@@ -651,7 +660,21 @@ function Player({
     },
     [local]
   );
-  const own = usePlayer(hostPlayer ?? videoEngine(video), {
+  // A browser that can't decode the audio would play it silently; such a
+  // source plays through the server's transcoder (audio converted, video
+  // copied) instead. Apps with their own player (desktop, Android) don't.
+  const [convert] = React.useState(
+    () =>
+      !hostPlayer && !local?.local && !youTube && audioNeedsConversion(source)
+  );
+  // Made once, like the player that owns it.
+  const [engine] = React.useState(() =>
+    override
+      ? override.engine(video, client)
+      : (hostPlayer ??
+        (convert ? convertingEngine(video, client) : videoEngine(video)))
+  );
+  const own = usePlayer(engine, {
     client,
     item,
     url: local?.local
@@ -677,7 +700,11 @@ function Player({
     launched,
     startPaused,
   });
-  const player = usePartyPlayer(own, playlistItemId);
+  // A stream converted as it plays (a guest's, or this user's own conversion) doesn't hold the
+  // party: the group plays on while it catches up.
+  const player = usePartyPlayer(own, playlistItemId, {
+    holds: () => !(override?.converted?.() ?? convert),
+  });
   close.current = player.close;
   const segments = useShownSegments(
     item,
@@ -710,7 +737,8 @@ function Player({
     playlist,
   });
   connect(next);
-  const switchVersion = useSwitchVersion(item, source, player, next.playlist);
+  const versions = useSwitchVersion(item, source, player, next.playlist);
+  const switchVersion = override ? undefined : versions;
   const together = () =>
     openPartySheet(
       inParty
@@ -792,6 +820,7 @@ function Player({
               lift={player.subtitleLift}
             />
           )}
+          {!hostPlayer && <SceneOverlay video={video} />}
           {player.stats?.text && (
             <pre
               data-ui="player-stats"
@@ -814,7 +843,8 @@ function Player({
               item={item}
               source={source}
               message={t`Playback failed: ${failure}`}
-              onVersions={switchVersion}
+              // Another version needs the same transcoder.
+              onVersions={player.transcoderFailure ? undefined : switchVersion}
               retry={player.retry}
             />
           ) : (
