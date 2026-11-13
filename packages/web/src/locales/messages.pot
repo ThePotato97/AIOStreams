@@ -1065,6 +1065,10 @@ msgstr ""
 msgid "Converted where your browser needs it"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "Converting…"
+msgstr ""
+
 #: src/components/version-settings.tsx
 msgid "Copied as JSON"
 msgstr ""
@@ -2991,6 +2995,14 @@ msgstr ""
 msgid "Open the app's downloads"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "Opening the source…"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "Opening what the host is playing…"
+msgstr ""
+
 #: src/lib/input/actions.ts
 msgid "Opens the menu of what is selected, as a right click does."
 msgstr ""
@@ -3713,6 +3725,10 @@ msgstr ""
 
 #: src/components/player/scene-overlay.tsx
 msgid "Render only {label}"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Rendering binaural audio…"
 msgstr ""
 
 #: src/components/playlists.tsx
@@ -4759,6 +4775,10 @@ msgstr ""
 msgid "The app's player and its options, such as starting videos in landscape."
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "The conversion failed"
+msgstr ""
+
 #: src/pages/guest.tsx
 msgid "The file as it is"
 msgstr ""
@@ -4857,6 +4877,18 @@ msgstr ""
 
 #: src/pages/settings/playback.tsx
 msgid "The same for episodes marked as a recap."
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "The server is converting as much as it can"
+msgstr ""
+
+#: src/pages/guest.tsx
+msgid "The source couldn't be opened"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "The source couldn't be read; pick another version"
 msgstr ""
 
 #: src/lib/guest/explain.ts
@@ -5427,6 +5459,10 @@ msgstr ""
 msgid "Waiting for approval…"
 msgstr ""
 
+#: src/lib/guest/engine.ts
+msgid "Waiting for the audio…"
+msgstr ""
+
 #: src/pages/guest.tsx
 msgid "Waiting for the host to choose a title…"
 msgstr ""
@@ -5437,6 +5473,10 @@ msgstr ""
 
 #: src/lib/guest/engine.ts
 msgid "Waiting for the server, which hasn't converted this far yet"
+msgstr ""
+
+#: src/lib/guest/engine.ts
+msgid "Waiting for the source: the host's server is opening it, or restarting…"
 msgstr ""
 
 #: src/lib/playback/convert.ts

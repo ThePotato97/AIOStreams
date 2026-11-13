@@ -1066,6 +1066,10 @@ msgstr "conversion is unavailable on this server"
 msgid "Converted where your browser needs it"
 msgstr "Converted where your browser needs it"
 
+#: src/lib/guest/engine.ts
+msgid "Converting…"
+msgstr "Converting…"
+
 #: src/components/version-settings.tsx
 msgid "Copied as JSON"
 msgstr "Copied as JSON"
@@ -2992,6 +2996,14 @@ msgstr "Open playlist"
 msgid "Open the app's downloads"
 msgstr "Open the app's downloads"
 
+#: src/lib/guest/engine.ts
+msgid "Opening the source…"
+msgstr "Opening the source…"
+
+#: src/pages/guest.tsx
+msgid "Opening what the host is playing…"
+msgstr "Opening what the host is playing…"
+
 #: src/lib/input/actions.ts
 msgid "Opens the menu of what is selected, as a right click does."
 msgstr "Opens the menu of what is selected, as a right click does."
@@ -3715,6 +3727,10 @@ msgstr "Render {label}"
 #: src/components/player/scene-overlay.tsx
 msgid "Render only {label}"
 msgstr "Render only {label}"
+
+#: src/lib/guest/engine.ts
+msgid "Rendering binaural audio…"
+msgstr "Rendering binaural audio…"
 
 #: src/components/playlists.tsx
 msgid "Repeat"
@@ -4760,6 +4776,10 @@ msgstr "The app's player"
 msgid "The app's player and its options, such as starting videos in landscape."
 msgstr "The app's player and its options, such as starting videos in landscape."
 
+#: src/lib/guest/engine.ts
+msgid "The conversion failed"
+msgstr "The conversion failed"
+
 #: src/pages/guest.tsx
 msgid "The file as it is"
 msgstr "The file as it is"
@@ -4859,6 +4879,18 @@ msgstr "The room in 3D: drag to turn it, double-click to reset"
 #: src/pages/settings/playback.tsx
 msgid "The same for episodes marked as a recap."
 msgstr "The same for episodes marked as a recap."
+
+#: src/lib/guest/engine.ts
+msgid "The server is converting as much as it can"
+msgstr "The server is converting as much as it can"
+
+#: src/pages/guest.tsx
+msgid "The source couldn't be opened"
+msgstr "The source couldn't be opened"
+
+#: src/lib/guest/engine.ts
+msgid "The source couldn't be read; pick another version"
+msgstr "The source couldn't be read; pick another version"
 
 #: src/lib/guest/explain.ts
 msgid "The stream couldn't be fetched [{detail}]"
@@ -5428,6 +5460,10 @@ msgstr "Waiting for {names}"
 msgid "Waiting for approval…"
 msgstr "Waiting for approval…"
 
+#: src/lib/guest/engine.ts
+msgid "Waiting for the audio…"
+msgstr "Waiting for the audio…"
+
 #: src/pages/guest.tsx
 msgid "Waiting for the host to choose a title…"
 msgstr "Waiting for the host to choose a title…"
@@ -5439,6 +5475,10 @@ msgstr "Waiting for the renderer…"
 #: src/lib/guest/engine.ts
 msgid "Waiting for the server, which hasn't converted this far yet"
 msgstr "Waiting for the server, which hasn't converted this far yet"
+
+#: src/lib/guest/engine.ts
+msgid "Waiting for the source: the host's server is opening it, or restarting…"
+msgstr "Waiting for the source: the host's server is opening it, or restarting…"
 
 #: src/lib/playback/convert.ts
 msgid "Waiting for the transcoder to come back…"
