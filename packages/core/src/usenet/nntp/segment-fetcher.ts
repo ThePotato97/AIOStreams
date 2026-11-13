@@ -345,28 +345,47 @@ export class LocalSegmentFetcher implements SegmentFetcher {
           this.opts.segmentTimeoutMs,
           segment.bytes
         );
-        // don't decode an abandoned fetch, wasted CPU.
+        // The article has fully arrived. An abandoned fetch is still decoded
+        // so the pool can cache it (the next read of this region must not
+        // re-download it), but into an owned buffer: `out` may be a
+        // per-stream slot its owner recycles once it has walked away. The
+        // caller is then rejected as abandoned, carrying the decoded data.
         if (signal?.aborted) {
-          throw new FetchAbandonedError(conn.label);
+          let data: SegmentData | undefined;
+          try {
+            data = this.decode(raw, segment);
+          } catch {
+            // Nobody is waiting for it: a corrupt copy is just not cached.
+          }
+          throw new FetchAbandonedError(conn.label, data);
         }
         // Failover attempts run sequentially, so re-decoding a retry into the
         // same target is safe: only the resolving attempt's bytes survive.
-        const decoded = decodeArticle(raw, out?.(), {
-          ...this.decodeOpts,
-          expectedPart: segment.number,
-        });
-        const data: SegmentData = {
-          body: decoded.body,
-          byteRange: decoded.byteRange,
-          fileSize: decoded.fileSize,
-          totalParts: decoded.totalParts,
-          name: decoded.name,
-          size: decoded.size,
-        };
+        const data = this.decode(raw, segment, out?.());
         return { value: data, bytes: data.size };
       },
       signal
     );
+  }
+
+  /** yEnc-decode one article body, into `out` when given and large enough. */
+  private decode(
+    raw: Buffer,
+    segment: NzbSegmentRef,
+    out?: Buffer
+  ): SegmentData {
+    const decoded = decodeArticle(raw, out, {
+      ...this.decodeOpts,
+      expectedPart: segment.number,
+    });
+    return {
+      body: decoded.body,
+      byteRange: decoded.byteRange,
+      fileSize: decoded.fileSize,
+      totalParts: decoded.totalParts,
+      name: decoded.name,
+      size: decoded.size,
+    };
   }
 
   async fetchHead(

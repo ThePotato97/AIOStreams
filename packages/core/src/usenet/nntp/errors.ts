@@ -1,4 +1,5 @@
 import type { HoleKind } from '../holes.js';
+import type { SegmentData } from '../types.js';
 import { YencDecodeError } from '../pool/yenc.js';
 
 /**
@@ -78,12 +79,17 @@ export class ArticleNotFoundError extends Error {
 
 /**
  * The consumer left while its article was on the wire. Transport-wise the
- * transfer completed, so the connection is healthy; the caller just gets no
- * decode/cache work done on its behalf.
+ * transfer completed, so the connection is healthy. The article is still
+ * decoded (into an owned buffer, never the caller's decode target) and carried
+ * as {@link data} so the pool can warm the cache with it; `data` is unset when
+ * the arrived article failed to decode.
  */
 export class FetchAbandonedError extends NntpError {
-  constructor(provider?: string) {
+  readonly data?: SegmentData;
+
+  constructor(provider?: string, data?: SegmentData) {
     super('connection', 'aborted', { provider });
+    this.data = data;
   }
 }
 

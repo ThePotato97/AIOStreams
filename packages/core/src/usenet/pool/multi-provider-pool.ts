@@ -16,6 +16,7 @@ import {
 } from '../nntp/segment-fetcher.js';
 import {
   ArticleNotFoundError,
+  FetchAbandonedError,
   NntpError,
   definitiveLossKind,
 } from '../nntp/errors.js';
@@ -46,7 +47,8 @@ interface SharedFlight {
   /**
    * Aborted when the last waiter deregisters: cancels a still-queued
    * semaphore acquire; a granted (on-the-wire) fetch always completes and
-   * warms the cache.
+   * warms the cache (the arena and the disk/mem tiers), though its waiters
+   * are gone.
    */
   ctl: AbortController;
 }
@@ -321,6 +323,21 @@ export class MultiProviderPool {
         for (const w of flight.waiters) w.deliver(shared);
       }
     } catch (err) {
+      // Every waiter left while the article was on the wire, but it arrived
+      // (decoded into an owned buffer): keep it resident in the arena so the
+      // next reader of this region doesn't download it again.
+      const arrived = err instanceof FetchAbandonedError ? err.data : undefined;
+      if (arrived) {
+        lease ??= this.arena.checkout(arrived.body.length);
+        if (lease && lease.slot.length >= arrived.body.length) {
+          arrived.body.copy(lease.slot, 0);
+          this.arena.commit(lease, id, {
+            ...arrived,
+            body: lease.slot.subarray(0, arrived.body.length),
+          });
+          lease = null;
+        }
+      }
       if (lease) this.arena.abandon(lease);
       if (this.sharedInflight.get(id) === flight) {
         this.sharedInflight.delete(id);
@@ -382,7 +399,9 @@ export class MultiProviderPool {
     /**
      * Cancels the download while it is still queued at the global semaphore,
      * so an abandoned prefetch does not hold its FIFO position ahead of live
-     * streams. Once granted, the fetch completes and warms the cache.
+     * streams. Once granted, the fetch completes and warms the cache: an
+     * article that arrives after the abort is decoded into an owned buffer
+     * and cached, then the call rejects as abandoned.
      */
     signal?: AbortSignal
   ): Promise<SegmentData> {
@@ -409,6 +428,10 @@ export class MultiProviderPool {
       this.cache.set(segment.messageId, data, { skipMem: out !== undefined });
       return data;
     } catch (err) {
+      if (err instanceof FetchAbandonedError && err.data) {
+        // Owned body (never the caller's slot), so the mem tier may keep it.
+        this.cache.set(segment.messageId, err.data);
+      }
       // Negatively cache only a definitive all-providers verdict
       const kind = definitiveLossKind(err);
       if (kind) this.recordMiss(segment.messageId, kind);
