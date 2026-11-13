@@ -23,6 +23,9 @@ import {
   type PlaybackMemo,
   isMemoFresh,
   openNativeUsenetStream,
+  encryptString,
+  decryptString,
+  sharedBackend,
 } from '@aiostreams/core';
 import { serveRangeStream } from '../utils/range-stream.js';
 import {
@@ -43,9 +46,10 @@ import { guestPartyState } from '../party/relay.js';
 import { ticketExpiry } from '../party/ticket.js';
 import {
   guestSessions,
+  fromBeforeRestart,
   randomSecret,
-  type GuestSession,
   type PlaybackJobs,
+  type SavedGuestSession,
 } from './sessions.js';
 import { StaticFiles } from '../utils/static-errors.js';
 
@@ -71,7 +75,34 @@ const publishSchema = hostSchema.extend({
     .max(20),
 });
 type Entry = z.infer<typeof publishSchema>['entries'][number];
+/** The source a revision plays: kept with the share, so it reopens as itself after a restart. */
+interface SavedRevision {
+  /** Its handle, sealed with the server's key: never stored in the clear. */
+  handle: string;
+  /** Its handle's digest: what the source route finds the share by. */
+  ref: string;
+  /** The file it resolved to: what it reopens. */
+  msid: string;
+}
+/**
+ * A party's guest invitation, in the shared store (Redis when configured), so the link
+ * survives a restart. Its secret and the host's token are sealed with the server's key.
+ */
+interface SavedShare {
+  owner: string;
+  expiresAt: number;
+  entries: Entry[];
+  bingeGroup?: string;
+  ownerCheckedAt: number;
+  /** The key the sealed values were sealed with: another reads as gone. */
+  keyId: string;
+  secret: string;
+  ownerToken: string;
+  revisions: Record<string, SavedRevision>;
+}
+/** A share as this process holds it: unsealed, with what it resolved and probed here. */
 interface Binding {
+  party: string;
   ownerToken: string;
   owner: string;
   secret: string;
@@ -83,6 +114,9 @@ interface Binding {
   /** When `ownerToken` was last confirmed to belong to a signed-in host. */
   ownerCheckedAt: number;
   bingeGroup?: string;
+  revisions: Record<string, SavedRevision>;
+  /** When this process last read it from the store. */
+  readAt: number;
 }
 interface Source {
   handle: string;
@@ -129,7 +163,99 @@ function errorCause(error: unknown): string {
 /** How long a failed source waits before it is tried again: 5 s, then 10 s, then 30 s. */
 const FAILURE_BACKOFF_MS = [5000, 10000, 30000];
 const OWNER_CHECK_MS = 30000;
+/** Shares this process has read, unsealed; the store is the record. */
 const bindings = new Map<string, Binding>();
+/** How long a share read from the store is trusted without asking again. */
+const SHARE_CACHE_MS = 5000;
+/** The server key's id: what a sealed value was sealed with, so a rotated key reads as gone. */
+const keyId = () =>
+  digest(['guest-key', config.bootstrap.secretKey]).slice(0, 16);
+function seal(value: string): string {
+  const sealed = encryptString(value);
+  if (!sealed.success || !sealed.data)
+    fail(500, 'Could not keep the invitation');
+  return sealed.data;
+}
+function unseal(value: string): string | null {
+  const opened = decryptString(value);
+  return opened.success ? opened.data : null;
+}
+const shareStore = sharedBackend().records<SavedShare>({
+  name: 'guest-share',
+  ownCap: true,
+  save: (s) => s,
+  load: (s) => s,
+  due: (s) => s.expiresAt,
+  tags: () => [],
+  refs: (s) => Object.values(s.revisions).map((r) => `src:${r.ref}`),
+  receive: () => {},
+  lapse: (party) => endShare(party),
+});
+/** A party's share, from this process for a few seconds, else from the store; none if it ended. */
+async function loadBinding(party: string): Promise<Binding | undefined> {
+  const cached = bindings.get(party);
+  if (cached && Date.now() - cached.readAt < SHARE_CACHE_MS) {
+    if (cached.expiresAt > Date.now()) return cached;
+    void endShare(party);
+    return undefined;
+  }
+  const saved = await shareStore.get(party);
+  const secret = saved && saved.keyId === keyId() && unseal(saved.secret);
+  const ownerToken = secret && unseal(saved.ownerToken);
+  if (!saved || !secret || !ownerToken || saved.expiresAt <= Date.now()) {
+    if (cached) forgetShare(party);
+    if (saved && saved.expiresAt <= Date.now()) void endShare(party);
+    return undefined;
+  }
+  const binding: Binding = cached ?? {
+    party,
+    ownerToken,
+    owner: saved.owner,
+    secret,
+    expiresAt: saved.expiresAt,
+    entries: new Map(),
+    sources: new Map(),
+    failures: new Map(),
+    ownerCheckedAt: 0,
+    revisions: {},
+    readAt: 0,
+  };
+  Object.assign(binding, {
+    ownerToken,
+    owner: saved.owner,
+    secret,
+    expiresAt: saved.expiresAt,
+    entries: new Map(saved.entries.map((e) => [e.ref, e])),
+    bingeGroup: saved.bingeGroup,
+    ownerCheckedAt: Math.max(binding.ownerCheckedAt, saved.ownerCheckedAt),
+    revisions: saved.revisions,
+    readAt: Date.now(),
+  });
+  bindings.set(party, binding);
+  return binding;
+}
+/** Changes a stored share (`change` may run more than once: it acts only on the record); read again next time. */
+async function updateShare<R>(
+  party: string,
+  change: (saved: SavedShare) => R
+): Promise<R | undefined> {
+  const result = await shareStore.update(party, (saved) => change(saved));
+  const cached = bindings.get(party);
+  if (cached) cached.readAt = 0;
+  return result;
+}
+/** Forgets a share in this process: what it resolved here goes too. */
+function forgetShare(party: string): void {
+  bindings.delete(party);
+  for (const [handle, source] of sources)
+    if (source.party === party) dropSource(handle);
+}
+/** Ends a share: its record, its guests' sessions (their leases freed), and its sources here. */
+async function endShare(party: string): Promise<void> {
+  forgetShare(party);
+  await shareStore.update(party, (_s, tx) => tx.drop());
+  await guestSessions.revokeParty(party);
+}
 /** Marks a source opened by a signed-in user for their own playback. */
 const OWN = 'own';
 const OWN_TTL_MS = 6 * 60 * 60 * 1000;
@@ -139,19 +265,53 @@ const OWN_PER_USER = 4;
  * browser can't decode a source's audio. Shaped like a guest session so the
  * media routes serve both.
  */
-interface OwnSession {
-  token: string;
+interface SavedOwn {
   uuid: string;
   expiresAt: number;
-  stream: Source;
-  media: GuestMedia;
+  createdAt: number;
   revision: string;
-  source: string;
+  itemId: string;
+  /** The file it plays: what it reopens after a restart, and only that one. */
+  msid: string;
+  filename?: string;
+  /** The key the sealed values were sealed with: another reads as gone. */
+  keyId: string;
+  /** The user's token and the source's handle, sealed with the server's key. */
+  userToken: string;
+  handle: string;
+  /** The handle's digest: what the source route finds it by. */
+  ref: string;
   jobs?: PlaybackJobs;
   lease?: string;
-  offsetMs?: number;
   generation?: number;
+  offsetMs?: number;
 }
+interface OwnSession extends SavedOwn {
+  token: string;
+  stream: Source;
+  media: GuestMedia;
+  /** The playing source's handle digest, as guest sessions name it. */
+  sourceRef: string;
+  /** When this process last read it from the store, and last wrote its expiry. */
+  readAt: number;
+  touchedAt: number;
+}
+/** Own tokens minted since own playback was kept in the store; older ones were in memory only. */
+const OWN_PREFIX = 'own.v2.';
+/** How often a playback's sliding expiry is written back to the store. */
+const OWN_TOUCH_MS = 10 * 60_000;
+const ownStore = sharedBackend().records<SavedOwn>({
+  name: 'guest-own',
+  ownCap: true,
+  save: (s) => s,
+  load: (s) => s,
+  due: (s) => s.expiresAt,
+  tags: (s) => [`user:${s.uuid}`],
+  refs: (s) => [`src:${s.ref}`],
+  receive: () => {},
+  lapse: (id) => dropOwn(id),
+});
+/** Own playbacks this process has read, with their source and media. */
 const owns = new Map<string, OwnSession>();
 const sources = new Map<string, Source>();
 /** Each source's shared reader: every read of a source goes through it. */
@@ -302,16 +462,31 @@ async function ownerSignedIn(binding: Binding): Promise<boolean> {
   const token = binding.ownerToken;
   if (!(await userForToken(token))) return false;
   // /publish may have swapped in a newer token while this one was checked.
-  if (binding.ownerToken === token) binding.ownerCheckedAt = Date.now();
+  if (binding.ownerToken === token) {
+    const at = Date.now();
+    binding.ownerCheckedAt = at;
+    void updateShare(binding.party, (s) => {
+      s.ownerCheckedAt = Math.max(s.ownerCheckedAt, at);
+    }).catch(() => {});
+  }
   return true;
 }
 async function active(req: Request, requireMember = true) {
   if (!enabled()) fail(410, 'Guest streaming is disabled');
   const token =
     bearer(req) || (typeof req.query.token === 'string' ? req.query.token : '');
-  const session = guestSessions.get(token);
-  if (!session) fail(401, 'This guest session has expired');
-  const binding = bindings.get(session.party);
+  const session = await guestSessions.load(token);
+  if (!session) {
+    // A session from before guest sessions were kept: the restart dropped it.
+    if (fromBeforeRestart(token))
+      fail(
+        401,
+        'The server restarted; rejoin with the link',
+        'session_restarted'
+      );
+    fail(401, 'This guest session has expired');
+  }
+  const binding = await loadBinding(session.party);
   const party = await guestPartyState(session.party);
   if (
     !binding ||
@@ -428,88 +603,7 @@ async function current(req: Request) {
   // Kept after it expires, so the next failure backs off longer.
   const failure = state.binding.failures.get(revision);
   if (failure && failure.until > Date.now()) throw failure.error;
-  // Remember a failure for a while: every guest polls /current every couple
-  // of seconds, and each retry runs the host's whole addon pipeline.
-  const remember = (error: unknown) => {
-    const status = (error as { status?: number }).status;
-    logger.warn(
-      {
-        party: state.session.party,
-        status,
-        error:
-          typeof status === 'number' ? (error as Error).message : undefined,
-        cause: typeof status === 'number' ? undefined : errorCause(error),
-      },
-      'guest source unavailable; backing off'
-    );
-    // A failure long past doesn't make the next wait longer.
-    const previous = state.binding.failures.get(revision);
-    const count =
-      previous && previous.until > Date.now() - 5 * 60_000
-        ? previous.count + 1
-        : 1;
-    const after = (error as { retryAfter?: number }).retryAfter;
-    state.binding.failures.set(revision, {
-      error,
-      count,
-      until:
-        Date.now() +
-        (after
-          ? after * 1000
-          : FAILURE_BACKOFF_MS[Math.min(count, FAILURE_BACKOFF_MS.length) - 1]),
-    });
-    if (state.binding.failures.size > 100)
-      for (const [k, f] of state.binding.failures)
-        if (f.until <= Date.now()) state.binding.failures.delete(k);
-  };
-  let pending = state.binding.sources.get(revision);
-  if (!pending) {
-    pending = (async () => {
-      const user = await userForToken(state.binding.ownerToken);
-      if (!user) fail(410, 'The host session has expired');
-      let host: Located | undefined;
-      const record = await lookupRecord(
-        req,
-        user,
-        entry,
-        state.binding.bingeGroup,
-        'guest',
-        (loc) => (host = loc)
-      );
-      state.binding.bingeGroup = record.extension.bingeGroup;
-      const source: Source = {
-        handle: randomSecret(),
-        party: state.session.party,
-        revision,
-        playlistItemId: playing.playlistItemId,
-        itemId: entry.itemId,
-        title: entry.title,
-        record,
-        host,
-        // The host's configuration again, for a fresh list of this version (its credentials).
-        refresh: () =>
-          lookupRecord(
-            req,
-            user,
-            entry,
-            state.binding.bingeGroup,
-            'guest',
-            undefined,
-            true
-          ),
-      };
-      sources.set(source.handle, source);
-      return source;
-    })();
-    state.binding.sources.set(revision, pending);
-    const started = pending;
-    started.then((source) => settled.set(started, source)).catch(() => {});
-    pending.catch((error) => {
-      if (state.binding.sources.get(revision) === pending)
-        state.binding.sources.delete(revision);
-      remember(error);
-    });
-  }
+  const pending = sourceFor(req, state.binding, playing, entry);
   const source = await pending;
   // Concurrent polls share one probe.
   const probe = (source.media ??= probeMedia(source));
@@ -519,7 +613,7 @@ async function current(req: Request) {
   } catch (error) {
     if (source.media === probe) {
       source.media = undefined;
-      remember(error);
+      remember(state.binding, revision, error);
     }
     throw error;
   }
@@ -527,6 +621,133 @@ async function current(req: Request) {
   // Working again: the next failure starts from the shortest wait.
   state.binding.failures.delete(revision);
   return { ...state, source, media };
+}
+/**
+ * Remember a failure for a while: every guest polls /current every couple of seconds, and each
+ * retry runs the host's whole addon pipeline.
+ */
+function remember(binding: Binding, revision: string, error: unknown): void {
+  const status = (error as { status?: number }).status;
+  logger.warn(
+    {
+      party: binding.party,
+      status,
+      error: typeof status === 'number' ? (error as Error).message : undefined,
+      cause: typeof status === 'number' ? undefined : errorCause(error),
+    },
+    'guest source unavailable; backing off'
+  );
+  // A failure long past doesn't make the next wait longer.
+  const previous = binding.failures.get(revision);
+  const count =
+    previous && previous.until > Date.now() - 5 * 60_000
+      ? previous.count + 1
+      : 1;
+  const after = (error as { retryAfter?: number }).retryAfter;
+  binding.failures.set(revision, {
+    error,
+    count,
+    until:
+      Date.now() +
+      (after
+        ? after * 1000
+        : FAILURE_BACKOFF_MS[Math.min(count, FAILURE_BACKOFF_MS.length) - 1]),
+  });
+  if (binding.failures.size > 100)
+    for (const [k, f] of binding.failures)
+      if (f.until <= Date.now()) binding.failures.delete(k);
+}
+/**
+ * The source a revision plays, resolved once for every guest, the page and the transcoder alike.
+ * A revision the share kept a source for (before a restart) reopens as that source: its handle,
+ * and its file. Otherwise, or if that file is gone, a new one, which the share then keeps.
+ */
+function sourceFor(
+  req: Request,
+  binding: Binding,
+  playing: { playlistItemId: string },
+  entry: Entry
+): Promise<Source> {
+  const revision = revisionOf(playing, entry);
+  const known = binding.sources.get(revision);
+  if (known) return known;
+  const pending = (async () => {
+    const user = await userForToken(binding.ownerToken);
+    if (!user) fail(410, 'The host session has expired');
+    const kept = binding.revisions[revision];
+    const keptHandle = kept && unseal(kept.handle);
+    const resolve = (choice: Entry, onLocate?: (loc: Located) => void) =>
+      lookupRecord(req, user, choice, binding.bingeGroup, 'guest', onLocate);
+    let host: Located | undefined;
+    let record: MediaSourceRecord | undefined;
+    let handle: string | undefined;
+    if (keptHandle)
+      try {
+        // The same file it played: an explicit choice, so never another one silently.
+        const same = await resolve(
+          { ...entry, sourceId: kept.msid },
+          (loc) => (host = loc)
+        );
+        if (same.msid === kept.msid) {
+          record = same;
+          handle = keptHandle;
+        }
+      } catch (error) {
+        logger.info(
+          { party: binding.party, cause: errorCause(error) },
+          'guest source kept from before cannot be reopened; resolving again'
+        );
+      }
+    if (!record) record = await resolve(entry, (loc) => (host = loc));
+    if (!handle) handle = randomSecret();
+    binding.bingeGroup = record.extension.bingeGroup;
+    const source: Source = {
+      handle,
+      party: binding.party,
+      revision,
+      playlistItemId: playing.playlistItemId,
+      itemId: entry.itemId,
+      title: entry.title,
+      record,
+      host,
+      // The host's configuration again, for a fresh list of this version (its credentials).
+      refresh: () =>
+        lookupRecord(
+          req,
+          user,
+          entry,
+          binding.bingeGroup,
+          'guest',
+          undefined,
+          true
+        ),
+    };
+    sources.set(source.handle, source);
+    // The share keeps the source this revision plays (and only it: an older handle no longer
+    // opens anything), so it reopens as itself after a restart.
+    const ref = digest(['handle', source.handle]);
+    if (
+      kept?.ref !== ref ||
+      binding.revisions[revision]?.msid !== record.msid
+    ) {
+      const sealed = seal(source.handle);
+      const msid = record.msid;
+      const bingeGroup = binding.bingeGroup;
+      await updateShare(binding.party, (s) => {
+        s.revisions = { [revision]: { handle: sealed, ref, msid } };
+        s.bingeGroup = bingeGroup;
+      });
+    }
+    return source;
+  })();
+  binding.sources.set(revision, pending);
+  pending.then((source) => settled.set(pending, source)).catch(() => {});
+  pending.catch((error) => {
+    if (binding.sources.get(revision) === pending)
+      binding.sources.delete(revision);
+    remember(binding, revision, error);
+  });
+  return pending;
 }
 /** A title's identity: the item playing, and the host's version of it. */
 function revisionOf(
@@ -564,24 +785,252 @@ function peek(state: Awaited<ReturnType<typeof active>>) {
 }
 /** How long /current waits for the title to change before answering what it is. */
 export const CURRENT_WAIT = { ms: 25_000 };
-function ownSession(token: string): OwnSession {
-  const session = owns.get(digest(token));
-  if (!session || session.expiresAt <= Date.now() || !transcoderReady())
+/** A handle's digest: what stored records name a source by, never the handle itself. */
+const refOf = (handle: string) => digest(['handle', handle]);
+/** Sources being rebuilt after a restart, one rebuild per handle. */
+const rebuilding = new Map<string, Promise<Source | null>>();
+function once(
+  handle: string,
+  build: () => Promise<Source | null>
+): Promise<Source | null> {
+  let pending = rebuilding.get(handle);
+  if (!pending) {
+    pending = build().finally(() => rebuilding.delete(handle));
+    rebuilding.set(handle, pending);
+  }
+  return pending;
+}
+/** A not-found that means the playback is gone (a version missing, another file), not a failure. */
+const gone = (error: unknown) =>
+  [404, 409, 410].includes((error as { status?: number }).status ?? 0);
+/**
+ * A source this process doesn't have (it restarted, or another process made it): rebuilt from
+ * the record that keeps its handle, if that record still plays it. Null if none does.
+ */
+function rebuild(handle: string, req: Request): Promise<Source | null> {
+  const known = sources.get(handle);
+  if (known) return Promise.resolve(known);
+  return once(handle, async () => {
+    const ref = refOf(handle);
+    const party = await shareStore.find(`src:${ref}`);
+    if (party) return rebuildShared(req, party, handle, ref);
+    const own = await ownStore.find(`src:${ref}`);
+    const saved = own ? await ownStore.get(own) : undefined;
+    if (!saved || saved.ref !== ref || saved.expiresAt <= Date.now())
+      return null;
+    return buildOwnStream(req, saved, handle);
+  });
+}
+/**
+ * A share's source: only the revision the party plays now, while the share is live and its host
+ * signed in. It's the page's own resolve (`sourceFor`), so the page and FFmpeg share it.
+ */
+async function rebuildShared(
+  req: Request,
+  party: string,
+  handle: string,
+  ref: string
+): Promise<Source | null> {
+  if (!enabled()) return null;
+  const binding = await loadBinding(party);
+  const state = binding && (await guestPartyState(party));
+  if (!binding || !state || !(await ownerSignedIn(binding))) return null;
+  const playing = state.playing;
+  const entry = playing && binding.entries.get(playing.ref);
+  if (!playing || !entry) return null;
+  const revision = revisionOf(playing, entry);
+  if (binding.revisions[revision]?.ref !== ref) return null;
+  try {
+    const source = await sourceFor(req, binding, playing, entry);
+    return source.handle === handle ? source : null;
+  } catch (error) {
+    if (gone(error)) return null;
+    throw error;
+  }
+}
+/** An own playback's source, from its record: the same file, for the same signed-in user. */
+async function buildOwnStream(
+  req: Request,
+  saved: SavedOwn,
+  handle: string
+): Promise<Source | null> {
+  const userToken = saved.keyId === keyId() && unseal(saved.userToken);
+  if (!userToken || unseal(saved.handle) !== handle) return null;
+  const user = await userForToken(userToken);
+  if (!user || user.uuid !== saved.uuid) return null;
+  const entry = {
+    itemId: saved.itemId,
+    sourceId: saved.msid,
+    filename: saved.filename,
+  };
+  let record: MediaSourceRecord;
+  try {
+    record = await lookupRecord(req, user, entry, undefined, 'own');
+  } catch (error) {
+    if (gone(error)) return null;
+    throw error;
+  }
+  if (digest([OWN, user.uuid, saved.itemId, record.msid]) !== saved.revision)
+    return null;
+  return (
+    sources.get(handle) ??
+    ownSource(req, user, entry, record, handle, saved.revision)
+  );
+}
+/** An own playback's source, made known to the source route. */
+function ownSource(
+  req: Request,
+  user: TokenUser,
+  entry: { itemId: string; sourceId?: string; filename?: string },
+  record: MediaSourceRecord,
+  handle: string,
+  revision: string
+): Source {
+  const stream: Source = {
+    handle,
+    party: OWN,
+    revision,
+    playlistItemId: '',
+    itemId: entry.itemId,
+    title: '',
+    record,
+    // The user's configuration again, for a fresh list of this version (its credentials).
+    refresh: () =>
+      lookupRecord(req, user, entry, undefined, 'own', undefined, true),
+  };
+  sources.set(handle, stream);
+  return stream;
+}
+const reopening = new Map<string, Promise<OwnSession | null>>();
+/** An own playback from the store: this process's copy refreshed, or rebuilt after a restart. */
+function reopenOwn(req: Request, token: string): Promise<OwnSession | null> {
+  const key = digest(token);
+  let pending = reopening.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const saved = await ownStore.get(key);
+      const live = owns.get(key);
+      if (!saved || saved.expiresAt <= Date.now() || saved.keyId !== keyId()) {
+        if (live) forgetOwn(key, live);
+        if (saved) void dropOwn(key).catch(() => {});
+        return null;
+      }
+      const now = Date.now();
+      if (live && live.sourceRef === saved.ref) {
+        Object.assign(live, saved, {
+          expiresAt: Math.max(live.expiresAt, saved.expiresAt),
+          readAt: now,
+        });
+        return live;
+      }
+      const handle = unseal(saved.handle);
+      if (!handle) return null;
+      const stream = await once(handle, () =>
+        buildOwnStream(req, saved, handle)
+      );
+      if (!stream) return null;
+      const media = await (stream.media ??= probeMedia(stream));
+      const session: OwnSession = {
+        ...saved,
+        token,
+        stream,
+        media,
+        sourceRef: saved.ref,
+        readAt: now,
+        touchedAt: now,
+      };
+      owns.set(key, session);
+      return session;
+    })().finally(() => reopening.delete(key));
+    reopening.set(key, pending);
+  }
+  return pending;
+}
+async function ownSession(req: Request, token: string): Promise<OwnSession> {
+  const key = digest(token);
+  let session = transcoderReady() ? owns.get(key) : undefined;
+  if (
+    transcoderReady() &&
+    (!session || Date.now() - session.readAt >= SHARE_CACHE_MS)
+  )
+    session = (await reopenOwn(req, token)) ?? undefined;
+  if (!session || session.expiresAt <= Date.now()) {
+    // A playback from before own playback was kept: the restart dropped it.
+    if (token.startsWith('own.') && !token.startsWith(OWN_PREFIX))
+      fail(
+        401,
+        'The server restarted; start playback again',
+        'session_restarted'
+      );
     fail(401, 'This playback has expired; start it again');
-  session.expiresAt = Date.now() + OWN_TTL_MS;
+  }
+  const now = Date.now();
+  session.expiresAt = now + OWN_TTL_MS;
+  if (now - session.touchedAt > OWN_TOUCH_MS) {
+    session.touchedAt = now;
+    const expiresAt = session.expiresAt;
+    void Promise.resolve(
+      ownStore.update(key, (s) => {
+        s.expiresAt = Math.max(s.expiresAt, expiresAt);
+      })
+    ).catch(() => {});
+  }
   return session;
 }
-function dropOwn(key: string, session: OwnSession) {
+/** Forgets an own playback in this process: its source goes too. */
+function forgetOwn(key: string, session: OwnSession) {
   owns.delete(key);
   dropSource(session.stream.handle);
-  void release(session);
+}
+/** Ends an own playback: its record, and its lease at the transcoder (read from the record). */
+async function dropOwn(key: string): Promise<void> {
+  const live = owns.get(key);
+  if (live) forgetOwn(key, live);
+  const lease = await ownStore.update(key, (s, tx) => {
+    tx.drop();
+    return s.jobs ? s.lease : undefined;
+  });
+  if (lease) await releaseLease(lease);
+}
+/** Changes a stored own playback (`change` may run more than once); this process's copy follows. */
+async function changeOwn<R>(
+  token: string,
+  change: (saved: SavedOwn) => R
+): Promise<R | undefined> {
+  const key = digest(token);
+  let after: SavedOwn | undefined;
+  const result = await ownStore.update(key, (saved) => {
+    const r = change(saved);
+    after = { ...saved };
+    return r;
+  });
+  const live = owns.get(key);
+  if (after && live)
+    Object.assign(live, after, {
+      expiresAt: Math.max(live.expiresAt, after.expiresAt),
+    });
+  return result;
+}
+/** What a playback's change acts on, guest or own. */
+type PlaybackState = Pick<
+  SavedGuestSession,
+  'jobs' | 'lease' | 'generation' | 'offsetMs'
+>;
+/** Changes a playback in the store, a guest's or a user's own, by its token. */
+function changePlayback<R>(
+  token: string,
+  change: (saved: PlaybackState) => R
+): Promise<R | undefined> {
+  return token.startsWith('own.')
+    ? changeOwn(token, change)
+    : guestSessions.update(token, change);
 }
 /** The playback a media URL belongs to: a guest's party, or a user's own. */
 async function streaming(req: Request) {
   const token =
     typeof req.query.token === 'string' ? req.query.token : bearer(req);
   if (token.startsWith('own.')) {
-    const own = ownSession(token);
+    const own = await ownSession(req, token);
     return { session: own, source: own.stream, media: own.media };
   }
   return current(req);
@@ -622,12 +1071,6 @@ const playbackSchema = z.object({
   positionMs: z.number().finite().min(0).max(1e9),
   force: z.boolean().optional(),
 });
-async function release(session: { jobs?: PlaybackJobs; lease?: string }) {
-  const lease = session.lease;
-  const held = session.jobs;
-  session.jobs = undefined;
-  if (held && lease) await releaseLease(lease);
-}
 /** Lets the transcoder know a playback has gone: its jobs no longer count it. */
 async function releaseLease(lease: string) {
   await worker(`/viewers/${lease}/release`, {}).catch(() => {});
@@ -693,19 +1136,26 @@ router.post('/host', async (req, res) => {
     fail(503, 'Configure and enable the transcoder companion first');
   const body = hostSchema.parse(req.body);
   const { party, token } = await host(req, body);
-  let binding = bindings.get(body.party);
+  let binding = await loadBinding(body.party);
   if (!binding) {
-    binding = {
-      ownerToken: token,
+    const saved: SavedShare = {
       owner: party.host,
-      secret: randomSecret(),
       expiresAt: party.expiresAt,
-      entries: new Map(),
-      sources: new Map(),
-      failures: new Map(),
+      entries: [],
       ownerCheckedAt: Date.now(),
+      keyId: keyId(),
+      secret: seal(randomSecret()),
+      ownerToken: seal(token),
+      revisions: {},
     };
-    bindings.set(body.party, binding);
+    // One that can't be read (sealed with another key, or ended) is replaced.
+    if ((await shareStore.create(body.party, () => saved, 0)) === 'exists') {
+      await shareStore.update(body.party, (_s, tx) => tx.drop());
+      await shareStore.create(body.party, () => saved, 0);
+    }
+    bindings.delete(body.party);
+    binding = await loadBinding(body.party);
+    if (!binding) fail(503, 'The invitation could not be kept; try again');
   }
   if (binding.owner !== party.host)
     fail(403, 'Only the original sharing host may manage this invitation');
@@ -714,11 +1164,18 @@ router.post('/host', async (req, res) => {
 router.post('/publish', async (req, res) => {
   const body = publishSchema.parse(req.body);
   await host(req, body);
-  const binding = bindings.get(body.party);
+  const binding = await loadBinding(body.party);
   if (!binding || binding.owner !== body.member)
     fail(404, 'Guest streaming is not enabled for this party');
+  const ownerToken = seal(bearer(req));
+  const at = Date.now();
+  await updateShare(body.party, (s) => {
+    s.ownerToken = ownerToken;
+    s.ownerCheckedAt = at;
+    s.entries = body.entries;
+  });
   binding.ownerToken = bearer(req);
-  binding.ownerCheckedAt = Date.now();
+  binding.ownerCheckedAt = at;
   binding.entries = new Map(body.entries.map((e) => [e.ref, e]));
   // The host may have just re-selected a source that failed.
   binding.failures.clear();
@@ -727,10 +1184,7 @@ router.post('/publish', async (req, res) => {
 router.post('/disable', async (req, res) => {
   const body = hostSchema.parse(req.body);
   await host(req, body);
-  bindings.delete(body.party);
-  guestSessions.revokeParty(body.party);
-  for (const [handle, source] of sources)
-    if (source.party === body.party) dropSource(handle);
+  await endShare(body.party);
   res.json({ ok: true });
 });
 router.post('/exchange', async (req, res) => {
@@ -739,7 +1193,7 @@ router.post('/exchange', async (req, res) => {
   const body = z
     .object({ party: key, secret: z.string().length(43) })
     .parse(req.body);
-  const binding = bindings.get(body.party);
+  const binding = await loadBinding(body.party);
   const party = await guestPartyState(body.party);
   const a = Buffer.from(body.secret),
     b = Buffer.from(binding?.secret ?? '');
@@ -753,10 +1207,8 @@ router.post('/exchange', async (req, res) => {
     fail(410, 'This guest invitation has expired');
   if (party.joinsClosed || party.members.length >= 16)
     fail(403, 'This party is closed or full');
-  const session = guestSessions.create(body.party, binding.expiresAt);
-  guestSessions.onRevoke(session.token, () => {
-    void release(session);
-  });
+  // Revoking it (a kick, the share ending) frees its playback at the transcoder, from its record.
+  const session = await guestSessions.create(body.party, binding.expiresAt);
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });
 /**
@@ -792,7 +1244,11 @@ router.get('/current', async (req, res) => {
     // Resolve it (once, shared), or again once a failure's back-off has passed.
     if (now.state === 'resolving') void current(req).catch(() => {});
     const token = `${now.revision}:${now.state}`;
-    if (token !== after || Date.now() >= deadline) {
+    // A page playing this revision isn't told it's resolving again: this process reopens the
+    // same source (after a restart, under its kept handle), and the page plays on meanwhile.
+    const reopening =
+      now.state === 'resolving' && after === `${now.revision}:ready`;
+    if ((token !== after && !reopening) || Date.now() >= deadline) {
       if (now.state === 'ready') return answer();
       const failure = now.failure?.error as
         { message?: string; status?: number; code?: string } | undefined;
@@ -907,8 +1363,11 @@ router.post('/prepare', async (req, res) => {
     );
     fail(409, 'The party has changed titles', 'title_changed');
   }
-  const generation = (session.generation ?? 0) + 1;
-  session.generation = generation;
+  const generation = await guestSessions.update(
+    session.token,
+    (s) => (s.generation = (s.generation ?? 0) + 1)
+  );
+  if (generation === undefined) fail(401, 'This guest session has expired');
   const lease = randomSecret();
   // This playback takes over the guest's current one (a seek, a track switch): jobs only that
   // one holds are free for it, at capacity too.
@@ -931,18 +1390,29 @@ router.post('/prepare', async (req, res) => {
     );
     fail(409, 'The party has changed titles', 'title_changed');
   }
-  if (session.generation !== generation) {
+  const sourceRef = refOf(source.handle);
+  const jobs = result.jobs ? jobIds(result.jobs) : undefined;
+  // Only if no newer prepare from this guest started since (a seek): the newest wins.
+  const won = await guestSessions.update(session.token, (s) => {
+    if (s.generation !== generation) return null;
+    const old = s.jobs && s.lease !== lease ? s.lease : undefined;
+    s.jobs = jobs;
+    s.lease = lease;
+    s.offsetMs = 0;
+    s.sourceRef = sourceRef;
+    s.revision = source.revision;
+    return { old };
+  });
+  if (won === undefined) {
     await drop();
-    // Another prepare from this guest started since (a seek): the newest wins.
+    fail(401, 'This guest session has expired');
+  }
+  if (!won) {
+    await drop();
     fail(409, 'A newer request replaced this one', 'superseded');
   }
   // The earlier playback's lease goes now (the transcoder freed it on admission already).
-  if (session.jobs && session.lease !== lease) await release(session);
-  session.jobs = result.jobs ? jobIds(result.jobs) : undefined;
-  session.lease = lease;
-  session.offsetMs = 0;
-  session.source = source.handle;
-  session.revision = source.revision;
+  if (won.old) await releaseLease(won.old);
   res.json(
     playbackResponse(req, session.token, lease, source, media, body, result)
   );
@@ -1018,7 +1488,8 @@ const ownOpenSchema = z.object({
 // source's audio. Signed in with the app's own token; no party needed.
 router.post('/own/open', async (req, res) => {
   if (!transcoderReady()) fail(503, 'Conversion is not set up on this server');
-  const user = await userForToken(bearer(req));
+  const userToken = bearer(req);
+  const user = await userForToken(userToken);
   if (!user) fail(401, 'Sign in to play this');
   const body = ownOpenSchema.parse(req.body);
   // The default version's id is the item's own: no explicit choice.
@@ -1026,56 +1497,86 @@ router.post('/own/open', async (req, res) => {
     body.sourceId === body.itemId ? { ...body, sourceId: undefined } : body;
   const record = await lookupRecord(req, user, entry, undefined, 'own');
   const revision = digest([OWN, user.uuid, body.itemId, record.msid]);
-  const stream: Source = {
-    handle: randomSecret(),
-    party: OWN,
-    revision,
-    playlistItemId: '',
-    itemId: body.itemId,
-    title: '',
-    record,
-    // The user's configuration again, for a fresh list of this version (its credentials).
-    refresh: () =>
-      lookupRecord(req, user, entry, undefined, 'own', undefined, true),
-  };
-  sources.set(stream.handle, stream);
+  const handle = randomSecret();
+  const stream = ownSource(req, user, entry, record, handle, revision);
   let media: GuestMedia;
   try {
-    media = await probeMedia(stream);
+    media = await (stream.media = probeMedia(stream));
   } catch (error) {
-    dropSource(stream.handle);
+    dropSource(handle);
     throw error;
+  }
+  const mine: [string, SavedOwn][] = [];
+  for (const id of await ownStore.tagged(`user:${user.uuid}`)) {
+    const saved = await ownStore.get(id);
+    if (saved) mine.push([id, saved]);
   }
   // Opening the same item and version again (resume, retry, a reload)
   // replaces the earlier playback: its conversion is released at once,
   // rather than holding a place until its heartbeats lapse.
-  for (const [key, old] of [...owns])
-    if (old.uuid === user.uuid && old.revision === revision) dropOwn(key, old);
+  for (const [id, old] of mine)
+    if (old.revision === revision || old.expiresAt <= Date.now())
+      await dropOwn(id);
   // A user keeps a few at once (tabs, versions); the oldest go first.
-  const mine = [...owns].filter(([, o]) => o.uuid === user.uuid);
-  for (const [key, old] of mine.slice(
+  const others = mine
+    .filter(([, o]) => o.revision !== revision && o.expiresAt > Date.now())
+    .sort(([, a], [, b]) => a.createdAt - b.createdAt);
+  for (const [id] of others.slice(
     0,
-    Math.max(0, mine.length - OWN_PER_USER + 1)
+    Math.max(0, others.length - OWN_PER_USER + 1)
   ))
-    dropOwn(key, old);
-  const token = `own.${randomSecret()}`;
-  owns.set(digest(token), {
-    token,
+    await dropOwn(id);
+  const token = `${OWN_PREFIX}${randomSecret()}`;
+  const now = Date.now();
+  const saved: SavedOwn = {
     uuid: user.uuid,
-    expiresAt: Date.now() + OWN_TTL_MS,
+    expiresAt: now + OWN_TTL_MS,
+    createdAt: now,
+    revision,
+    itemId: body.itemId,
+    msid: record.msid,
+    filename: record.filename ?? undefined,
+    keyId: keyId(),
+    userToken: seal(userToken),
+    handle: seal(handle),
+    ref: refOf(handle),
+  };
+  const made = await ownStore.create(
+    digest(token),
+    () => ({ ...saved }),
+    16000
+  );
+  if (made !== 'ok') {
+    dropSource(handle);
+    fail(
+      503,
+      made === 'busy'
+        ? 'Conversion capacity reached; retry later'
+        : 'Playback could not be started; retry'
+    );
+  }
+  owns.set(digest(token), {
+    ...saved,
+    token,
     stream,
     media,
-    revision,
-    source: stream.handle,
+    sourceRef: saved.ref,
+    readAt: now,
+    touchedAt: now,
   });
   res.json({ token, revision, media });
 });
 router.post('/own/prepare', async (req, res) => {
-  const session = ownSession(bearer(req));
+  const token = bearer(req);
+  const session = await ownSession(req, token);
   const body = playbackSchema.parse(req.body);
   if (body.revision !== session.revision) fail(409, 'Playback changed');
-  const generation = (session.generation ?? 0) + 1;
-  session.generation = generation;
+  const generation = await changeOwn(
+    token,
+    (s) => (s.generation = (s.generation ?? 0) + 1)
+  );
+  if (generation === undefined)
+    fail(401, 'This playback has expired; start it again');
   const lease = randomSecret();
   // Takes over the current playback, as for guests.
   const result = await startPlayback(
@@ -1084,19 +1585,25 @@ router.post('/own/prepare', async (req, res) => {
     body,
     session.lease
   );
+  const jobs = result.jobs ? jobIds(result.jobs) : undefined;
   // A later seek can finish first; this one is then out of date.
-  if (session.generation !== generation || !owns.has(digest(session.token))) {
+  const won = await changeOwn(token, (s) => {
+    if (s.generation !== generation) return null;
+    const old = s.jobs && s.lease !== lease ? s.lease : undefined;
+    s.jobs = jobs;
+    s.lease = lease;
+    s.offsetMs = 0;
+    return { old };
+  });
+  if (!won) {
     await releaseLease(lease);
     fail(409, 'Playback changed');
   }
-  if (session.jobs && session.lease !== lease) await release(session);
-  session.jobs = result.jobs ? jobIds(result.jobs) : undefined;
-  session.lease = lease;
-  session.offsetMs = 0;
+  if (won.old) await releaseLease(won.old);
   res.json(
     playbackResponse(
       req,
-      session.token,
+      token,
       lease,
       session.stream,
       session.media,
@@ -1107,9 +1614,9 @@ router.post('/own/prepare', async (req, res) => {
 });
 router.post(['/touch', '/own/touch'], async (req, res) => {
   const token = bearer(req);
-  const { session } = token.startsWith('own.')
-    ? { session: ownSession(token) }
-    : await active(req);
+  const session = token.startsWith('own.')
+    ? await ownSession(req, token)
+    : (await active(req)).session;
   const body = z
     .object({
       positionMs: z.number().finite().min(0).max(1e9),
@@ -1118,12 +1625,21 @@ router.post(['/touch', '/own/touch'], async (req, res) => {
     })
     .parse(req.body);
   if (body.lease !== session.lease) return void res.json({ ok: true });
-  if (body.release) await release(session);
-  else if (session.jobs)
+  let waitingSource = false;
+  if (body.release) {
+    // Its jobs, if this lease still holds them: a release and a prepare may cross.
+    const lease = await changePlayback(token, (s) => {
+      if (s.lease !== body.lease || !s.jobs) return undefined;
+      s.jobs = undefined;
+      return s.lease;
+    });
+    if (lease) await releaseLease(lease);
+  } else if (session.jobs)
     try {
-      await worker(`/viewers/${session.lease}/touch`, {
+      const answer = await worker(`/viewers/${session.lease}/touch`, {
         positionMs: body.positionMs,
       });
+      waitingSource = answer?.waitingSource === true;
     } catch (error) {
       // The transcoder no longer has the job (it ended, failed or restarted), or no longer
       // counts this viewer on it: its stream won't go on, so the player starts another.
@@ -1133,12 +1649,14 @@ router.post(['/touch', '/own/touch'], async (req, res) => {
           { status: answered },
           'guest stream gone from the transcoder; the player starts another'
         );
-        session.jobs = undefined;
+        await changePlayback(token, (s) => {
+          if (s.lease === body.lease) s.jobs = undefined;
+        });
         fail(409, 'This stream ended on the server', 'stream_gone');
       }
       throw error;
     }
-  res.json({ ok: true });
+  res.json({ ok: true, waitingSource });
 });
 const CROSS_ORIGIN_HEADERS = new Set(['range', 'user-agent', 'accept']);
 const MAX_REDIRECTS = 10;
@@ -1656,27 +2174,57 @@ async function forward(source: Source, req: Request, res: Response) {
 }
 // Opaque input handles are known only to this server and its private companion.
 router.all('/source/:handle', async (req, res) => {
-  const source = sources.get(String(req.params.handle));
+  const handle = String(req.params.handle);
   const refuse = (reason: string): never => {
     logger.warn({ reason }, 'guest source handle refused');
     fail(404, 'Source expired');
   };
+  if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Method not allowed');
+  // After a restart, FFmpeg's next read reopens the source its record keeps.
+  const source = sources.get(handle) ?? (await rebuild(handle, req));
   if (!source) return refuse('unknown handle');
   if (source.party === OWN) {
     if (!transcoderReady()) refuse('transcoder not configured');
   } else if (!enabled()) refuse('guest streaming off');
-  else if (!bindings.has(source.party)) refuse('party no longer shared');
+  else if (!(await loadBinding(source.party))) refuse('party no longer shared');
   else if (!(await guestPartyState(source.party))) refuse('party ended');
-  if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Method not allowed');
   await serveSource(source, req, res);
 });
+/** How long the status answers before saying a source being rebuilt is still resolving. */
+const STATUS_WAIT_MS = 1000;
 /**
  * How the source's reader stands: `ok`, `resolving`, or `failed {class, code}`, for the
- * transcoder to tell a source that failed from its own failure.
+ * transcoder to tell a source that failed from its own failure. A source this process doesn't
+ * have yet (a restart) is `resolving` while its record reopens it.
  */
-router.get('/source/:handle/status', (req, res) => {
+router.get('/source/:handle/status', async (req, res) => {
   const handle = String(req.params.handle);
-  if (!sources.has(handle)) fail(404, 'Source expired');
+  if (!sources.has(handle)) {
+    const pending = rebuild(handle, req);
+    const first = await Promise.race([
+      pending.then(
+        (s) => ({ s }),
+        (error: unknown) => ({ error })
+      ),
+      new Promise<null>((r) => setTimeout(() => r(null), STATUS_WAIT_MS)),
+    ]);
+    if (!first) return void res.json({ state: 'resolving' });
+    if ('error' in first) {
+      const e = first.error as {
+        status?: number;
+        code?: string;
+        message?: string;
+      };
+      return void res.json({
+        state: 'failed',
+        class: 'source',
+        status: typeof e.status === 'number' ? e.status : 502,
+        code: e.code,
+        message: e.message ?? 'The source failed',
+      });
+    }
+    if (!first.s) fail(404, 'Source expired');
+  }
   res.json(readers.get(handle)?.status() ?? { state: 'idle' });
 });
 /**
@@ -1728,7 +2276,7 @@ router.get('/subtitle/:index', async (req, res) => {
   const { source, session, media } = await streaming(req);
   if (
     session.revision !== source.revision ||
-    session.source !== source.handle ||
+    session.sourceRef !== refOf(source.handle) ||
     req.query.lease !== session.lease
   )
     fail(410, 'Source changed');
@@ -1761,7 +2309,7 @@ router.get('/font/:index', async (req, res) => {
   const { source, session, media } = await streaming(req);
   if (
     session.revision !== source.revision ||
-    session.source !== source.handle ||
+    session.sourceRef !== refOf(source.handle) ||
     req.query.lease !== session.lease
   )
     fail(410, 'Source changed');
@@ -1900,9 +2448,9 @@ router.get(
   ['/prepare/:lease/state', '/own/prepare/:lease/state'],
   async (req, res) => {
     const token = bearer(req);
-    const { session } = token.startsWith('own.')
-      ? { session: ownSession(token) }
-      : await active(req);
+    const session = token.startsWith('own.')
+      ? await ownSession(req, token)
+      : (await active(req)).session;
     const lease = String(req.params.lease);
     if (session.lease !== lease) fail(410, 'Playback changed');
     const after = Number(req.query.after ?? -1);
@@ -1917,7 +2465,7 @@ router.all('/media/original', async (req, res) => {
   const { session, source } = await streaming(req);
   if (
     session.revision !== source.revision ||
-    session.source !== source.handle ||
+    session.sourceRef !== refOf(source.handle) ||
     req.query.lease !== session.lease
   )
     fail(410, 'Playback changed');
@@ -1930,7 +2478,7 @@ router.all('/media/original', async (req, res) => {
       .then((now) => {
         if (
           now.source.revision !== source.revision ||
-          req.query.lease !== session.lease
+          req.query.lease !== now.session.lease
         )
           res.destroy();
       })
@@ -1972,18 +2520,16 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
     code: typeof error.code === 'string' ? error.code : undefined,
   });
 });
+// Revoking a guest session frees its playback at the transcoder, by the lease its record holds.
+guestSessions.releaseLease = releaseLease;
 const sweep = setInterval(() => {
   guestSessions.sweep();
   for (const [key, own] of owns)
-    if (own.expiresAt <= Date.now()) dropOwn(key, own);
+    if (own.expiresAt <= Date.now()) void dropOwn(key).catch(() => {});
   for (const [id, b] of bindings)
     void guestPartyState(id)
       .then((p) => {
-        if (!p || b.expiresAt <= Date.now()) {
-          bindings.delete(id);
-          guestSessions.revokeParty(id);
-          for (const [h, s] of sources) if (s.party === id) dropSource(h);
-        }
+        if (!p || b.expiresAt <= Date.now()) return endShare(id);
       })
       .catch(() => {});
 }, 30000);

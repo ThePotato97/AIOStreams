@@ -521,6 +521,38 @@ describe('seeking in a converted stream', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(prepares.at(-1)?.positionMs).toBe(140_000);
   });
+  it('does not count a conversion waiting on its source as slow: it waits, and measures again after', async () => {
+    const { engine } = setup();
+    await start(engine, 45_000);
+    live();
+    player().range = { start: 20, end: 300 };
+    player().maxSegmentEnd = 100;
+    // The server restarts: nothing is written for a while, and the heartbeat says why.
+    touch = async () => ({ ok: true, waitingSource: true });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The party is 20 s past what is written: a speed of 0 would convert again; unknown waits.
+    engine.seek(120_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(1);
+    // The heartbeat not answering at all is the same.
+    touch = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    await vi.advanceTimersByTimeAsync(10_000);
+    engine.seek(121_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares).toHaveLength(1);
+    // Back, and still not writing: measured again, it keeps no pace, and converts again.
+    touch = async () => ({ ok: true, waitingSource: false });
+    // The heartbeat that says so, one to start measuring from, and one to measure.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    engine.seek(140_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prepares.at(-1)?.positionMs).toBe(140_000);
+  });
   it('while its stream still loads, starts where it was put: only a far seek prepares again', async () => {
     const { engine } = setup();
     await start(engine, 45_000);

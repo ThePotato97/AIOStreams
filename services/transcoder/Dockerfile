@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && apt-get purge -y curl gnupg && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=atmos-render /src/target/release/atmos-render /usr/local/bin/atmos-render
-COPY transcoder/server.mjs transcoder/media.mjs ./
+COPY transcoder/server.mjs transcoder/media.mjs transcoder/passthrough.mjs ./
 RUN mkdir /cache && chown node:node /cache
 USER node
 ENV PORT=3100 CACHE_DIR=/cache

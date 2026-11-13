@@ -102,10 +102,11 @@ export function GuestPage() {
       setError(event.reason);
     }
   });
-  const leave = React.useCallback(() => {
+  const leave = React.useCallback((reason?: string) => {
     forgetSeat();
     party.leave();
     setEnded(true);
+    if (reason) setError(reason);
   }, []);
   const enter = async (
     code: string,
@@ -248,7 +249,7 @@ function GuestParty({
   api: GuestApi;
   client: GuestJellyfinClient;
   playing: React.MutableRefObject<GuestCurrent | undefined>;
-  onLeave(): void;
+  onLeave(reason?: string): void;
 }) {
   const state = useParty();
   const entry = playingEntry(state);
@@ -275,7 +276,12 @@ function GuestParty({
   });
   React.useEffect(() => {
     if (info.error && [401, 403, 410].includes((info.error as any).status))
-      onLeave();
+      // A session the server dropped in a restart (its first deploy with stored sessions).
+      onLeave(
+        (info.error as any).code === 'session_restarted'
+          ? t`The server restarted; rejoin with the link`
+          : undefined
+      );
   }, [info.error, onLeave]);
   const last = React.useRef<GuestCurrent | undefined>(undefined);
   // Only a title resolved and probed plays; one resolving or failed is shown while waiting.

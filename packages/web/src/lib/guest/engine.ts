@@ -282,9 +282,18 @@ export function guestEngine(
     const writtenMs = () =>
       (player?.getManifest()?.presentationTimeline?.getMaxSegmentEndTime() ??
         0) * 1000;
+    /**
+     * The stream waits on its source (the server restarting, by the heartbeat): what is written
+     * meanwhile isn't how fast it converts, so its speed is unknown until it writes again.
+     */
+    let sourceAway = false;
     /** Notes what is written now; the speed is measured over at least 3 s. */
     const sampleWriting = () => {
       if (!playback || playback.mode === 'direct') return;
+      if (sourceAway) {
+        writing = null;
+        return;
+      }
       const ms = writtenMs();
       const at = Date.now();
       if (!writing || ms < writing.ms) writing = { ms, at, speed: null };
@@ -984,11 +993,23 @@ export function guestEngine(
         sampleWriting();
         const lease = playback.lease;
         void api
-          .request('/touch', { positionMs: position(), lease })
+          .request<{ waitingSource?: boolean }>('/touch', {
+            positionMs: position(),
+            lease,
+          })
+          .then((answer) => {
+            sourceAway = answer?.waitingSource === true;
+            if (sourceAway) writing = null;
+          })
           // A blip misses one heartbeat, which the next makes up for; a playback the server
           // has dropped stops here, and a stream the transcoder no longer has starts again
           // from where it was (nothing more of it will come).
           .catch((error: Error & { status?: number; code?: string }) => {
+            // The server not answering (restarting) is its source away too.
+            if (error.status === undefined || error.status >= 500) {
+              sourceAway = true;
+              writing = null;
+            }
             if (sessionGone(error.status)) expired(error.message);
             else if (
               error.code === 'stream_gone' &&

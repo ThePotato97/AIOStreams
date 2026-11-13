@@ -563,13 +563,13 @@ function unseat(conn: Conn | null | undefined, closeCode?: number): void {
 }
 
 function close(party: Party, tx: SharedTx, reason: PartyCloseReason): void {
-  guestSessions.revokeParty(party.id);
+  void guestSessions.revokeParty(party.id);
   tx.send(everyone(party), encode({ t: 'closed', reason }), RESEAT);
   tx.drop();
 }
 
 function removeSeat(party: Party, tx: SharedTx, seat: Seat): void {
-  guestSessions.revokeMember(party.id, seat.id);
+  void guestSessions.revokeMember(party.id, seat.id);
   if (!party.seats.delete(seat.id)) return;
   party.group.leave(seat.id);
   if (!party.seats.size) return tx.drop();
@@ -651,11 +651,12 @@ async function join(
   m: Extract<PartyClientMessage, { t: 'join' | 'resume' }>
 ): Promise<void> {
   if (!addresses.join(conn.address)) return refuse(conn, 'rate');
-  if (
-    m.token?.startsWith('guest.') &&
-    (!appConfig.party.guestStreaming || !guestSessions.get(m.token))
-  )
-    return refuse(conn, 'denied');
+  const guest = m.token?.startsWith('guest.')
+    ? appConfig.party.guestStreaming
+      ? await guestSessions.load(m.token)
+      : undefined
+    : null;
+  if (guest === undefined) return refuse(conn, 'denied');
   localOf(m.party);
   try {
     const [found, entries] = await Promise.all([
@@ -677,18 +678,19 @@ async function join(
     }
     const chat = chatOf(entries);
     const seatId = held?.id ?? randomId();
-    const guest = guestSessions.get(m.token ?? '');
-    // A guest session holds one seat. It claims the seat before the update so
-    // a concurrent join with the same token is refused, and gives the claim
-    // back if the party turns it away (full, locked, ...).
+    // A guest session holds one seat. It claims the seat (in the store, compare-and-set) before
+    // the update so a concurrent join with the same token is refused, and gives the claim back
+    // if the party turns it away (full, locked, ...).
     const claimed = !!guest && !guest.member;
     if (guest) {
-      if (guest.party !== m.party || (guest.member && guest.member !== seatId))
+      if (
+        guest.party !== m.party ||
+        !(await guestSessions.claimSeat(guest.token, seatId))
+      )
         return refuse(conn, 'denied');
-      guest.member = seatId;
     }
     const unclaim = () => {
-      if (claimed && guest?.member === seatId) guest.member = undefined;
+      if (claimed && guest) void guestSessions.releaseSeat(guest.token, seatId);
     };
     const replaced = seatHere(conn, m.party, seatId);
     let result;
@@ -746,7 +748,7 @@ async function join(
         conn.ws.close(4000)
       );
       // Revoked while the update was running.
-      if (!guestSessions.get(guest.token)) conn.ws.close(4000);
+      if (!(await guestSessions.load(guest.token))) conn.ws.close(4000);
     }
     unseat(replaced, 4000);
   } finally {
@@ -783,7 +785,8 @@ async function barredFrom(
     relayMode() === 'off' &&
     !(
       appConfig.party.guestStreaming &&
-      guestSessions.get(token ?? '')?.party === party.id
+      !!token?.startsWith('guest.') &&
+      (await guestSessions.load(token))?.party === party.id
     ) &&
     !(await userOf(token))
   )

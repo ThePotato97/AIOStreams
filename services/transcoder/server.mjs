@@ -6,6 +6,7 @@ import { mkdir, rm, readFile, stat, readdir } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
+import { createPassThrough } from './passthrough.mjs';
 import {
   metadata,
   streamArgs,
@@ -264,6 +265,8 @@ export async function drop(job) {
   jobs.delete(job.id);
   await stop(job);
   await removeDir(job.dir);
+  if (![...jobs.values()].some((j) => j.input === job.input))
+    passThrough.forget(job.input);
 }
 
 /*
@@ -274,7 +277,7 @@ export async function drop(job) {
  * here from its jobs' segments. Viewers with the same needs share jobs: a job is keyed by what it
  * writes (`keyOf`), and covers a span of the source.
  */
-const viewers = new Map();
+export const viewers = new Map();
 /** Segments ending this far behind the slowest viewer counted are deleted. */
 const WINDOW_BEHIND_MS = 60_000;
 /** A viewer this far behind a job's furthest stops counting for it (its own job, next time). */
@@ -411,9 +414,31 @@ const SOURCE_FAILURE = (status) => ({
   code: status.code ?? 'source_failed',
   reason: status.message ?? 'The source could not be read',
 });
+/**
+ * Where every FFmpeg of a job reads its source: through this process, which holds the read while
+ * AIOStreams is away (a restart) and reopens one cut part-way, rather than FFmpeg's own
+ * reconnects, whose waits double and can outlast AIOStreams' return by a minute.
+ */
+const passThrough = createPassThrough({
+  status: sourceStatus,
+  onWaiting: (input, waiting) => {
+    if (!waiting) return;
+    for (const job of jobs.values())
+      if (
+        job.input === input &&
+        running(job.child) &&
+        !['failed', 'finished', 'waitingSource', 'paused'].includes(job.stage)
+      )
+        setStage(job, 'waitingSource', { source: 'away' });
+  },
+});
+/** The URL a job's FFmpeg reads its source at. */
+const readOf = (job) => passThrough.url(job.input);
 /** Asks AIOStreams about the source after an FFmpeg reading it failed; kept on the job. */
 async function sourceOf(job, which) {
-  const status = await sourceStatus(job.input);
+  // The pass-through's own verdict first: the file changed, or AIOStreams never came back.
+  const status =
+    passThrough.failure(job.input) ?? (await sourceStatus(job.input));
   job.source = { ...status, after: which, at: Date.now() };
   return status;
 }
@@ -461,9 +486,15 @@ function spawnStream(job, args, stdin = 'ignore') {
       // "N/A" until FFmpeg has written something.
       const outMs = outTimeMs(line);
       if (outMs == null) continue;
-      if (job.producedMs !== job.offsetMs + outMs) job.progressAt = Date.now();
+      const moved = job.producedMs !== job.offsetMs + outMs;
+      if (moved) job.progressAt = Date.now();
       job.producedMs = job.offsetMs + outMs;
-      if (['opening', 'rendering', 'waitingSource'].includes(job.stage))
+      // FFmpeg reports on a timer even while its read waits (the source held for a restart):
+      // only output it actually made ends that wait.
+      if (
+        ['opening', 'rendering'].includes(job.stage) ||
+        (job.stage === 'waitingSource' && moved)
+      )
         setStage(job, job.ready ? 'ready' : 'encoding');
     }
   });
@@ -487,7 +518,7 @@ function spawnStream(job, args, stdin = 'ignore') {
 function startVideo(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
   const command = streamArgs(
     'video',
-    job.input,
+    readOf(job),
     job.meta,
     job.spec,
     job.dir,
@@ -544,7 +575,7 @@ async function finished(job) {
 function startAudio(job) {
   const command = streamArgs(
     'audio',
-    job.input,
+    readOf(job),
     job.meta,
     job.spec,
     job.dir,
@@ -594,7 +625,7 @@ function startRender(job) {
   job.offsetMs = offset * 1000;
   const demux = spawn(
     'ffmpeg',
-    demuxArgs(job.input, job.meta, job.spec, offset),
+    demuxArgs(readOf(job), job.meta, job.spec, offset),
     {
       stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
     }
@@ -656,7 +687,7 @@ function startRender(job) {
     clearTimeout(helpers.timer);
     const command = streamArgs(
       'audio',
-      job.input,
+      readOf(job),
       job.meta,
       job.spec,
       job.dir,
@@ -703,7 +734,7 @@ function startSubtitle(job) {
     'ffmpeg',
     [
       ...['-hide_banner', '-v', 'error', '-nostdin', '-y'],
-      ...['-i', job.input, '-map', `0:${job.spec.subtitle.track}`],
+      ...['-i', readOf(job), '-map', `0:${job.spec.subtitle.track}`],
       ...format.codec,
       ...['-flush_packets', '1', '-f', format.muxer, job.file],
     ],
@@ -1174,13 +1205,42 @@ async function tickJob(job) {
     }
   }
 }
+/**
+ * Since when AIOStreams hasn't answered (a restart), or null. Viewers' heartbeats come through
+ * it, so while it's away they can't arrive: no viewer or job lapses then, and the time it was
+ * away is credited to them when it's back, so its next heartbeat is in time.
+ */
+export const aiostreams = { awaySince: /** @type {number | null} */ (null) };
+/** Notes whether AIOStreams answers at all (any HTTP answer); what it answers doesn't matter. */
+export async function checkAiostreams(
+  reach = () =>
+    fetch(process.env.AIOSTREAMS_INTERNAL_URL ?? 'http://aiostreams:3000', {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(3000),
+    })
+) {
+  try {
+    await reach();
+  } catch {
+    aiostreams.awaySince ??= Date.now();
+    return;
+  }
+  if (aiostreams.awaySince === null) return;
+  const away = Date.now() - aiostreams.awaySince;
+  aiostreams.awaySince = null;
+  for (const viewer of viewers.values()) viewer.at += away;
+  for (const job of jobs.values()) job.last += away;
+}
 /** Viewers without a heartbeat go, and jobs nobody has held for a minute. */
-async function sweep() {
+export async function sweep() {
+  if (viewers.size || jobs.size) await checkAiostreams();
+  const away = aiostreams.awaySince !== null;
   for (const viewer of [...viewers.values()])
-    if (Date.now() - viewer.at > VIEWER_TTL_MS) releaseViewer(viewer.lease);
+    if (!away && Date.now() - viewer.at > VIEWER_TTL_MS)
+      releaseViewer(viewer.lease);
   let bytes = 0;
   for (const job of [...jobs.values()]) {
-    if (!job.viewers?.size && Date.now() - job.last > VIEWER_TTL_MS) {
+    if (!away && !job.viewers?.size && Date.now() - job.last > VIEWER_TTL_MS) {
       await drop(job);
       continue;
     }
@@ -1516,7 +1576,14 @@ export function createServer() {
             viewer.positionMs = body.positionMs;
           for (const job of Object.values(jobsOf(viewer)))
             if (job) job.last = Date.now();
-          return send({ ok: true });
+          // Whether its stream waits on the source (AIOStreams away): what it writes meanwhile
+          // says nothing of how fast it converts.
+          return send({
+            ok: true,
+            waitingSource: Object.values(jobsOf(viewer)).some(
+              (job) => job?.stage === 'waitingSource'
+            ),
+          });
         }
         if (what === 'manifest.mpd' && req.method === 'GET') {
           const state = stateOf(viewer);

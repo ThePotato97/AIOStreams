@@ -4884,6 +4884,10 @@ msgid "The server is converting as much as it can"
 msgstr ""
 
 #: src/pages/guest.tsx
+msgid "The server restarted; rejoin with the link"
+msgstr ""
+
+#: src/pages/guest.tsx
 msgid "The source couldn't be opened"
 msgstr ""
 
