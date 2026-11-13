@@ -1215,6 +1215,20 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
+  // A viewer's state once it plays: the long poll, asked again until then.
+  const playing = async (lease) => {
+    let after = -1;
+    for (let i = 0; i < 40; i++) {
+      const state = await (
+        await call(`/viewers/${lease}/state?after=${after}`)
+      ).json();
+      if (state.ready || state.failure) return state;
+      after = state.version;
+    }
+    assert.fail('never ready');
+  };
+  const release = (lease) => call(`/viewers/${lease}/release`, {});
+  const manifest = (lease) => call(`/viewers/${lease}/manifest.mpd`);
   try {
     assert.equal((await fetch(base + '/health')).status, 401);
     assert.equal(
@@ -1235,17 +1249,22 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     assert.equal(first.status, 200);
     const job = await first.json();
     assert.equal(job.mode, 'audio');
+    // A video job and an audio job, each its own stream.
+    assert.ok(job.jobs.video.id && job.jobs.audio.id);
     const second = await (
       await call('/prepare', { ...body, viewer: 'two'.repeat(8) })
     ).json();
-    assert.equal(second.id, job.id);
+    // The same needs: the same jobs.
+    assert.equal(second.jobs.video.id, job.jobs.video.id);
+    assert.equal(second.jobs.audio.id, job.jobs.audio.id);
+    await playing(job.lease);
     assert.match(
-      await (await call(`/jobs/${job.id}/manifest.mpd`)).text(),
+      await (await manifest(job.lease)).text(),
       /<MPD[\s\S]*codecs="avc1\./
     );
     // Once finished, the manifest lasts as long as the source (12 s).
     for (let i = 0; i < 100; i++) {
-      const mpd = await (await call(`/jobs/${job.id}/manifest.mpd`)).text();
+      const mpd = await (await manifest(job.lease)).text();
       if (mpd.includes('type="static"')) {
         assert.match(mpd, /mediaPresentationDuration="PT12\.\d+S"/);
         break;
@@ -1267,16 +1286,12 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     assert.equal(long.status, 200);
     const longJob = await long.json();
     assert.equal(longJob.mode, 'audio');
-    // The player plays the source's own timestamps: no offset.
-    assert.equal(longJob.offsetMs, 0);
+    const longState = await playing(longJob.lease);
     assert.ok(
-      Math.abs(longJob.startMs - 10000) < 100,
-      `start ${longJob.startMs}`
+      Math.abs(longState.startMs - 10000) < 100,
+      `start ${longState.startMs}`
     );
-    await call(`/jobs/${longJob.id}/touch`, {
-      viewer: 'long'.repeat(5),
-      release: true,
-    });
+    await release(longJob.lease);
     // Copied HEVC: the manifest says which HEVC, as browsers require.
     await exec('ffmpeg', [
       '-v',
@@ -1310,7 +1325,8 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
         }),
       })
     ).json();
-    const hevcManifest = await call(`/jobs/${hevc.id}/manifest.mpd`);
+    await playing(hevc.lease);
+    const hevcManifest = await manifest(hevc.lease);
     assert.equal(
       hevcManifest.headers.get('content-type'),
       'application/dash+xml'
@@ -1319,20 +1335,26 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
       await hevcManifest.text(),
       /mimeType="video\/mp4" codecs="hvc1\.2\.4\.L\d+[.0-9A-F]*"/
     );
-    await call(`/jobs/${hevc.id}/touch`, {
-      viewer: 'hevc'.repeat(5),
-      release: true,
-    });
-    // Extracted in the background: come back until it's written.
-    let subtitle = await call('/subtitle', { input, index: 2 });
+    await release(hevc.lease);
+    // Extracted in the background, once per file: come back until it's written.
+    const subtitleBody = { input, file: 'source-file', index: 2 };
+    let subtitle = await call('/subtitle', subtitleBody);
     assert.equal(subtitle.status, 425);
     assert.equal(subtitle.headers.get('retry-after'), '5');
     for (let i = 0; i < 100 && subtitle.status === 425; i++) {
       await new Promise((resolve) => setTimeout(resolve, 100));
-      subtitle = await call('/subtitle', { input, index: 2 });
+      subtitle = await call('/subtitle', subtitleBody);
     }
     assert.equal(subtitle.status, 200);
+    assert.equal(subtitle.headers.get('x-complete'), '1');
     assert.match(await subtitle.text(), /WEBVTT/);
+    // The same file through another link (a new handle): extracted already.
+    const again = await call('/subtitle', {
+      ...subtitleBody,
+      input: `${origin}/party/guest/source/${'e'.repeat(43)}`,
+    });
+    assert.equal(again.status, 200);
+    // NVENC isn't here: the encode falls back to the CPU before its first segment.
     const gpu = await call('/prepare', {
       input,
       viewer: 'three'.repeat(5),
@@ -1340,9 +1362,19 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     });
     assert.equal(gpu.status, 200);
     const gpuJob = await gpu.json();
+    const gpuState = await playing(gpuJob.lease);
+    assert.equal(gpuState.failure, null);
     const health = await (await call('/health')).json();
+    const encoded = health.jobs.find((j) => j.id === gpuJob.jobs.video.id);
+    assert.equal(encoded.encoder, 'cpu');
+    assert.ok(encoded.stages.some((s) => s.fallback === 'encoder'));
+    // A copied video never takes the GPU fallback.
     assert.ok(
-      health.jobs.every((j) => j.encoder === 'cpu' || j.mode === 'audio')
+      health.jobs
+        .filter(
+          (j) => j.kind === 'video' && j.effective.video.where === 'server-copy'
+        )
+        .every((j) => !j.stages.some((s) => s.fallback))
     );
     // Two conversions encode video at once: a third waits.
     const encoding = await call('/prepare', {
@@ -1359,7 +1391,9 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     });
     assert.equal(over.status, 503);
     assert.equal(over.headers.get('retry-after'), '10');
-    assert.equal((await over.json()).retryAfter, 10);
+    const overBody = await over.json();
+    assert.equal(overBody.retryAfter, 10);
+    assert.equal(overBody.class, 'capacity');
     // Copying the video costs little: it isn't held to that limit.
     const copy = await call('/prepare', {
       input,
@@ -1371,30 +1405,27 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     assert.equal(copy.status, 200);
     const copyJob = await copy.json();
     assert.equal(copyJob.mode, 'remux');
-    await call(`/jobs/${copyJob.id}/touch`, {
-      viewer: 'six'.repeat(8),
-      release: true,
-    });
-    await call(`/jobs/${job.id}/touch`, { viewer: body.viewer, release: true });
-    await call(`/jobs/${job.id}/touch`, {
-      viewer: 'two'.repeat(8),
-      release: true,
-    });
-    // A place is freed: the waiting conversion starts.
-    await call(`/jobs/${secondJob.id}/touch`, {
-      viewer: 'four'.repeat(5),
-      release: true,
-    });
+    await release(copyJob.lease);
+    await release(body.viewer);
+    await release('two'.repeat(8));
+    // A place is freed: the waiting conversion starts at once.
+    await release(secondJob.lease);
     const replacement = await call('/prepare', {
       input,
       viewer: 'five'.repeat(5),
       request: request({ force: true, quality: '1080p' }),
     });
     assert.equal(replacement.status, 200);
-    await call(`/jobs/${gpuJob.id}/touch`, {
-      viewer: 'three'.repeat(5),
-      release: true,
+    // At capacity, a seek that replaces its own playback is admitted: its old jobs are free.
+    const seek = await call('/prepare', {
+      input,
+      viewer: 'seven'.repeat(4),
+      replaces: 'five'.repeat(5),
+      request: request({ force: true, quality: '1080p', positionMs: 8000 }),
     });
+    assert.equal(seek.status, 200, await seek.clone().text());
+    await release('seven'.repeat(4));
+    await release(gpuJob.lease);
     // ASS as it is, and the font attached to the file, for the browser.
     await exec('ffmpeg', [
       '-v',
@@ -1426,6 +1457,7 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     };
     const ass = await ready('/subtitle', {
       input: fonted,
+      file: 'fonted-file',
       index: 2,
       format: 'ass',
     });
@@ -1435,8 +1467,14 @@ test('companion HTTP: auth, source handles, shared jobs, subtitles, capacity and
     assert.match(assText, /Dialogue:.*Guest playback/);
     // Only in the format the track is.
     assert.equal(
-      (await call('/subtitle', { input: fonted, index: 2, format: 'sup' }))
-        .status,
+      (
+        await call('/subtitle', {
+          input: fonted,
+          file: 'fonted-file',
+          index: 2,
+          format: 'sup',
+        })
+      ).status,
       400
     );
     const font = await ready('/font', {

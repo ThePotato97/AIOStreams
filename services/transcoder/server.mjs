@@ -8,22 +8,20 @@ import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import {
   metadata,
-  ffmpegArgs,
+  streamArgs,
+  composeManifest,
+  parseTimeline,
+  tracksOf,
   demuxArgs,
   rendererArgs,
   firstPacketTime,
   playbackSpec,
   modeOf,
-  manifestReady,
   outTimeMs,
-  manifestStart,
   subtitleKind,
   videoCodec,
   initLayout,
   audioCodec,
-  withAudioCodec,
-  withFullDuration,
-  withVideoCodec,
 } from './media.mjs';
 
 const exec = promisify(execFile);
@@ -43,7 +41,6 @@ const maxBytes = Math.max(
 /** Exported for tests. */
 export const jobs = new Map();
 const probes = new Map();
-const pending = new Map();
 /** Extracted subtitles and fonts: key → { path, ready, error }. */
 const extracted = new Map();
 let extractions = 0;
@@ -67,8 +64,6 @@ const SUBTITLE_FORMATS = {
   },
 };
 let cacheBytes = 0;
-const maximumPosition = (job) =>
-  Math.max(0, ...[...job.viewers.values()].map((v) => v.positionMs));
 const id = () => randomBytes(24).toString('base64url');
 const hash = (value) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -92,7 +87,7 @@ function inputUrl(value) {
     url.username ||
     url.password
   )
-    throw Error('Invalid source handle');
+    throw Object.assign(Error('Invalid source handle'), { status: 400 });
   return url.href;
 }
 /**
@@ -132,9 +127,14 @@ async function json(req) {
   let text = '';
   for await (const chunk of req) {
     text += chunk;
-    if (text.length > 65536) throw Error('Request too large');
+    if (text.length > 65536)
+      throw Object.assign(Error('Request too large'), { status: 400 });
   }
-  return JSON.parse(text || '{}');
+  try {
+    return JSON.parse(text || '{}');
+  } catch {
+    throw Object.assign(Error('Invalid JSON'), { status: 400 });
+  }
 }
 /**
  * The source reader's state, from AIOStreams (`<source>/status`): read when an FFmpeg reading the
@@ -219,6 +219,25 @@ async function probe(input) {
 }
 const running = (child) =>
   !!child && child.exitCode === null && child.signalCode === null;
+/** Kills a process started in its own group (`detached`) and everything in that group. */
+function killGroup(child) {
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
+/** Stops a binaural audio job's demuxer and renderer. */
+function killHelpers(job) {
+  const helpers = job.helpers;
+  if (!helpers) return;
+  job.helpers = null;
+  helpers.stopping = true;
+  clearTimeout(helpers.timer);
+  if (running(helpers.demux)) helpers.demux.kill('SIGKILL');
+  // The renderer's whole group: its decoding FFmpeg would otherwise be orphaned.
+  if (running(helpers.renderer)) killGroup(helpers.renderer);
+}
 /**
  * Stops a job's FFmpeg and resolves once it has exited: SIGTERM, then SIGKILL
  * after 3 s. Its files can only be removed after that, since FFmpeg still
@@ -228,6 +247,7 @@ export function stop(job) {
   killHelpers(job);
   const child = job.child;
   if (!running(child)) return Promise.resolve();
+  job.stopping = true;
   const exited = new Promise((resolve) => child.once('exit', resolve));
   if (job.paused) child.kill('SIGCONT');
   child.kill('SIGTERM');
@@ -245,180 +265,192 @@ export async function drop(job) {
   await stop(job);
   await removeDir(job.dir);
 }
+
+/*
+ * Stream jobs. Each job makes one stream: a video job the picture (copied or encoded, with any
+ * burned-in subtitle), an audio job one audio track (copied, converted, or rendered binaural), a
+ * subtitle job one subtitle track as a file. A viewer (a lease) holds a video job, an audio job
+ * when the audio is converted, and a subtitle job when one is extracted; its manifest is written
+ * here from its jobs' segments. Viewers with the same needs share jobs: a job is keyed by what it
+ * writes (`keyOf`), and covers a span of the source.
+ */
+const viewers = new Map();
+/** Segments ending this far behind the slowest viewer counted are deleted. */
+const WINDOW_BEHIND_MS = 60_000;
+/** A viewer this far behind a job's furthest stops counting for it (its own job, next time). */
+const STRAGGLER_MS = 5 * 60_000;
+/** A job pauses when what it has written is this far ahead of its furthest viewer. */
+const AHEAD_MS = 120_000;
+/** A segment's length, and the slack a job's coverage and the disk reservation allow. */
+const MARGIN_MS = 8_000;
+/** What a job can hold on disk under these rules, in seconds of its stream. */
+const RESERVE_S =
+  (WINDOW_BEHIND_MS + STRAGGLER_MS + AHEAD_MS + MARGIN_MS) / 1000;
+/** A running job without progress this long asks AIOStreams about its source. */
+const STALL_MS = 5000;
+/** A viewer without a heartbeat this long has gone. */
+const VIEWER_TTL_MS = 60_000;
+/** How long a state request waits for a change. */
+const STATE_WAIT_MS = 25_000;
+/** At most this many subtitle extractions run at once (each reads the whole file). */
+const SUBTITLE_RUNS = 2;
+/** The order a job's stages come in, for a viewer's combined stage (the earliest). */
+const STAGES = [
+  'opening',
+  'waitingAudio',
+  'rendering',
+  'waitingSource',
+  'encoding',
+  'ready',
+  'paused',
+  'finished',
+];
+const SUBTITLE_FILES = {
+  text: 'vtt',
+  ass: 'ass',
+  pgs: 'sup',
+};
+
 /**
  * Audio tracks whose binaural rendering failed once playing: converted
  * without it from then on (the player's virtualiser takes over), rather than
  * failing the same way again. Bounded; the oldest is forgotten first.
  */
 const binauralFailed = new Set();
-const binauralKey = (job, spec) => `${job.input}#${spec.audio?.track}`;
+const binauralKey = (input, spec) => `${input}#${spec.audio?.track}`;
 /**
- * The spec a job runs: from its request, and what the transcoder knows. Binaural rendering
- * isn't asked of the renderer for a track it failed on (`binauralFailed`), nor again for a job
- * that already fell back from it (`noBinaural`).
+ * The spec a playback asks for: from its request, and what the transcoder knows. Binaural
+ * rendering isn't asked of the renderer for a track it failed on (`binauralFailed`).
  */
-function specFor(job) {
-  const spec = playbackSpec(job.meta, job.request);
+function specFor(meta, request, input) {
+  const spec = playbackSpec(meta, request);
   if (spec.audio?.where !== 'server-render') return spec;
-  const failed = job.noBinaural || binauralFailed.has(binauralKey(job, spec));
-  return failed
-    ? playbackSpec(job.meta, job.request, { binauralFailed: true })
+  return binauralFailed.has(binauralKey(input, spec))
+    ? playbackSpec(meta, request, { binauralFailed: true })
     : spec;
 }
-/** How long a binaural conversion waits for its first audio packet. */
-const AUDIO_START_TIMEOUT_MS = 60_000;
-/** Kills a process started in its own group (`detached`) and everything in that group. */
-function killGroup(child) {
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
+/**
+ * A job's key: its source, and the fields of its stream's spec that decide what it writes. What
+ * the page does with the same output (Dolby Vision drawn or not, audio rendered by the page) and
+ * the quality asked for (already in the encode's scale and cap) are left out, so viewers who
+ * differ only there share the job.
+ */
+function keyOf(kind, input, spec, file) {
+  if (kind === 'video') {
+    const v = spec.video;
+    const burn =
+      spec.subtitle?.where === 'server-burn' ? spec.subtitle.track : null;
+    return hash([input, 'video', v.track, v.where, v.encode ?? null, burn]);
   }
+  if (kind === 'audio') {
+    const a = spec.audio;
+    const where = a.where === 'page-original' ? 'server-copy' : a.where;
+    return hash([
+      input,
+      'audio',
+      a.track,
+      where,
+      a.convert ?? null,
+      a.render ?? null,
+    ]);
+  }
+  return hash(['subtitle', file, spec.subtitle.track, spec.subtitle.format]);
 }
-/** Stops a binaural conversion's demuxer and renderer. */
-function killHelpers(job) {
-  const helpers = job.helpers;
-  if (!helpers) return;
-  job.helpers = null;
-  helpers.stopping = true;
-  if (running(helpers.demux)) helpers.demux.kill('SIGKILL');
-  // The renderer's whole group: its decoding FFmpeg would otherwise be orphaned.
-  if (running(helpers.renderer)) killGroup(helpers.renderer);
+/** Bits per second a job's stream takes, for its disk reservation. */
+function bitrateOf(kind, meta, spec) {
+  const { video, audio } = tracksOf(meta, spec);
+  if (kind === 'video') {
+    const source =
+      video?.bitrate ||
+      Math.max(0, (meta.bitrate || 0) - (audio?.bitrate || 0));
+    if (spec.video.where !== 'server-encode') return source || 40e6;
+    const cap = spec.video.encode?.maxBitrate;
+    return cap ? parseInt(cap, 10) * 1e6 : source || 40e6;
+  }
+  if (kind === 'audio') {
+    const out = spec.audio.convert ?? spec.audio.render;
+    if (!out) return audio?.bitrate || (audio?.codec === 'truehd' ? 6e6 : 2e6);
+    if (out.codec === 'flac') return (out.channels ?? 2) * 48000 * 24 * 0.7;
+    return (parseInt(out.bitrate, 10) || 640) * 1000;
+  }
+  return 0;
+}
+const reserveOf = (job) =>
+  job.kind === 'subtitle'
+    ? 16 * 1024 ** 2
+    : Math.ceil((bitrateOf(job.kind, job.meta, job.spec) / 8) * RESERVE_S);
+
+function notify(viewer) {
+  if (!viewer) return;
+  viewer.version++;
+  for (const wake of viewer.waiters.splice(0)) wake();
+}
+function changed(job) {
+  for (const lease of job.viewers) notify(viewers.get(lease));
+}
+/** Sets a job's stage where its event happens, with the time, and tells its viewers. */
+function setStage(job, stage, detail) {
+  if (job.stage === stage && !detail) return;
+  job.stage = stage;
+  job.stages.push({ stage, at: Date.now(), ...detail });
+  if (job.stages.length > 40) job.stages.splice(0, job.stages.length - 40);
+  changed(job);
 }
 /**
- * Starts a job's conversion. A GPU conversion that fails before its first
- * segment runs again with the video decoded on the CPU, then with the tone
- * map on the CPU too (an HDR source), then all on the CPU. A binaural one
- * (the audio rendered to headphones by atmos-render) runs as three processes:
- * FFmpeg demuxing the audio track, atmos-render, and the converting FFmpeg,
- * which reads the rendered audio on pipe:4 from the first audio packet's
- * timestamp. If its demuxer or renderer fails before the first segment, the
- * conversion runs again without binaural rendering, and the player's own
- * virtualiser takes over (`binaural` in the response says which).
+ * A job that won't produce: `class` says why. `source`: the source failed (AIOStreams' reader
+ * says so), not the conversion; it isn't tried again. `encoder`: the GPU failed once playing.
+ * `conversion`: anything else.
  */
-function start(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
-  killHelpers(job);
-  const spec = specFor(job);
-  if (spec.audio?.where !== 'server-render') {
-    startMain(job, encoder, gpu, { spec });
-    return;
-  }
-  const offset =
-    Math.floor(Math.max(0, job.request.positionMs ?? 0) / 1000 / 4) * 4;
-  const demux = spawn('ffmpeg', demuxArgs(job.input, job.meta, spec, offset), {
-    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
-  });
-  const renderer = spawn(
-    process.env.ATMOS_RENDER ?? 'atmos-render',
-    rendererArgs(job.meta, spec),
-    {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      // Its own process group, with the FFmpeg it decodes E-AC-3, AC-3 and DTS with: stopping
-      // it stops that FFmpeg too (killHelpers).
-      detached: true,
-    }
-  );
-  const helpers = { demux, renderer, stopping: false, failed: false };
-  job.helpers = helpers;
-  // Do not log their stderr: FFmpeg's can contain credentials.
-  demux.stderr.resume();
-  renderer.stderr.resume();
-  renderer.stdin.on('error', () => {});
-  demux.stdout.pipe(renderer.stdin);
-  const fail = () => {
-    if (helpers.stopping || helpers.failed || job.helpers !== helpers) return;
-    helpers.failed = true;
-    if (!job.ready) {
-      void withoutBinaural(job, encoder, gpu);
-      return;
-    }
-    // Once playing, the converting FFmpeg would carry on with the video alone
-    // and the audio would just stop. The job fails instead, so the player
-    // reconnects, and this track converts without binaural rendering.
-    binauralFailed.add(binauralKey(job, spec));
-    if (binauralFailed.size > 200)
-      binauralFailed.delete(binauralFailed.values().next().value);
-    job.error = 'Binaural rendering stopped';
-    const main = job.child;
-    if (running(main)) {
-      main.kill('SIGCONT');
-      main.kill('SIGKILL');
-    }
-  };
-  for (const c of [demux, renderer]) {
-    c.on('error', fail);
-    c.on('exit', (code) => {
-      if (code !== 0 && c === demux && !helpers.stopping)
-        noteSource(job, 'demux');
-      if (code !== 0) fail();
-    });
-  }
-  // Rendered audio is held until the converting FFmpeg starts.
-  let held = [];
-  const hold = (chunk) => held.push(chunk);
-  renderer.stdout.on('data', hold);
-  const timer = setTimeout(fail, AUDIO_START_TIMEOUT_MS);
-  timer.unref();
-  let text = '';
-  let main = null;
-  demux.stdio[3].on('data', (chunk) => {
-    if (main || helpers.stopping) return; // drained, so the demuxer never blocks on it
-    text += chunk;
-    const audioStart = firstPacketTime(text);
-    if (audioStart == null) return;
-    clearTimeout(timer);
-    main = startMain(job, encoder, gpu, { audioStart, spec });
-    const sink = main.stdio[4];
-    sink.on('error', () => {});
-    renderer.stdout.off('data', hold);
-    for (const chunk of held) sink.write(chunk);
-    held = [];
-    renderer.stdout.pipe(sink);
-  });
+function failJob(job, failure) {
+  job.failure = failure;
+  setStage(job, 'failed', { class: failure.class });
 }
-/** Runs a binaural conversion again with the audio converted as usual. */
-async function withoutBinaural(job, encoder, gpu) {
-  const main = job.child;
-  job.child = null;
+const SOURCE_FAILURE = (status) => ({
+  class: 'source',
+  status: 502,
+  code: status.code ?? 'source_failed',
+  reason: status.message ?? 'The source could not be read',
+});
+/** Asks AIOStreams about the source after an FFmpeg reading it failed; kept on the job. */
+async function sourceOf(job, which) {
+  const status = await sourceStatus(job.input);
+  job.source = { ...status, after: which, at: Date.now() };
+  return status;
+}
+/** Starts a job again, from nothing, as it now is (its spec, key and stage). */
+async function restart(job, start, detail) {
   killHelpers(job);
-  if (running(main)) {
-    main.kill('SIGCONT');
-    main.kill('SIGKILL');
-    await new Promise((resolve) => main.once('exit', resolve));
+  const child = job.child;
+  job.child = null;
+  if (running(child)) {
+    if (job.paused) child.kill('SIGCONT');
+    child.kill('SIGKILL');
+    await new Promise((resolve) => child.once('exit', resolve));
   }
-  job.noBinaural = true;
+  job.paused = false;
+  job.ready = false;
+  job.segments = [];
+  job.firstKept = 1;
+  job.writtenMs = null;
+  job.startMs = null;
+  job.videoCodec = undefined;
   await rm(job.dir, { recursive: true, force: true });
   await mkdir(job.dir, { recursive: true });
   if (!jobs.has(job.id)) return;
-  start(job, encoder, gpu);
+  setStage(job, 'opening', detail);
+  start();
 }
-/** Starts the converting FFmpeg; `extra` adds to `ffmpegArgs`' options. */
-function startMain(job, encoder, gpu, extra) {
-  const command = ffmpegArgs(
-    job.input,
-    job.meta,
-    job.request,
-    job.dir,
-    encoder,
-    { ...gpu, ...extra }
-  );
-  job.offsetMs = command.offsetMs;
-  // What this conversion makes, after any fallback (no binaural, the CPU): the player follows it.
-  job.spec = command.spec;
-  job.mode = modeOf(command.spec);
-  job.audioCodec = audioCodec(job.meta, command.spec);
-  job.encoder = encoder;
-  job.tonemap = command.tonemap;
-  job.decode = command.decode;
-  const args = [...command.args];
-  args.splice(args.length - 1, 0, '-progress', 'pipe:3');
-  const child = spawn('ffmpeg', args, {
-    stdio:
-      command.spec.audio?.where === 'server-render'
-        ? ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
-        : ['ignore', 'ignore', 'pipe', 'pipe'],
+
+/** Spawns a stream job's FFmpeg with its progress on pipe:3. */
+function spawnStream(job, args, stdin = 'ignore') {
+  const command = [...args];
+  command.splice(command.length - 1, 0, '-progress', 'pipe:3');
+  const child = spawn('ffmpeg', command, {
+    stdio: [stdin, 'ignore', 'pipe', 'pipe'],
   });
   job.child = child;
+  job.stopping = false;
+  job.progressAt = Date.now();
   let progress = '';
   child.stdio[3].on('data', (chunk) => {
     progress += chunk;
@@ -426,61 +458,783 @@ function startMain(job, encoder, gpu, extra) {
     progress = lines.pop() ?? '';
     for (const line of lines) {
       if (line.startsWith('speed=')) job.speed = line.slice(6);
-      // "N/A" until FFmpeg has written something: NaN would match no position, and every request
-      // for this job until then would start another one.
+      // "N/A" until FFmpeg has written something.
       const outMs = outTimeMs(line);
-      if (outMs != null) {
-        job.producedMs = job.offsetMs + outMs;
-        if (!job.paused && job.producedMs > maximumPosition(job) + 120000) {
-          child.kill('SIGSTOP');
-          job.paused = true;
-        }
-      }
+      if (outMs == null) continue;
+      if (job.producedMs !== job.offsetMs + outMs) job.progressAt = Date.now();
+      job.producedMs = job.offsetMs + outMs;
+      if (['opening', 'rendering', 'waitingSource'].includes(job.stage))
+        setStage(job, job.ready ? 'ready' : 'encoding');
     }
   });
   // Do not log FFmpeg stderr: it can contain credentials from upstream errors.
   child.stderr.resume();
-  child.on('error', () => {
-    job.error = 'FFmpeg could not start';
-  });
-  child.on('exit', async (code) => {
-    if (!jobs.has(job.id) || job.child !== child) return;
-    job.child = null;
-    if (code !== 0) noteSource(job, 'main');
-    if (code !== 0 && encoder !== 'cpu' && !job.ready) {
-      await rm(job.dir, { recursive: true, force: true });
-      await mkdir(job.dir, { recursive: true });
-      if (!jobs.has(job.id)) return;
-      if (command.decode === 'gpu')
-        start(job, encoder, { decode: 'cpu', tonemap: 'gpu' });
-      else if (command.tonemap === 'gpu')
-        start(job, encoder, { decode: 'cpu', tonemap: 'cpu' });
-      else start(job, 'cpu');
-    } else if (
-      code !== 0 &&
-      !job.ready &&
-      job.spec?.audio?.where === 'server-render'
-    )
-      // all on the CPU and still failing: without binaural rendering
-      await withoutBinaural(job, encoder, gpu);
-    else if (code !== 0) job.error ??= 'Conversion failed';
-    // A clean exit well before the end: the source stopped sending.
-    else if (stoppedEarly(job)) job.error = 'The source stopped before the end';
-    else job.finished = true;
-  });
+  child.on('error', () =>
+    failJob(job, {
+      class: 'conversion',
+      status: 500,
+      reason: 'FFmpeg could not start',
+    })
+  );
   return child;
 }
+
 /**
- * Starts writing a file with FFmpeg, once per key. Until it's written the
- * caller is told to come back: reading a whole remote file can take
- * minutes, more than a request should wait.
+ * A video job. Encoding on the GPU that fails before its first segment runs again with the
+ * video decoded on the CPU, then with the tone map on the CPU too (an HDR source), then all on
+ * the CPU; only a command that used the GPU falls back.
+ */
+function startVideo(job, encoder, gpu = { decode: 'gpu', tonemap: 'gpu' }) {
+  const command = streamArgs(
+    'video',
+    job.input,
+    job.meta,
+    job.spec,
+    job.dir,
+    encoder,
+    {
+      ...gpu,
+      positionMs: job.positionMs,
+    }
+  );
+  job.offsetMs = command.offsetMs;
+  job.encoder = encoder;
+  job.tonemap = command.tonemap;
+  job.decode = command.decode;
+  const child = spawnStream(job, command.args);
+  child.on('exit', async (code) => {
+    if (!jobs.has(job.id) || job.child !== child || job.stopping) return;
+    job.child = null;
+    if (code === 0) return void (await finished(job));
+    const status = await sourceOf(job, 'main');
+    if (status.state === 'failed') return failJob(job, SOURCE_FAILURE(status));
+    if (command.gpu && !job.ready) {
+      const next =
+        command.decode === 'gpu'
+          ? () => startVideo(job, encoder, { decode: 'cpu', tonemap: 'gpu' })
+          : command.tonemap === 'gpu'
+            ? () => startVideo(job, encoder, { decode: 'cpu', tonemap: 'cpu' })
+            : () => startVideo(job, 'cpu');
+      return restart(job, next, { fallback: 'encoder' });
+    }
+    failJob(job, {
+      class: command.gpu ? 'encoder' : 'conversion',
+      status: 500,
+      reason: 'Conversion failed',
+    });
+  });
+}
+/** A clean exit: finished, or (well before the end) the source stopped sending. */
+async function finished(job) {
+  if (!stoppedEarly(job)) return setStage(job, 'finished');
+  const status = await sourceOf(job, 'main');
+  failJob(
+    job,
+    status.state === 'failed'
+      ? SOURCE_FAILURE(status)
+      : {
+          class: 'source',
+          status: 502,
+          code: 'source_unreachable',
+          reason: 'The source stopped before the end',
+        }
+  );
+}
+/** An audio job that copies or converts its track. */
+function startAudio(job) {
+  const command = streamArgs(
+    'audio',
+    job.input,
+    job.meta,
+    job.spec,
+    job.dir,
+    'cpu',
+    {
+      positionMs: job.positionMs,
+      videoCopied: job.spec.video?.where !== 'server-encode',
+    }
+  );
+  job.offsetMs = command.offsetMs;
+  const child = spawnStream(job, command.args);
+  child.on('exit', async (code) => {
+    if (!jobs.has(job.id) || job.child !== child || job.stopping) return;
+    job.child = null;
+    if (code === 0) return void (await finished(job));
+    const status = await sourceOf(job, 'main');
+    if (status.state === 'failed') return failJob(job, SOURCE_FAILURE(status));
+    failJob(job, {
+      class: 'conversion',
+      status: 500,
+      reason: 'Conversion failed',
+    });
+  });
+}
+/** A binaural audio job's renderer failed: the track converted instead, as the job now is. */
+function withoutBinaural(job) {
+  if (job.helpers?.fallingBack) return;
+  if (job.helpers) job.helpers.fallingBack = true;
+  if (job.ready) {
+    binauralFailed.add(binauralKey(job.input, job.spec));
+    if (binauralFailed.size > 200)
+      binauralFailed.delete(binauralFailed.values().next().value);
+  }
+  job.spec = playbackSpec(job.meta, job.request, { binauralFailed: true });
+  job.key = keyOf('audio', job.input, job.spec);
+  void restart(job, () => startAudio(job), { fallback: 'renderer' });
+}
+/** How long a binaural job waits for its first audio packet. */
+const AUDIO_START_TIMEOUT_MS = 60_000;
+/**
+ * A binaural audio job: FFmpeg demuxing the track, atmos-render, and FFmpeg writing the rendered
+ * audio, placed at the first packet's source timestamp. If the demuxer or renderer fails (and
+ * the source didn't), the job runs again converting the track without binaural rendering.
+ */
+function startRender(job) {
+  const offset = Math.floor(Math.max(0, job.positionMs ?? 0) / 1000 / 4) * 4;
+  job.offsetMs = offset * 1000;
+  const demux = spawn(
+    'ffmpeg',
+    demuxArgs(job.input, job.meta, job.spec, offset),
+    {
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    }
+  );
+  const renderer = spawn(
+    process.env.ATMOS_RENDER ?? 'atmos-render',
+    rendererArgs(job.meta, job.spec),
+    {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      // Its own process group, with the FFmpeg it decodes E-AC-3, AC-3 and DTS with.
+      detached: true,
+    }
+  );
+  const helpers = {
+    demux,
+    renderer,
+    stopping: false,
+    fallingBack: false,
+    timer: null,
+  };
+  job.helpers = helpers;
+  setStage(job, 'waitingAudio');
+  // Do not log their stderr: FFmpeg's can contain credentials.
+  demux.stderr.resume();
+  renderer.stderr.resume();
+  renderer.stdin.on('error', () => {});
+  demux.stdout.pipe(renderer.stdin);
+  const helperFailed = async (which) => {
+    if (helpers.stopping || job.helpers !== helpers) return;
+    if (which === 'demux') {
+      const status = await sourceOf(job, 'demux');
+      if (status.state === 'failed') {
+        killHelpers(job);
+        if (running(job.child)) job.child.kill('SIGKILL');
+        return failJob(job, SOURCE_FAILURE(status));
+      }
+    }
+    withoutBinaural(job);
+  };
+  demux.on('error', () => helperFailed('demux'));
+  renderer.on('error', () => helperFailed('renderer'));
+  demux.on('exit', (code) => code !== 0 && helperFailed('demux'));
+  renderer.on('exit', (code) => code !== 0 && helperFailed('renderer'));
+  let held = [];
+  const hold = (chunk) => held.push(chunk);
+  renderer.stdout.on('data', hold);
+  helpers.timer = setTimeout(
+    () => helperFailed('renderer'),
+    AUDIO_START_TIMEOUT_MS
+  );
+  helpers.timer.unref();
+  let text = '';
+  let child = null;
+  demux.stdio[3].on('data', (chunk) => {
+    if (child || helpers.stopping) return; // drained, so the demuxer never blocks on it
+    text += chunk;
+    const audioStart = firstPacketTime(text);
+    if (audioStart == null) return;
+    clearTimeout(helpers.timer);
+    const command = streamArgs(
+      'audio',
+      job.input,
+      job.meta,
+      job.spec,
+      job.dir,
+      'cpu',
+      {
+        positionMs: job.positionMs,
+        audioStart,
+      }
+    );
+    setStage(job, 'rendering');
+    child = spawnStream(job, command.args, 'pipe');
+    child.stdin.on('error', () => {});
+    renderer.stdout.off('data', hold);
+    for (const c of held) child.stdin.write(c);
+    held = [];
+    renderer.stdout.pipe(child.stdin);
+    child.on('exit', async (code) => {
+      if (!jobs.has(job.id) || job.child !== child || job.stopping) return;
+      job.child = null;
+      if (code === 0) {
+        killHelpers(job);
+        return void (await finished(job));
+      }
+      const status = await sourceOf(job, 'main');
+      if (status.state === 'failed') {
+        killHelpers(job);
+        return failJob(job, SOURCE_FAILURE(status));
+      }
+      if (!job.ready) return withoutBinaural(job);
+      killHelpers(job);
+      failJob(job, {
+        class: 'conversion',
+        status: 500,
+        reason: 'Conversion failed',
+      });
+    });
+  });
+}
+/** A subtitle job: the track written out as a file, served as it grows. */
+function startSubtitle(job) {
+  const format = SUBTITLE_FORMATS[job.format];
+  job.file = `${job.dir}/subtitle.${job.format}`;
+  const child = spawn(
+    'ffmpeg',
+    [
+      ...['-hide_banner', '-v', 'error', '-nostdin', '-y'],
+      ...['-i', job.input, '-map', `0:${job.spec.subtitle.track}`],
+      ...format.codec,
+      ...['-flush_packets', '1', '-f', format.muxer, job.file],
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'] }
+  );
+  job.child = child;
+  job.stopping = false;
+  child.stderr.resume();
+  const growing = setInterval(async () => {
+    if (
+      (await stat(job.file).catch(() => null))?.size &&
+      job.stage === 'opening'
+    )
+      setStage(job, 'encoding');
+  }, 500);
+  growing.unref();
+  const timer = setTimeout(() => child.kill('SIGKILL'), EXTRACTION_TIMEOUT_MS);
+  timer.unref();
+  child.on('error', () =>
+    failJob(job, {
+      class: 'conversion',
+      status: 500,
+      reason: 'Subtitle extraction failed',
+    })
+  );
+  child.on('exit', async (code) => {
+    clearInterval(growing);
+    clearTimeout(timer);
+    if (!jobs.has(job.id) || job.child !== child || job.stopping) return;
+    job.child = null;
+    if (code === 0) {
+      job.ready = true;
+      return setStage(job, 'finished');
+    }
+    const status = await sourceOf(job, 'subtitle');
+    failJob(
+      job,
+      status.state === 'failed'
+        ? SOURCE_FAILURE(status)
+        : {
+            class: 'conversion',
+            status: 500,
+            reason: 'Subtitle extraction failed',
+          }
+    );
+  });
+}
+function startJob(job) {
+  if (job.kind === 'video')
+    startVideo(job, process.env.TRANSCODER_ENCODER ?? 'cpu');
+  else if (job.kind === 'subtitle') startSubtitle(job);
+  else if (job.spec.audio.where === 'server-render') startRender(job);
+  else startAudio(job);
+}
+
+/** Where a job is written to, as far as anyone may play from it. */
+const endOf = (job) => job.writtenMs ?? job.offsetMs ?? 0;
+/** The positions of a job's viewers, furthest first, and those that still count for it. */
+function positionsOf(job) {
+  const all = [...job.viewers]
+    .map((lease) => viewers.get(lease)?.positionMs)
+    .filter((p) => Number.isFinite(p))
+    .sort((a, b) => b - a);
+  const furthest = all[0];
+  return { furthest, counted: all.filter((p) => p >= furthest - STRAGGLER_MS) };
+}
+/** An existing job a viewer at `positionMs` can play: same key, working, covering it. */
+function matching(kind, key, positionMs) {
+  return [...jobs.values()].find((j) => {
+    if (j.kind !== kind || j.key !== key || j.failure) return false;
+    if (kind === 'subtitle') return true;
+    const start = j.startMs ?? j.offsetMs;
+    if (positionMs < start - 1000 || positionMs > endOf(j) + MARGIN_MS)
+      return false;
+    // Too far behind its viewers: it would hold the window back. A job of its own.
+    const { furthest } = positionsOf(j);
+    return !(furthest - positionMs > STRAGGLER_MS);
+  });
+}
+function newJob(kind, key, { input, meta, request, spec, positionMs, format }) {
+  const jobId = id();
+  const job = {
+    id: jobId,
+    kind,
+    key,
+    input,
+    meta,
+    request,
+    spec,
+    format,
+    positionMs,
+    dir: `${root}/${jobId}`,
+    viewers: new Set(),
+    last: Date.now(),
+    stage: null,
+    stages: [],
+    failure: null,
+    ready: false,
+    segments: [],
+    firstKept: 1,
+    offsetMs: Math.floor(positionMs / 4000) * 4000,
+    producedMs: null,
+    writtenMs: null,
+    startMs: null,
+  };
+  job.reservedBytes = reserveOf(job);
+  return job;
+}
+/** A request error: 400. */
+const bad = (message) => Object.assign(Error(message), { status: 400 });
+/** A probe, its failure classed: the source's (502, its code) when AIOStreams says so. */
+async function probed(input) {
+  try {
+    return await probe(input);
+  } catch (error) {
+    if (error.source?.state === 'failed')
+      throw Object.assign(Error(error.message), SOURCE_FAILURE(error.source));
+    throw Object.assign(Error(error.message), {
+      status: 502,
+      class: 'conversion',
+    });
+  }
+}
+const capacityError = (message) =>
+  Object.assign(Error(message), {
+    status: 503,
+    retryAfter: 10,
+    class: 'capacity',
+  });
+/**
+ * Admits a playback: its viewer and the jobs it needs, existing ones where they cover its
+ * position, new ones within the limits and the disk budget. Jobs held only by the playback it
+ * `replaces` count as free, and go once this one is admitted (a seek or a switch at capacity).
+ */
+function admit(body, meta) {
+  const input = inputUrl(body.input);
+  const request = body.request ?? {};
+  if (
+    !['original', '1080p', '720p'].includes(request.quality) ||
+    !Number.isFinite(request.positionMs) ||
+    request.positionMs < 0 ||
+    // Some sources report no duration (0); don't bound those.
+    (meta.durationMs > 0 && request.positionMs > meta.durationMs + 4000)
+  )
+    throw bad('Invalid playback request');
+  if (
+    typeof body.viewer !== 'string' ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(body.viewer)
+  )
+    throw bad('Invalid viewer');
+  if (viewers.has(body.viewer)) throw bad('Viewer already admitted');
+  const replaced =
+    typeof body.replaces === 'string' ? viewers.get(body.replaces) : null;
+  const asked = playbackSpec(meta, request);
+  const requested = specFor(meta, request, input);
+  if (!asked.video) throw bad('Source has no video');
+  if (asked.video.where === 'page-original') {
+    if (replaced) releaseViewer(replaced.lease);
+    return { mode: 'direct', spec: requested, effective: requested, meta };
+  }
+  const positionMs = request.positionMs;
+  const kinds = ['video'];
+  if (requested.audio) kinds.push('audio');
+  const subtitleFormat =
+    requested.subtitle?.where === 'page'
+      ? SUBTITLE_FILES[requested.subtitle.format]
+      : null;
+  if (subtitleFormat && typeof body.file === 'string') kinds.push('subtitle');
+  const extracting = () =>
+    [...jobs.values()].filter(
+      (j) => j.kind === 'subtitle' && !j.ready && !j.failure
+    ).length;
+  const plan = {};
+  const fresh = [];
+  for (const kind of kinds) {
+    const key = keyOf(kind, input, requested, body.file);
+    let job = matching(kind, key, positionMs);
+    // Extraction is full: the page asks for the subtitle again later (/subtitle).
+    if (!job && kind === 'subtitle' && extracting() >= SUBTITLE_RUNS) continue;
+    if (!job) {
+      job = newJob(kind, key, {
+        input,
+        meta,
+        request,
+        spec: requested,
+        positionMs,
+        format: subtitleFormat,
+      });
+      fresh.push(job);
+    }
+    plan[kind] = job;
+  }
+  // What's held: not the jobs only the replaced playback holds, nor those nobody holds (they
+  // go when their room is needed, oldest first; until then a returning viewer can use them).
+  const replacedOnly = (j) =>
+    !!replaced &&
+    j.viewers.size > 0 &&
+    [...j.viewers].every((l) => l === replaced.lease);
+  const used = Object.values(plan);
+  const idle = [...jobs.values()]
+    .filter((j) => !j.viewers.size && !j.failure && !used.includes(j))
+    .sort((a, b) => a.last - b.last);
+  const held = [...jobs.values()].filter(
+    (j) =>
+      used.includes(j) || (!replacedOnly(j) && !j.failure && !idle.includes(j))
+  );
+  const encodes = (j) =>
+    j.kind === 'video' && j.spec.video.where === 'server-encode';
+  const over = (list) =>
+    list.filter((j) => j.kind === 'video').length > copyLimit ||
+    list.filter(encodes).length > limit ||
+    list.filter((j) => j.kind === 'audio').length > copyLimit;
+  const after = [...held, ...fresh];
+  if (over(after))
+    throw capacityError(
+      'Conversion capacity reached; try Original or retry later'
+    );
+  const reserved = (list) => list.reduce((n, j) => n + j.reservedBytes, 0);
+  if (reserved(after) > maxBytes)
+    throw capacityError(
+      'Conversion disk space is reserved; try Original or retry later'
+    );
+  // Idle jobs make room, oldest first, only as far as needed.
+  const keep = [...idle];
+  while (
+    keep.length &&
+    (over([...after, ...keep]) || reserved([...after, ...keep]) > maxBytes)
+  )
+    void drop(keep.shift());
+  const viewer = {
+    lease: body.viewer,
+    input,
+    meta,
+    requested,
+    jobs: {
+      video: plan.video.id,
+      audio: plan.audio?.id,
+      subtitle: plan.subtitle?.id,
+    },
+    positionMs,
+    at: Date.now(),
+    version: 0,
+    waiters: [],
+  };
+  viewers.set(viewer.lease, viewer);
+  for (const job of Object.values(plan)) {
+    job.viewers.add(viewer.lease);
+    job.last = Date.now();
+  }
+  for (const job of fresh) {
+    jobs.set(job.id, job);
+    setStage(job, 'opening');
+  }
+  if (replaced) {
+    const old = Object.values(replaced.jobs)
+      .map((jobId) => jobs.get(jobId))
+      .filter(Boolean);
+    releaseViewer(replaced.lease);
+    for (const job of old) if (!job.viewers.size) void drop(job);
+  }
+  return { viewer, fresh };
+}
+async function launch(fresh) {
+  for (const job of fresh) {
+    try {
+      await mkdir(job.dir, { recursive: true });
+      startJob(job);
+    } catch (error) {
+      failJob(job, {
+        class: 'conversion',
+        status: 500,
+        reason: 'Conversion could not start',
+      });
+      throw error;
+    }
+  }
+}
+function releaseViewer(lease) {
+  const viewer = viewers.get(lease);
+  if (!viewer) return false;
+  viewers.delete(lease);
+  for (const jobId of Object.values(viewer.jobs)) {
+    const job = jobs.get(jobId);
+    if (!job) continue;
+    job.viewers.delete(lease);
+    job.last = Date.now();
+  }
+  notify(viewer);
+  return true;
+}
+/** A viewer's jobs, by kind (a dropped one is missing). */
+function jobsOf(viewer) {
+  return {
+    video: jobs.get(viewer.jobs.video),
+    audio: viewer.jobs.audio ? jobs.get(viewer.jobs.audio) : null,
+    subtitle: viewer.jobs.subtitle ? jobs.get(viewer.jobs.subtitle) : null,
+  };
+}
+/**
+ * A viewer's state: ready once its video and audio are; failed if either failed (or went); else
+ * the earlier of their stages. The effective spec is what its jobs now make.
+ */
+function stateOf(viewer) {
+  const { video, audio, subtitle } = jobsOf(viewer);
+  const streams = viewer.jobs.audio ? [video, audio] : [video];
+  const gone = streams.some((j) => !j);
+  const failed = streams.find((j) => j?.failure);
+  const ready = !gone && streams.every((j) => j.ready);
+  const stage =
+    gone || failed
+      ? 'failed'
+      : ready
+        ? 'ready'
+        : (STAGES[
+            Math.min(
+              ...streams
+                .map((j) => STAGES.indexOf(j.stage))
+                .filter((i) => i >= 0)
+            )
+          ] ?? 'opening');
+  const effective = {
+    ...viewer.requested,
+    video: video?.spec.video ?? viewer.requested.video,
+    audio: audio?.spec.audio ?? viewer.requested.audio,
+  };
+  const describe = (j) => j && { id: j.id, stage: j.stage, failure: j.failure };
+  return {
+    version: viewer.version,
+    stage,
+    ready,
+    mode: modeOf(effective),
+    spec: viewer.requested,
+    effective,
+    startMs: ready ? Math.max(...streams.map((j) => j.startMs ?? 0)) : null,
+    failure: gone
+      ? { class: 'conversion', status: 410, reason: 'The conversion ended' }
+      : (failed?.failure ?? null),
+    jobs: {
+      video: describe(video),
+      audio: describe(audio),
+      subtitle: describe(subtitle),
+    },
+  };
+}
+/** Waits for a viewer's state to change past `after` (at most STATE_WAIT_MS). */
+async function stateAfter(viewer, after) {
+  if (!(viewer.version <= after)) return stateOf(viewer);
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, STATE_WAIT_MS);
+    viewer.waiters.push(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  return stateOf(viewer);
+}
+
+/**
+ * Every half second, for each running stream job: its segments (from its manifest), readiness,
+ * the window (segments far behind its viewers deleted), pausing on what it has written, and a
+ * stalled source.
+ */
+async function tick() {
+  for (const job of [...jobs.values()]) {
+    try {
+      await tickJob(job);
+    } catch (error) {
+      if (process.env.DEBUG_STATE) console.error('tick', job.id, error);
+    }
+  }
+}
+async function tickJob(job) {
+  {
+    if (job.kind === 'subtitle' || job.failure) return;
+    const mpd = job.parsedFinal
+      ? ''
+      : await readFile(`${job.dir}/manifest.mpd`, 'utf8').catch(() => '');
+    const timeline = mpd ? parseTimeline(mpd) : null;
+    if (timeline?.segments.length) {
+      job.timescale = timeline.timescale;
+      job.segments = timeline.segments;
+      const last = timeline.segments.at(-1);
+      job.writtenMs = Math.round(
+        ((last.t + last.d) / timeline.timescale) * 1000
+      );
+      if (job.stage === 'finished') job.parsedFinal = true;
+      if (!job.ready) {
+        job.ready = true;
+        job.startMs = Math.round(
+          (timeline.segments[0].t / timeline.timescale) * 1000
+        );
+        if (job.stage !== 'finished') setStage(job, 'ready');
+        else changed(job);
+      }
+    }
+    const { furthest, counted } = positionsOf(job);
+    // The window: segments ending a minute behind the slowest viewer counted go.
+    if (job.ready && counted.length) {
+      const cutoff = Math.min(...counted) - WINDOW_BEHIND_MS;
+      for (const s of job.segments) {
+        if (s.number < job.firstKept) continue;
+        if (((s.t + s.d) / job.timescale) * 1000 >= cutoff) break;
+        await rm(
+          `${job.dir}/chunk-0-${String(s.number).padStart(5, '0')}.m4s`,
+          { force: true }
+        );
+        job.firstKept = s.number + 1;
+      }
+    }
+    if (!running(job.child)) return;
+    // Pausing on what it has written, never before its first segment.
+    if (job.ready && Number.isFinite(furthest)) {
+      const ahead = (job.writtenMs ?? 0) > furthest + AHEAD_MS;
+      if (ahead && !job.paused) {
+        job.child.kill('SIGSTOP');
+        job.paused = true;
+        setStage(job, 'paused');
+      } else if (!ahead && job.paused) {
+        job.child.kill('SIGCONT');
+        job.paused = false;
+        job.progressAt = Date.now();
+        setStage(job, 'ready');
+      }
+    }
+    // No progress: AIOStreams says whether its source is resolving (or AIOStreams is away).
+    if (
+      !job.paused &&
+      Date.now() - job.progressAt > STALL_MS &&
+      !job.checking
+    ) {
+      job.checking = true;
+      void sourceStatus(job.input)
+        .then((status) => {
+          if (
+            !running(job.child) ||
+            job.paused ||
+            Date.now() - job.progressAt <= STALL_MS
+          )
+            return;
+          if (status.state === 'resolving' || status.state === 'unknown')
+            setStage(job, 'waitingSource', { source: status.state });
+          // The source failed while FFmpeg reconnects to it: the job fails as the source's, and
+          // isn't tried again.
+          else if (status.state === 'failed') {
+            job.source = { ...status, after: 'stalled', at: Date.now() };
+            killHelpers(job);
+            const child = job.child;
+            job.child = null;
+            if (job.paused) child.kill('SIGCONT');
+            child.kill('SIGKILL');
+            failJob(job, SOURCE_FAILURE(status));
+          }
+        })
+        .finally(() => {
+          job.checking = false;
+        });
+    }
+  }
+}
+/** Viewers without a heartbeat go, and jobs nobody has held for a minute. */
+async function sweep() {
+  for (const viewer of [...viewers.values()])
+    if (Date.now() - viewer.at > VIEWER_TTL_MS) releaseViewer(viewer.lease);
+  let bytes = 0;
+  for (const job of [...jobs.values()]) {
+    if (!job.viewers?.size && Date.now() - job.last > VIEWER_TTL_MS) {
+      await drop(job);
+      continue;
+    }
+    for (const file of await readdir(job.dir).catch(() => []))
+      bytes += (await stat(`${job.dir}/${file}`).catch(() => ({ size: 0 })))
+        .size;
+  }
+  cacheBytes = bytes;
+}
+/** A viewer's manifest, from its video and audio jobs. */
+async function manifestOf(viewer) {
+  const { video, audio } = jobsOf(viewer);
+  const parts = [];
+  for (const [kind, job] of [
+    ['video', video],
+    ['audio', audio],
+  ]) {
+    if (!job) continue;
+    const mpd = await readFile(`${job.dir}/manifest.mpd`, 'utf8').catch(
+      () => ''
+    );
+    if (!mpd) continue;
+    if (kind === 'video' && job.videoCodec == null) {
+      const init = await readFile(`${job.dir}/init-0.m4s`).catch(() =>
+        Buffer.alloc(0)
+      );
+      job.videoCodec = videoCodec(init);
+      // Without it the browser gets FFmpeg's bare "hvc1" and may refuse the video: say what the
+      // init segment holds, once per job.
+      if (job.videoCodec == null && init.length && !job.loggedInit) {
+        job.loggedInit = true;
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            msg: 'no codec string for the video',
+            job: job.id,
+            init: initLayout(init),
+          })
+        );
+      }
+    }
+    parts.push({
+      kind,
+      id: job.id,
+      mpd,
+      firstKept: job.firstKept,
+      codec: kind === 'video' ? job.videoCodec : audioCodec(job.meta, job.spec),
+    });
+  }
+  return composeManifest(parts, {
+    durationMs: viewer.meta.durationMs,
+    windowMs: WINDOW_BEHIND_MS,
+  });
+}
+
+/**
+ * Starts writing a file with FFmpeg, once per key (fonts). Until it's written the caller is told
+ * to come back.
  */
 function extract(key, args) {
   const id = hash(key);
   const known = extracted.get(id);
   if (known && !known.error) return known;
   if (extractions >= 2) {
-    const error = Error('Subtitle extraction capacity reached');
+    const error = Error('Font extraction capacity reached');
     error.status = 503;
     error.retryAfter = 10;
     throw error;
@@ -502,7 +1256,7 @@ function extract(key, args) {
       entry.ready = true;
     })
     .catch(() => {
-      entry.error = 'Subtitle extraction failed';
+      entry.error = 'Extraction failed';
       void rm(entry.path, { force: true });
     })
     .finally(() => extractions--);
@@ -531,155 +1285,82 @@ async function sendExtracted(res, entry, type) {
   res.writeHead(200, { 'Content-Type': type, 'Content-Length': size.size });
   await pipeline(createReadStream(entry.path), res);
 }
+/**
+ * A subtitle job's file: whole once written; with `partial`, what's written so far
+ * (`X-Complete: 0`); otherwise 425 until it's complete.
+ */
+async function sendSubtitle(res, job, partial) {
+  if (job.failure) {
+    const error = Error(job.failure.reason);
+    error.status = job.failure.status ?? 502;
+    error.class = job.failure.class;
+    error.code = job.failure.code;
+    throw error;
+  }
+  const type = SUBTITLE_FORMATS[job.format].type;
+  if (!job.ready && !partial) {
+    res.writeHead(425, {
+      'Content-Type': 'application/json',
+      'Retry-After': '5',
+    });
+    res.end(JSON.stringify({ error: 'Still extracting', retryAfter: 5 }));
+    return;
+  }
+  const data = await readFile(job.file).catch(() => Buffer.alloc(0));
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': data.length,
+    'X-Complete': job.ready ? '1' : '0',
+  });
+  res.end(data);
+}
 /** How far before the source's end a finished conversion may stop. */
 const END_MARGIN_MS = 30_000;
 export function stoppedEarly(job) {
   const total = job.meta?.durationMs;
-  return total > 0 && (job.producedMs ?? 0) < total - END_MARGIN_MS;
-}
-/**
- * A playback's job: an existing one that covers the position, or a new one, with the viewer
- * added. Run one at a time (the job limit); the source is probed before, and the wait for the
- * job's first segments comes after (`whenReady`), so a source slow to open holds up nobody else.
- */
-async function admit(body, meta) {
-  const input = inputUrl(body.input);
-  const request = body.request ?? {};
-  if (
-    !['original', '1080p', '720p'].includes(request.quality) ||
-    !Number.isFinite(request.positionMs) ||
-    request.positionMs < 0 ||
-    // Some sources report no duration (0); don't bound those.
-    (meta.durationMs > 0 && request.positionMs > meta.durationMs + 4000)
-  )
-    throw Error('Invalid playback request');
-  if (
-    typeof body.viewer !== 'string' ||
-    !/^[A-Za-z0-9_-]{16,128}$/.test(body.viewer)
-  )
-    throw Error('Invalid viewer');
-  // What the request asks for, and what will be tried (a track the renderer failed on is
-  // converted instead).
-  const asked = playbackSpec(meta, request);
-  const requested = specFor({ meta, request, input });
-  if (!asked.video) throw Error('Source has no video');
-  if (asked.video.where === 'page-original')
-    return { mode: 'direct', spec: requested, effective: requested, meta };
-  const where = asked.audio?.where;
-  const key = hash([
-    input,
-    request.quality,
-    request.audio,
-    request.subtitle,
-    asked.video.where !== 'server-encode',
-    where === 'server-copy',
-    asked.subtitle?.where === 'server-burn',
-    where === 'server-render',
-    !!asked.audio?.pageRenders,
-    asked.audio?.render?.mode ?? null,
-    asked.video.picture === 'dovi',
-  ]);
-  const positionMs = request.positionMs;
-  let job = [...jobs.values()].find(
-    (j) =>
-      j.key === key &&
-      !j.error &&
-      // Its real start can be a frame past the position asked for.
-      positionMs >= j.offsetMs - 1000 &&
-      positionMs <= (j.producedMs ?? j.offsetMs) + 8000
+  return (
+    total > 0 && (job.writtenMs ?? job.producedMs ?? 0) < total - END_MARGIN_MS
   );
-  if (!job) {
-    for (const old of [...jobs.values()])
-      if (!old.viewers.size || old.error) await drop(old);
-    const encodes = (j) => j.mode === 'video';
-    const encoding = modeOf(asked) === 'video';
-    if (
-      jobs.size >= copyLimit ||
-      (encoding && [...jobs.values()].filter(encodes).length >= limit)
-    ) {
-      const err = Error(
-        'Conversion capacity reached; try Original or retry later'
-      );
-      err.status = 503;
-      // Viewers who left free their place within a minute.
-      err.retryAfter = 10;
-      throw err;
-    }
-    const jobId = id();
-    job = {
-      id: jobId,
-      key,
-      input,
-      meta,
-      request,
-      requested,
-      dir: `${root}/${jobId}`,
-      viewers: new Map(),
-      last: Date.now(),
-      offsetMs: Math.floor(positionMs / 4000) * 4000,
-      producedMs: Math.floor(positionMs / 4000) * 4000,
-    };
-    jobs.set(jobId, job);
-    try {
-      await mkdir(job.dir, { recursive: true });
-      start(job, process.env.TRANSCODER_ENCODER ?? 'cpu');
-    } catch (error) {
-      await drop(job);
-      throw error;
-    }
-  }
-  if (
-    typeof body.viewer !== 'string' ||
-    !/^[A-Za-z0-9_-]{16,128}$/.test(body.viewer)
-  )
-    throw Error('Invalid viewer');
-  job.viewers.set(body.viewer, { positionMs, at: Date.now() });
-  job.last = Date.now();
-  if (job.paused && job.producedMs < maximumPosition(job) + 120000) {
-    job.child?.kill('SIGCONT');
-    job.paused = false;
-  }
-  return { job, meta };
 }
-/** Waits for a job's first segments (30 s at most), then what the player needs from it. */
-async function whenReady(job, meta) {
-  for (let i = 0; i < 300; i++) {
-    if (job.error) throw Error(job.error);
-    const mpd = await readFile(`${job.dir}/manifest.mpd`, 'utf8').catch(
-      () => ''
-    );
-    if (manifestReady(mpd)) {
-      if (!job.ready) {
-        const start = manifestStart(mpd);
-        if (start != null && start >= 0)
-          job.offsetMs = Math.round(start * 1000);
-      }
-      job.ready = true;
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  if (!job.ready) {
-    const error = Error('Conversion is still starting; retry shortly');
-    error.status = 503;
-    // The player waits and asks again (the same job, still starting) rather than failing: a
-    // source can take longer than this wait to open.
-    error.retryAfter = 2;
-    throw error;
-  }
-  // Shaka plays the source's own timestamps: the player needs no offset.
-  return {
-    id: job.id,
-    mode: job.mode,
-    offsetMs: 0,
-    startMs: job.offsetMs,
-    // What was asked for, and what this job does after any fallback (the player follows it).
-    spec: job.requested,
-    effective: job.spec,
-    meta,
-  };
+/** What /health says about a job. */
+const healthOf = (j) => ({
+  id: j.id,
+  kind: j.kind,
+  stage: j.stage,
+  stages: j.stages,
+  failure: j.failure,
+  mode: j.spec ? modeOf(j.spec) : undefined,
+  reasons: {
+    video: j.spec?.video?.reason ?? null,
+    audio: j.spec?.audio?.reason ?? null,
+  },
+  encoder: j.encoder,
+  tonemap: j.tonemap,
+  decode: j.decode,
+  effective: j.spec,
+  viewers: j.viewers?.size ?? 0,
+  startMs: j.startMs,
+  producedMs: j.producedMs,
+  writtenMs: j.writtenMs,
+  firstKept: j.firstKept,
+  paused: !!j.paused,
+  reservedBytes: j.reservedBytes,
+  speed: j.speed,
+  // The source's state when an FFmpeg reading it last failed.
+  source: j.source ?? null,
+});
+/** The half-second tick and the five-second sweep, started with the first server. */
+let timers = null;
+function startTimers() {
+  if (timers) return;
+  timers = [
+    setInterval(() => void tick().catch(() => {}), 500),
+    setInterval(() => void sweep().catch(() => {}), 5000),
+  ];
+  for (const timer of timers) timer.unref();
 }
 export function createServer() {
+  startTimers();
   return http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (!authorized(req)) {
@@ -697,65 +1378,66 @@ export function createServer() {
           ok: true,
           cacheBytes,
           maxCacheBytes: maxBytes,
+          reservedBytes: [...jobs.values()].reduce(
+            (n, j) => n + (j.reservedBytes ?? 0),
+            0
+          ),
           maxJobs: limit,
-          jobs: [...jobs.values()].map((j) => ({
-            id: j.id,
-            mode: j.mode,
-            // Why video/audio are converted (null: copied).
-            reasons: {
-              video: j.spec?.video?.reason ?? null,
-              audio: j.spec?.audio?.reason ?? null,
-            },
-            encoder: j.encoder,
-            tonemap: j.tonemap,
-            decode: j.decode,
-            requested: j.requested,
-            effective: j.spec,
-            viewers: j.viewers.size,
-            producedMs: j.producedMs,
-            speed: j.speed,
-            finished: !!j.finished,
-            error: j.error,
-            // The source's state when an FFmpeg reading it last failed.
-            source: j.source ?? null,
-          })),
+          maxCopyJobs: copyLimit,
+          viewers: viewers.size,
+          jobs: [...jobs.values()].map(healthOf),
           probeSources,
         });
       if (req.method === 'POST' && url.pathname === '/probe')
-        return send(await probe(inputUrl((await json(req)).input)));
+        return send(await probed(inputUrl((await json(req)).input)));
       if (req.method === 'POST' && url.pathname === '/subtitle') {
-        // A subtitle track as a file: WebVTT for text, the track itself for
-        // ASS and PGS, which the browser draws.
+        // A subtitle track as a file, extracted once per file (`file`: the source file's
+        // identity, the same across new links to it): WebVTT for text, the track itself for ASS
+        // and PGS, which the browser draws.
         const body = await json(req);
         const input = inputUrl(body.input);
         const format = SUBTITLE_FORMATS[body.format ?? 'vtt'];
-        if (!format) throw Error('Unknown subtitle format');
+        if (!format) throw bad('Unknown subtitle format');
+        if (typeof body.file !== 'string' || !body.file)
+          throw bad('Unknown source file');
         const meta = await probe(input);
         const track = meta.tracks.find(
           (t) => t.type === 'subtitle' && t.index === body.index
         );
         if (!track || subtitleKind(track.codec) !== format.kind)
-          throw Error('Unknown subtitle track');
-        return sendExtracted(
-          res,
-          extract(
-            [input, 'subtitle', body.index, body.format ?? 'vtt'],
-            (path) => [
-              '-v',
-              'error',
-              '-i',
-              input,
-              '-map',
-              `0:${body.index}`,
-              ...format.codec,
-              '-f',
-              format.muxer,
-              '-y',
-              path,
-            ]
-          ),
-          format.type
-        );
+          throw bad('Unknown subtitle track');
+        const spec = {
+          subtitle: { track: body.index, where: 'page', format: format.kind },
+        };
+        const key = keyOf('subtitle', input, spec, body.file);
+        let job = matching('subtitle', key, 0);
+        if (!job) {
+          const running = [...jobs.values()].filter(
+            (j) => j.kind === 'subtitle' && !j.ready && !j.failure
+          );
+          if (running.length >= SUBTITLE_RUNS)
+            throw capacityError('Subtitle extraction capacity reached');
+          job = newJob('subtitle', key, {
+            input,
+            meta,
+            request: {},
+            spec,
+            positionMs: 0,
+            format: body.format ?? 'vtt',
+          });
+          jobs.set(job.id, job);
+          setStage(job, 'opening');
+          await launch([job]);
+        }
+        // Held by the viewer asking, released with its other jobs.
+        const viewer =
+          typeof body.viewer === 'string' ? viewers.get(body.viewer) : null;
+        if (viewer && !job.viewers.has(viewer.lease)) {
+          job.viewers.add(viewer.lease);
+          viewer.jobs.subtitle = job.id;
+        }
+        job.last = Date.now();
+        return sendSubtitle(res, job, !!body.partial);
       }
       if (req.method === 'POST' && url.pathname === '/font') {
         // A font attached to the file, which its ASS subtitles use. MKV
@@ -765,7 +1447,7 @@ export function createServer() {
         const font = (await probe(input)).fonts.find(
           (f) => f.index === body.index
         );
-        if (!font) throw Error('Unknown font');
+        if (!font) throw bad('Unknown font');
         return sendExtracted(
           res,
           extract([input, 'font', body.index], (path) => [
@@ -781,115 +1463,109 @@ export function createServer() {
         );
       }
       if (req.method === 'POST' && url.pathname === '/prepare') {
+        // Answers at once: the viewer, its jobs and the spec asked for. The state says when it
+        // plays (`/viewers/:lease/state`).
         const body = await json(req);
-        const meta = await probe(inputUrl(body.input));
-        // Serialize admission so simultaneous requests cannot exceed the job limit; only
-        // admission: the wait for a job's first segments runs alongside others.
-        const previous = pending.get('prepare') ?? Promise.resolve();
-        const task = previous.catch(() => {}).then(() => admit(body, meta));
-        pending.set('prepare', task);
-        let admitted;
-        try {
-          admitted = await task;
-        } finally {
-          if (pending.get('prepare') === task) pending.delete('prepare');
-        }
-        return send(
-          admitted.job ? await whenReady(admitted.job, admitted.meta) : admitted
-        );
+        const meta = await probed(inputUrl(body.input));
+        const admitted = admit(body, meta);
+        if (admitted.mode === 'direct') return send(admitted);
+        await launch(admitted.fresh);
+        const { viewer } = admitted;
+        return send({
+          lease: viewer.lease,
+          ...stateOf(viewer),
+          meta,
+        });
       }
-      const match = /^\/jobs\/([A-Za-z0-9_-]+)(?:\/([\w.-]+))?$/.exec(
-        url.pathname
-      );
+      const viewerMatch =
+        /^\/viewers\/([A-Za-z0-9_-]+)\/(state|touch|release|manifest\.mpd)$/.exec(
+          url.pathname
+        );
+      if (viewerMatch) {
+        const viewer = viewers.get(viewerMatch[1]);
+        const what = viewerMatch[2];
+        if (what === 'release' && req.method === 'POST')
+          return send({ released: releaseViewer(viewerMatch[1]) });
+        if (!viewer) {
+          const gone = Error('Unknown viewer');
+          gone.status = 404;
+          throw gone;
+        }
+        if (what === 'state' && req.method === 'GET')
+          return send(
+            await stateAfter(
+              viewer,
+              Number(url.searchParams.get('after') ?? -1)
+            )
+          );
+        if (what === 'touch' && req.method === 'POST') {
+          const body = await json(req);
+          viewer.at = Date.now();
+          if (Number.isFinite(body.positionMs))
+            viewer.positionMs = body.positionMs;
+          for (const job of Object.values(jobsOf(viewer)))
+            if (job) job.last = Date.now();
+          return send({ ok: true });
+        }
+        if (what === 'manifest.mpd' && req.method === 'GET') {
+          const state = stateOf(viewer);
+          if (state.failure) {
+            const error = Error(state.failure.reason);
+            Object.assign(error, state.failure);
+            throw error;
+          }
+          if (!state.ready) {
+            const missing = Error('Not written yet');
+            missing.status = 404;
+            throw missing;
+          }
+          res.setHeader('Content-Type', 'application/dash+xml');
+          res.end(await manifestOf(viewer));
+          return;
+        }
+      }
+      const match =
+        /^\/jobs\/([A-Za-z0-9_-]+)\/(init-0\.m4s|chunk-0-(\d+)\.m4s)$/.exec(
+          url.pathname
+        );
       const job = match && jobs.get(match[1]);
-      if (!job) {
+      if (!job || req.method !== 'GET') {
         res.writeHead(404).end();
         return;
       }
-      if (req.method === 'POST' && match[2] === 'touch') {
-        const body = await json(req);
-        if (!job.viewers.has(body.viewer)) {
-          res.writeHead(403).end();
-          return;
-        }
-        if (body.release) job.viewers.delete(body.viewer);
-        else if (Number.isFinite(body.positionMs))
-          job.viewers.set(body.viewer, {
-            positionMs: body.positionMs,
-            at: Date.now(),
-          });
-        job.last = Date.now();
-        if (job.paused && job.producedMs < maximumPosition(job) + 120000) {
-          job.child?.kill('SIGCONT');
-          job.paused = false;
-        }
-        return send({ ok: true });
+      if (job.failure)
+        throw Object.assign(Error(job.failure.reason), job.failure);
+      // Behind the window: deleted, and not coming back.
+      if (match[3] && Number(match[3]) < (job.firstKept ?? 1)) {
+        const gone = Error('Segment left the window');
+        gone.status = 410;
+        throw gone;
       }
-      if (
-        req.method === 'GET' &&
-        /^(manifest\.mpd|init-\d+\.m4s|chunk-\d+-\d+\.m4s)$/.test(
-          match[2] ?? ''
-        )
-      ) {
-        if (job.error) throw Error(job.error);
-        const file = `${job.dir}/${match[2]}`;
-        const size = await stat(file).catch((error) => {
-          if (error.code !== 'ENOENT') throw error;
-          const missing = Error('Not written yet');
-          missing.status = 404;
-          throw missing;
-        });
-        if (match[2] === 'manifest.mpd') {
-          // The video is representation 0, its init segment written first.
-          if (job.videoCodec == null) {
-            const init = await readFile(`${job.dir}/init-0.m4s`).catch(() =>
-              Buffer.alloc(0)
-            );
-            job.videoCodec = videoCodec(init);
-            // Without it the browser gets FFmpeg's bare "hvc1" and may refuse the video: say
-            // what the init segment holds, once per job.
-            if (job.videoCodec == null && init.length && !job.loggedInit) {
-              job.loggedInit = true;
-              console.warn(
-                JSON.stringify({
-                  level: 'warn',
-                  msg: 'no codec string for the video',
-                  job: job.id,
-                  init: initLayout(init),
-                })
-              );
-            }
-          }
-          const mpd = withFullDuration(
-            withAudioCodec(
-              withVideoCodec(await readFile(file, 'utf8'), job.videoCodec),
-              job.audioCodec
-            ),
-            job.meta.durationMs
-          );
-          res.setHeader('Content-Type', 'application/dash+xml');
-          res.end(mpd);
-          return;
-        }
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Length', size.size);
-        await pipeline(createReadStream(file), res);
-        return;
-      }
-      res.writeHead(404).end();
+      const file = `${job.dir}/${match[2]}`;
+      const size = await stat(file).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+        const missing = Error('Not written yet');
+        missing.status = 404;
+        throw missing;
+      });
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Length', size.size);
+      await pipeline(createReadStream(file), res);
     } catch (error) {
       if (res.headersSent) {
         res.destroy();
         return;
       }
-      res.writeHead(error.status ?? 400, {
+      // Native errors may contain source URLs: pass on only their code.
+      const native = !!(error.code && error.syscall) || !!error.cmd;
+      // Request errors say 400 (`bad`), capacity 503, a failed source 502; anything else is ours.
+      const status = error.status ?? 500;
+      res.writeHead(status, {
         'Content-Type': 'application/json',
         ...(error.retryAfter
           ? { 'Retry-After': String(error.retryAfter) }
           : {}),
       });
-      // Native errors may contain source URLs: pass on only their code.
-      const native = !!(error.code || error.cmd);
       const message = native ? mediaError(error) : error.message;
       if (native)
         console.warn(
@@ -902,37 +1578,16 @@ export function createServer() {
             syscall: error.syscall,
           })
         );
-      res.end(JSON.stringify({ error: message, retryAfter: error.retryAfter }));
+      res.end(
+        JSON.stringify({
+          error: message,
+          retryAfter: error.retryAfter,
+          class: error.class,
+          code: native ? undefined : error.code,
+        })
+      );
     }
   });
-}
-async function sweep() {
-  let bytes = 0;
-  const sizes = new Map();
-  for (const job of [...jobs.values()]) {
-    for (const [viewer, state] of job.viewers)
-      if (Date.now() - state.at > 60000) job.viewers.delete(viewer);
-    if (!job.viewers.size && Date.now() - job.last > 60000) {
-      await drop(job);
-      continue;
-    }
-    const files = await readdir(job.dir).catch(() => []);
-    let size = 0;
-    for (const file of files)
-      size += (await stat(`${job.dir}/${file}`).catch(() => ({ size: 0 })))
-        .size;
-    sizes.set(job, size);
-    bytes += size;
-  }
-  // Evict the least recently used jobs, only until the cache fits again.
-  for (const job of [...sizes.keys()].sort((a, b) => a.last - b.last)) {
-    if (bytes <= maxBytes) break;
-    job.error = 'Segment cache capacity reached';
-    await stop(job);
-    await removeDir(job.dir);
-    bytes -= sizes.get(job);
-  }
-  cacheBytes = bytes;
 }
 /**
  * Empties the cache left by a previous run. The directory itself is kept:
@@ -952,11 +1607,10 @@ if (
   await clearCache(root);
   const server = createServer();
   server.listen(Number(process.env.PORT ?? 3100), '0.0.0.0');
-  const timer = setInterval(() => void sweep().catch(() => {}), 5000);
-  timer.unref();
+
   for (const signal of ['SIGTERM', 'SIGINT'])
     process.on(signal, () => {
-      clearInterval(timer);
+      for (const timer of timers ?? []) clearInterval(timer);
       for (const j of jobs.values()) stop(j);
       server.close(() => process.exit());
       setTimeout(() => process.exit(), 5000).unref();

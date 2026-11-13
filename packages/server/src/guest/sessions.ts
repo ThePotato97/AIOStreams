@@ -4,12 +4,19 @@ export const randomSecret = () => randomBytes(32).toString('base64url');
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 const status = (code: number, message: string) =>
   Object.assign(new Error(message), { status: code });
+/** A playback's stream jobs at the transcoder: video, and audio and subtitles when converted. */
+export interface PlaybackJobs {
+  video: string;
+  audio?: string;
+  subtitle?: string;
+}
 export interface GuestSession {
   token: string;
   party: string;
   member?: string;
   expiresAt: number;
-  job?: string;
+  /** The converted playback's jobs at the transcoder, held by `lease`. */
+  jobs?: PlaybackJobs;
   lease?: string;
   generation?: number;
   source?: string;

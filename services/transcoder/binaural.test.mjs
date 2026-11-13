@@ -468,28 +468,45 @@ const call = async (path, body) => {
   assert.equal(res.status, 200, await res.clone().text());
   return res.json();
 };
-/** Waits for a job to finish, then returns each stream's start time and the audio's shape. */
-async function finished(id) {
-  let job;
+/** A viewer's state once it plays (or failed): the long poll, asked again until then. */
+async function ready(lease) {
+  let after = -1;
+  for (let i = 0; i < 40; i++) {
+    const state = await call(`/viewers/${lease}/state?after=${after}`);
+    if (state.ready || state.failure) return state;
+    after = state.version;
+  }
+  assert.fail('never ready');
+}
+/**
+ * Waits for a viewer's video and audio jobs to finish, then returns each stream's start time and
+ * the audio's shape, from each job's own segments.
+ */
+async function finished(prepared) {
+  const ids = [prepared.jobs.video.id, prepared.jobs.audio.id];
+  let jobs;
   for (let i = 0; i < 600; i++) {
     const health = await call('/health');
-    job = health.jobs.find((j) => j.id === id);
-    if (job?.finished || job?.error) break;
+    jobs = ids.map((id) => health.jobs.find((j) => j.id === id));
+    if (jobs.every((j) => j?.stage === 'finished' || j?.failure)) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  assert.equal(job?.error, undefined);
-  assert.equal(job?.finished, true, 'the conversion finished');
-  const out = `${dir}/worker/${id}`;
-  const files = await readdir(out);
-  const joined = async (rep) => {
-    const chunks = files.filter((f) => f.startsWith(`chunk-${rep}-`)).sort();
-    const path = `${out}/joined-${rep}.mp4`;
+  for (const job of jobs) {
+    assert.equal(job?.failure, null, JSON.stringify(job?.failure));
+    assert.equal(job?.stage, 'finished', 'the conversion finished');
+  }
+  const joined = async (id) => {
+    const out = `${dir}/worker/${id}`;
+    const chunks = (await readdir(out))
+      .filter((f) => f.startsWith('chunk-0-'))
+      .sort();
+    const path = `${out}/joined.mp4`;
     const { writeFile } = await import('node:fs/promises');
     await writeFile(
       path,
       Buffer.concat(
         await Promise.all(
-          [`init-${rep}.m4s`, ...chunks].map((f) => readFile(`${out}/${f}`))
+          ['init-0.m4s', ...chunks].map((f) => readFile(`${out}/${f}`))
         )
       )
     );
@@ -512,14 +529,19 @@ async function finished(id) {
         ])
       ).stdout
     );
-  const video = await probe(await joined(0));
-  const audio = await probe(await joined(1));
+  const video = await probe(await joined(ids[0]));
+  const audio = await probe(await joined(ids[1]));
   return {
     videoStart: Number(video.packets[0].pts_time),
     audioStart: Number(audio.packets[0].pts_time),
     audio: audio.streams[0],
   };
 }
+const manifest = async (lease) => {
+  const res = await fetch(`${base}/viewers/${lease}/manifest.mpd`, { headers });
+  assert.equal(res.status, 200);
+  return res.text();
+};
 
 for (const codec of ['truehd', 'eac3', 'ac3', 'dts'])
   test(
@@ -536,7 +558,10 @@ for (const codec of ['truehd', 'eac3', 'ac3', 'dts'])
           ),
         });
         assert.equal(result.effective.audio.where === 'server-render', true);
-        const { videoStart, audioStart, audio } = await finished(result.id);
+        // one video job and one audio job, in their own streams
+        assert.ok(result.jobs.video.id && result.jobs.audio.id);
+        assert.notEqual(result.jobs.video.id, result.jobs.audio.id);
+        const { videoStart, audioStart, audio } = await finished(result);
         assert.equal(audio.codec_name, 'flac');
         assert.equal(audio.channels, 2);
         assert.equal(Number(audio.sample_rate), 48000);
@@ -564,11 +589,12 @@ test(
     });
     assert.equal(result.effective.audio.pageRenders, true);
     assert.equal(result.effective.audio.where === 'server-render', false);
-    const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
-      headers,
-    });
-    assert.match(await res.text(), /mimeType="audio\/mp4" codecs="mlpa"/);
-    const { audio } = await finished(result.id);
+    await ready(result.lease);
+    assert.match(
+      await manifest(result.lease),
+      /mimeType="audio\/mp4" codecs="mlpa"/
+    );
+    const { audio } = await finished(result);
     // the audio stream is the source's TrueHD, untouched
     assert.equal(audio.codec_name, 'truehd');
     assert.equal(audio.channels, 6);
@@ -589,11 +615,12 @@ test(
     });
     assert.equal(result.effective.audio.pageRenders, true);
     assert.equal(result.effective.audio.where === 'server-render', false);
-    const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
-      headers,
-    });
-    assert.match(await res.text(), /mimeType="audio\/mp4" codecs="ec-3"/);
-    const { audio } = await finished(result.id);
+    await ready(result.lease);
+    assert.match(
+      await manifest(result.lease),
+      /mimeType="audio\/mp4" codecs="ec-3"/
+    );
+    const { audio } = await finished(result);
     assert.equal(audio.codec_name, 'eac3');
     assert.equal(audio.channels, 6);
   }
@@ -617,21 +644,19 @@ for (const [codec, written] of [
       });
       assert.equal(result.effective.audio.pageRenders, true);
       assert.equal(result.effective.audio.where === 'server-render', false);
-      const res = await fetch(`${base}/jobs/${result.id}/manifest.mpd`, {
-        headers,
-      });
+      await ready(result.lease);
       assert.match(
-        await res.text(),
+        await manifest(result.lease),
         new RegExp(`mimeType="audio/mp4" codecs="${written}"`)
       );
-      const { audio } = await finished(result.id);
+      const { audio } = await finished(result);
       assert.equal(audio.codec_name, codec);
       assert.equal(audio.channels, 6);
     }
   );
 
 test(
-  'real chain: a renderer that dies while playing fails the job, and the track converts without it next time',
+  'real chain: a renderer that dies while playing restarts the audio job converting, and the track converts next time',
   { skip: !haveRenderer && 'atmos-render not installed' },
   async () => {
     // Passes on ~8 s of rendered audio, waits until the first segment is out, then fails.
@@ -668,23 +693,32 @@ real.stdout.on('data', (chunk) => {
         request: asked,
       });
       assert.equal(first.effective.audio.where === 'server-render', true);
-      // the job fails, rather than going on with the video alone
+      const audioJob = first.jobs.audio.id;
+      // The audio job starts again converting the track (the renderer's failure, not the
+      // video's: the video job goes on), and the viewer follows what it now makes.
       let job;
-      for (let i = 0; i < 100; i++) {
-        job = (await call('/health')).jobs.find((j) => j.id === first.id);
-        if (job?.error || job?.finished) break;
+      for (let i = 0; i < 200; i++) {
+        job = (await call('/health')).jobs.find((j) => j.id === audioJob);
+        if (job?.stages.some((s) => s.fallback === 'renderer')) break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      assert.equal(job?.error, 'Binaural rendering stopped');
-      // the player reconnects: the same track converts, without binaural rendering
+      assert.ok(
+        job?.stages.some((s) => s.fallback === 'renderer'),
+        'the audio job fell back'
+      );
+      assert.equal(job.effective.audio.where === 'server-render', false);
+      const state = await ready(first.lease);
+      assert.equal(state.failure, null);
+      assert.equal(state.effective.audio.where === 'server-render', false);
+      // The next playback of this track asks for it converted, and shares the job.
       const again = await call('/prepare', {
         input,
         viewer: 'dying-viewer-again-xx',
         request: asked,
       });
-      assert.notEqual(again.id, first.id);
       assert.equal(again.effective.audio.where === 'server-render', false);
-      const { audio } = await finished(again.id);
+      assert.equal(again.jobs.audio.id, audioJob);
+      const { audio } = await finished(again);
       assert.equal(audio.channels, 2);
     } finally {
       if (saved === undefined) delete process.env.ATMOS_RENDER;
@@ -708,8 +742,9 @@ test(
           { positionMs: 1000 }
         ),
       });
-      assert.equal(result.effective.audio.where === 'server-render', false);
-      const { audio } = await finished(result.id);
+      const state = await ready(result.lease);
+      assert.equal(state.effective.audio.where === 'server-render', false);
+      const { audio } = await finished(result);
       // converted as usual: no surround asked for, so stereo AAC
       assert.equal(audio.codec_name, 'aac');
     } finally {

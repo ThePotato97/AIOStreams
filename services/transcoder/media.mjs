@@ -185,7 +185,7 @@ export function demuxArgs(input, meta, spec, offset) {
           '-reconnect_on_network_error',
           '1',
           '-reconnect_delay_max',
-          '30',
+          String(RECONNECT_DELAY_MAX_S),
         ]
       : []),
     '-copyts',
@@ -802,6 +802,259 @@ export function ffmpegArgs(
   return { args, offsetMs: offset * 1000, offset, spec, tonemap, decode };
 }
 
+/** How long FFmpeg keeps reconnecting to a source: past an AIOStreams pod's restart (50 s). */
+export const RECONNECT_DELAY_MAX_S = 120;
+
+/** The DASH output every stream job writes: one stream, its own segments, source timestamps. */
+function dashOutput(kind, output) {
+  return [
+    '-f',
+    'dash',
+    '-dash_segment_type',
+    'mp4',
+    '-seg_duration',
+    '4',
+    '-use_template',
+    '1',
+    '-use_timeline',
+    '1',
+    '-adaptation_sets',
+    `id=0,streams=${kind === 'video' ? 'v' : 'a'}`,
+    // As for the combined command: the source's timestamps in each fragment (tfdt), no sidx.
+    '-format_options',
+    'movflags=+frag_discont+skip_sidx',
+    '-init_seg_name',
+    'init-$RepresentationID$.m4s',
+    '-media_seg_name',
+    'chunk-$RepresentationID$-$Number%05d$.m4s',
+    `${output}/manifest.mpd`,
+  ];
+}
+const reconnect = (input) =>
+  /^https?:/.test(input)
+    ? [
+        '-reconnect',
+        '1',
+        '-reconnect_streamed',
+        '1',
+        '-reconnect_on_network_error',
+        '1',
+        '-reconnect_delay_max',
+        String(RECONNECT_DELAY_MAX_S),
+      ]
+    : [];
+const TIMESTAMPS = [
+  '-copyts',
+  '-avoid_negative_ts',
+  'disabled',
+  '-start_at_zero',
+];
+
+/**
+ * One stream's conversion: a video job (the picture, copied or encoded, with any burned-in
+ * subtitle) or an audio job (the track copied, converted, or rendered binaural by atmos-render on
+ * stdin). Each writes its own DASH stream on the source's timestamps, so the two play together in
+ * one manifest. Built from the same choices as `ffmpegArgs`, the command they replace.
+ *
+ * `options.positionMs` is where the job starts. For a video job, `decode` and `tonemap` as for
+ * `ffmpegArgs`. For a binaural audio job, `audioStart` (seconds): the source timestamp of the
+ * first audio packet, where the rendered audio is placed (`-output_ts_offset`: FFmpeg ignores
+ * `-itsoffset` on a raw pipe, so rendered audio would start at 0). `videoCopied` says the video
+ * job copies the picture: the audio then starts at the same keyframe (`-noaccurate_seek`).
+ */
+export function streamArgs(
+  kind,
+  input,
+  meta,
+  spec,
+  output,
+  encoder = 'cpu',
+  options = {}
+) {
+  const { video, audio, subtitle } = tracksOf(meta, spec);
+  const offset =
+    Math.floor(Math.max(0, options.positionMs ?? 0) / 1000 / 4) * 4;
+  const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y'];
+  if (kind === 'audio') {
+    const binaural = spec.audio.where === 'server-render';
+    const copyAudio =
+      spec.audio.where === 'server-copy' ||
+      spec.audio.where === 'page-original';
+    if (binaural)
+      args.push(
+        '-f',
+        'f32le',
+        '-ar',
+        '48000',
+        '-ch_layout',
+        'stereo',
+        '-i',
+        'pipe:0',
+        '-map',
+        '0:a'
+      );
+    else {
+      args.push('-ss', String(offset));
+      if (options.videoCopied) args.push('-noaccurate_seek');
+      args.push(...reconnect(input), '-i', input, '-map', `0:${audio.index}`);
+    }
+    args.push('-vn', '-c:a', copyAudio ? 'copy' : 'aac');
+    if (copyAudio && audio.codec === 'truehd')
+      args.push('-strict', 'experimental');
+    const convert = spec.audio.convert;
+    const out = convert ?? spec.audio.render;
+    if (convert)
+      args.push(
+        '-af',
+        `aresample=async=1:ochl=${convert.layout}:rematrix_maxval=1`,
+        '-ac',
+        String(convert.channels)
+      );
+    if (out)
+      args.push(
+        ...(out.codec === 'flac'
+          ? ['-c:a', 'flac', '-sample_fmt', 's32']
+          : ['-b:a', out.bitrate])
+      );
+    args.push('-sn', '-map_metadata', '-1');
+    if (binaural)
+      args.push(
+        '-copyts',
+        '-avoid_negative_ts',
+        'disabled',
+        '-output_ts_offset',
+        String(options.audioStart ?? offset)
+      );
+    else args.push(...TIMESTAMPS);
+    args.push(...dashOutput('audio', output));
+    return { args, offsetMs: offset * 1000, offset };
+  }
+  const copyVideo = spec.video.where !== 'server-encode';
+  const burn = spec.subtitle?.where === 'server-burn';
+  const hw = encoder === 'vaapi' && !copyVideo && !burn && !video?.hdr;
+  if (hw)
+    args.push(
+      '-vaapi_device',
+      process.env.VAAPI_DEVICE ?? '/dev/dri/renderD128'
+    );
+  const gpuTonemap =
+    encoder === 'nvidia' &&
+    (options.tonemap ?? 'gpu') === 'gpu' &&
+    !copyVideo &&
+    !!video?.hdr;
+  const gpuDecode =
+    encoder === 'nvidia' &&
+    (options.decode ?? 'gpu') === 'gpu' &&
+    !copyVideo &&
+    !burn &&
+    !video?.rotation &&
+    nvdecDecodes(video) &&
+    (!video?.hdr || gpuTonemap);
+  if (gpuTonemap || gpuDecode)
+    args.push('-init_hw_device', 'cuda=cu:0', '-filter_hw_device', 'cu');
+  if (gpuDecode)
+    args.push(
+      '-hwaccel',
+      'cuda',
+      '-hwaccel_device',
+      'cu',
+      '-hwaccel_output_format',
+      'cuda'
+    );
+  if (!burn) args.push('-ss', String(offset));
+  if (copyVideo) args.push('-noaccurate_seek');
+  args.push(...reconnect(input), '-i', input);
+  const filters = [];
+  if (burn && ['ass', 'ssa'].includes(subtitle.codec)) {
+    const sub = meta.tracks
+      .filter((t) => t.type === 'subtitle')
+      .findIndex((t) => t.index === subtitle.index);
+    filters.push(
+      `subtitles=filename='${input.replace(/[:\\']/g, '\\$&')}':si=${sub}`
+    );
+  }
+  if (burn) args.push('-ss', String(offset));
+  args.push(
+    '-map',
+    burn && !['ass', 'ssa'].includes(subtitle.codec)
+      ? '[vsub]'
+      : `0:${video.index}`
+  );
+  if (copyVideo) {
+    args.push('-c:v', 'copy');
+    if (video?.codec === 'hevc') args.push('-tag:v', 'hvc1');
+  } else {
+    const encode = spec.video.encode;
+    const height = encode.scale;
+    const hdr = encode.tonemap === 'server';
+    if (gpuDecode) {
+      const size = height
+        ? `w=-2:h='trunc(min(${height},ih)/2)*2'`
+        : `w='trunc(iw/2)*2':h='trunc(ih/2)*2'`;
+      const rext = !['yuv420p', 'yuvj420p', 'yuv420p10le'].includes(
+        video.pixelFormat
+      );
+      filters.push(
+        hdr ? hdrParams(video) : SDR_PARAMS,
+        `scale_cuda=${size}${hdr ? (rext ? ':format=p010' : '') : ':format=yuv420p'}`
+      );
+      if (hdr) filters.push(`tonemap_cuda=${TONEMAP}:format=yuv420p`);
+    } else {
+      if (hdr) filters.push(hdrParams(video));
+      if (height) filters.push(`scale=w=-2:h='min(${height},ih)'`);
+      if (hdr)
+        filters.push(
+          gpuTonemap
+            ? `format=p010le,hwupload,tonemap_cuda=${TONEMAP}:format=yuv420p,hwdownload`
+            : `tonemapx=${TONEMAP}:format=yuv420p`
+        );
+      filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2', 'format=yuv420p');
+    }
+    if (hw) filters.push('hwupload');
+    if (burn && !['ass', 'ssa'].includes(subtitle.codec))
+      args.push(
+        '-filter_complex',
+        `[0:${video.index}][0:${subtitle.index}]overlay,${filters.join(',')}[vsub]`
+      );
+    else if (filters.length) args.push('-vf', filters.join(','));
+    const codec = hw
+      ? 'h264_vaapi'
+      : encoder === 'nvidia'
+        ? 'h264_nvenc'
+        : 'libx264';
+    args.push('-c:v', codec);
+    if (codec === 'libx264') args.push('-preset', 'veryfast', '-crf', '20');
+    if (codec === 'h264_nvenc')
+      args.push('-preset', 'p4', '-cq', '20', '-forced-idr', '1');
+    if (codec === 'h264_vaapi' && !height) args.push('-qp', '20');
+    if (encode.maxBitrate) {
+      const bufsize = `${parseInt(encode.maxBitrate, 10) * 2}M`;
+      args.push(
+        '-b:v',
+        encode.maxBitrate,
+        '-maxrate',
+        encode.maxBitrate,
+        '-bufsize',
+        bufsize
+      );
+    }
+    args.push(
+      '-force_key_frames',
+      'expr:gte(t,n_forced*4)',
+      '-sc_threshold',
+      '0'
+    );
+  }
+  args.push('-an', '-sn', '-map_metadata', '-1', ...TIMESTAMPS);
+  args.push(...dashOutput('video', output));
+  const tonemap =
+    video?.hdr && !copyVideo ? (gpuTonemap ? 'gpu' : 'cpu') : null;
+  const decode = copyVideo ? null : gpuDecode ? 'gpu' : 'cpu';
+  // Whether this command uses the GPU, which decides whether a failure falls back to the CPU.
+  const gpu = hw || encoder === 'nvidia' ? !copyVideo : false;
+  return { args, offsetMs: offset * 1000, offset, tonemap, decode, gpu };
+}
+
 /** The boxes in an ISO BMFF byte range: [type, start of content, end]. */
 function* boxes(data, from = 0, to = data.length) {
   let at = from;
@@ -989,4 +1242,92 @@ export function withFullDuration(mpd, durationMs) {
     /mediaPresentationDuration="[^"]*"/,
     `mediaPresentationDuration="PT${(durationMs / 1000).toFixed(3)}S"`
   );
+}
+
+/**
+ * A stream job's segments, from the manifest FFmpeg writes for it (one SegmentTemplate with a
+ * SegmentTimeline): each segment's number, start and duration in the timescale's units.
+ */
+export function parseTimeline(mpd) {
+  const template =
+    /<SegmentTemplate\b([^>]*)>([\s\S]*?)<\/SegmentTemplate>/.exec(mpd);
+  if (!template) return null;
+  const timescale = Number(/timescale="(\d+)"/.exec(template[1])?.[1] ?? 1);
+  let number = Number(/startNumber="(\d+)"/.exec(template[1])?.[1] ?? 1);
+  const segments = [];
+  let t = 0;
+  for (const [, attrs] of template[2].matchAll(/<S\b([^>]*)\/>/g)) {
+    const at = /\bt="(\d+)"/.exec(attrs);
+    if (at) t = Number(at[1]);
+    const d = Number(/\bd="(\d+)"/.exec(attrs)?.[1]);
+    const repeats = Number(/\br="(-?\d+)"/.exec(attrs)?.[1] ?? 0);
+    if (!(d > 0)) continue;
+    for (let i = 0; i <= Math.max(0, repeats); i++) {
+      segments.push({ number: number++, t, d });
+      t += d;
+    }
+  }
+  return { timescale, segments };
+}
+
+/** A SegmentTimeline for `segments`: `t=` on the first and after any gap, equal runs as `r=`. */
+export function timelineOf(segments) {
+  const out = [];
+  let run = null;
+  let next = null;
+  for (const s of segments) {
+    if (run && s.t === next && s.d === run.d) run.r++;
+    else {
+      run = { t: s.t === next ? null : s.t, d: s.d, r: 0 };
+      out.push(run);
+    }
+    next = s.t + s.d;
+  }
+  return out
+    .map(
+      (r) =>
+        `<S${r.t == null ? '' : ` t="${r.t}"`} d="${r.d}"${r.r ? ` r="${r.r}"` : ''} />`
+    )
+    .join('\n\t\t\t\t\t\t');
+}
+
+/**
+ * One viewer's manifest, from its stream jobs' (a video job, and an audio job when the audio is
+ * converted): each job's AdaptationSet, with segments from `firstKept` on (the window's earlier
+ * ones are deleted), URLs under the job's id, and the codec strings filled in. The MPD itself is
+ * a running job's (dynamic, refreshed by the player), or once every job has finished, static
+ * with the source's full duration. A dynamic one says the window: `timeShiftBufferDepth`.
+ *
+ * `parts`: [{ kind: 'video'|'audio', id, mpd, firstKept, codec }].
+ */
+export function composeManifest(parts, { durationMs, windowMs }) {
+  const running = parts.find((p) => /type="dynamic"/.test(p.mpd));
+  const header = (running ?? parts[0]).mpd;
+  let head = header.slice(0, header.search(/<AdaptationSet\b/));
+  if (running) {
+    head = head.replace(/\s+timeShiftBufferDepth="[^"]*"/, '');
+    head = head.replace(
+      /<MPD\b/,
+      `<MPD timeShiftBufferDepth="PT${Math.round(windowMs / 1000)}S"`
+    );
+  } else head = withFullDuration(head, durationMs);
+  const sets = parts.map((part, i) => {
+    let set =
+      /<AdaptationSet\b[\s\S]*?<\/AdaptationSet>/.exec(part.mpd)?.[0] ?? '';
+    const timeline = parseTimeline(part.mpd);
+    const kept = (timeline?.segments ?? []).filter(
+      (s) => s.number >= (part.firstKept ?? 1)
+    );
+    set = set
+      .replace(/(<AdaptationSet\b[^>]*\bid=")[^"]*(")/, `$1${i}$2`)
+      .replace(/(<Representation\b[^>]*\bid=")[^"]*(")/, `$1${i}$2`)
+      .replace(
+        /<SegmentTemplate\b[^>]*>[\s\S]*?<\/SegmentTemplate>/,
+        `<SegmentTemplate timescale="${timeline?.timescale ?? 1}" initialization="${part.id}/init-0.m4s" media="${part.id}/chunk-0-$Number%05d$.m4s" startNumber="${kept[0]?.number ?? part.firstKept ?? 1}">\n\t\t\t\t\t<SegmentTimeline>\n\t\t\t\t\t\t${timelineOf(kept)}\n\t\t\t\t\t</SegmentTimeline>\n\t\t\t\t</SegmentTemplate>`
+      );
+    return part.kind === 'video'
+      ? withVideoCodec(set, part.codec)
+      : withAudioCodec(set, part.codec);
+  });
+  return `${head}${sets.join('\n\t\t')}\n\t</Period>\n</MPD>\n`;
 }

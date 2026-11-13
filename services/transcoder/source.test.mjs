@@ -120,18 +120,28 @@ test("a conversion whose FFmpeg fails keeps the source's state on its job", asyn
       capabilities: { video: true, audio: false, container: false, hdr: true },
     },
   });
-  const answer = await res.text();
-  assert.notEqual(res.status, 200, answer);
+  // Admitted at once; the failure is the job's, and the viewer's state says it.
+  const prepared = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(prepared));
   let job;
-  for (let i = 0; i < 50 && !job?.source; i++) {
-    job = (await (await call('/health')).json()).jobs[0];
-    if (!job?.source) await new Promise((r) => setTimeout(r, 100));
+  for (let i = 0; i < 100 && !job?.failure; i++) {
+    job = (await (await call('/health')).json()).jobs.find(
+      (j) => j.id === prepared.jobs.video.id
+    );
+    if (!job?.failure) await new Promise((r) => setTimeout(r, 100));
   }
-  assert.ok(job, `no job; prepare answered ${res.status} ${answer}`);
-  assert.equal(job.source.state, 'failed');
-  assert.equal(job.source.code, 'source_unreachable');
+  // A source failure: classed as the source's, with AIOStreams' code, and not tried again.
+  assert.equal(job.failure.class, 'source');
+  assert.equal(job.failure.status, 502);
+  assert.equal(job.failure.code, 'source_unreachable');
   assert.equal(job.source.after, 'main');
+  assert.ok(!job.stages.some((s) => s.fallback), 'no restart');
   assert.ok(aio.statusAsked.includes('/party/guest/source/JOBHANDLE/status'));
+  const state = await (
+    await call(`/viewers/${prepared.lease}/state?after=-1`)
+  ).json();
+  assert.equal(state.stage, 'failed');
+  assert.equal(state.failure.class, 'source');
 });
 
 test('an AIOStreams that does not answer gives an unknown state, not an error', async () => {

@@ -54,6 +54,17 @@ const fixture = vi.hoisted(() => ({
   // What the transcoder answers: a full one, released jobs, extraction.
   full: false,
   releases: [] as string[],
+  /** Every lease released, admitted or not. */
+  releasedLeases: [] as string[],
+  /** Each lease the transcoder admitted, and its (video) job. */
+  leases: new Map<string, string>(),
+  /** What each prepare sent besides the request: the playback it replaces, the file. */
+  prepareBodies: [] as { replaces?: string; file?: string }[],
+  /** Whether an admitted playback is still starting, and the states it then goes through. */
+  starting: false,
+  states: [] as Record<string, unknown>[],
+  /** What each subtitle request sent. */
+  subtitleBodies: [] as Record<string, unknown>[],
   /** What the transcoder answers a heartbeat with: 404 once it no longer has the job. */
   touchStatus: 200,
   extraction: [] as { status: number; body: string }[],
@@ -211,6 +222,18 @@ const MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
 \t</Period>
 </MPD>`;
 import { guestSessions } from './sessions.js';
+/** A converted playback's state at the transcoder, once it plays. */
+const readyState = (job: string) => ({
+  version: 1,
+  stage: 'ready',
+  ready: true,
+  mode: fixture.prepared.mode,
+  spec: fixture.prepared.spec,
+  effective: fixture.prepared.effective,
+  startMs: 0,
+  failure: null,
+  jobs: { video: { id: job, stage: 'ready' }, audio: null, subtitle: null },
+});
 const originalFetch = globalThis.fetch;
 let server: Server, base: string;
 const media = {
@@ -379,16 +402,44 @@ function spyFetch() {
       }
       return Response.json(media);
     }
-    if (/\/jobs\/[^/]+\/touch$/.test(url)) {
-      const sent = JSON.parse(String(init?.body ?? '{}')) as {
-        release?: boolean;
-      };
-      if (sent.release) fixture.releases.push(url.split('/').at(-2)!);
-      if (fixture.touchStatus !== 200)
-        return new Response(null, { status: fixture.touchStatus });
-      return Response.json({ ok: true });
+    const viewer =
+      /\/viewers\/([^/]+)\/(touch|release|state|manifest\.mpd)/.exec(url);
+    if (viewer) {
+      const [, lease, what] = viewer;
+      const job = fixture.leases.get(lease);
+      if (what === 'release') {
+        fixture.releasedLeases.push(lease);
+        if (job) fixture.releases.push(job);
+        fixture.leases.delete(lease);
+        return Response.json({ released: !!job });
+      }
+      if (!job)
+        return Response.json({ error: 'Unknown viewer' }, { status: 404 });
+      if (what === 'touch') {
+        if (fixture.touchStatus !== 200)
+          return new Response(null, { status: fixture.touchStatus });
+        return Response.json({ ok: true });
+      }
+      if (what === 'state')
+        return Response.json({
+          ...readyState(job),
+          ...(fixture.states.shift() ?? {}),
+        });
+      // The viewer's manifest: its job's segments, named under the job.
+      return new Response(
+        MANIFEST.replace(
+          'init-$RepresentationID$.m4s',
+          `${job}/init-0.m4s`
+        ).replace(
+          'chunk-$RepresentationID$-$Number%05d$.m4s',
+          `${job}/chunk-0-$Number%05d$.m4s`
+        ),
+        { headers: { 'Content-Type': 'application/dash+xml' } }
+      );
     }
     if (url.endsWith('/subtitle') || url.endsWith('/font')) {
+      if (url.endsWith('/subtitle'))
+        fixture.subtitleBodies.push(JSON.parse(String(init?.body ?? '{}')));
       const next = fixture.extraction.shift() ?? {
         status: 200,
         body: 'WEBVTT',
@@ -399,13 +450,14 @@ function spyFetch() {
       });
     }
     if (url.endsWith('/prepare')) {
-      fixture.prepareCapabilities.push(
-        (
-          JSON.parse(String(init?.body ?? '{}')) as {
-            request?: { capabilities?: Record<string, unknown> };
-          }
-        ).request?.capabilities ?? {}
-      );
+      const sent = JSON.parse(String(init?.body ?? '{}')) as {
+        viewer: string;
+        replaces?: string;
+        file?: string;
+        request?: { capabilities?: Record<string, unknown> };
+      };
+      fixture.prepareCapabilities.push(sent.request?.capabilities ?? {});
+      fixture.prepareBodies.push({ replaces: sent.replaces, file: sent.file });
       if (fixture.full)
         return Response.json(
           {
@@ -418,13 +470,25 @@ function spyFetch() {
         await new Promise<void>((resolve) =>
           fixture.prepares.push({ resolve })
         );
-      return Response.json({ ...fixture.prepared, meta: media });
-    }
-    if (url.endsWith('/manifest.mpd'))
-      return new Response(MANIFEST, {
-        headers: { 'Content-Type': 'application/dash+xml' },
+      if (fixture.prepared.mode === 'direct')
+        return Response.json({ ...fixture.prepared, meta: media });
+      // Admitted at once, and (here) already playing.
+      const job = fixture.prepared.id!;
+      fixture.leases.set(sent.viewer, job);
+      if (sent.replaces && fixture.leases.has(sent.replaces)) {
+        fixture.releases.push(fixture.leases.get(sent.replaces)!);
+        fixture.leases.delete(sent.replaces);
+      }
+      return Response.json({
+        lease: sent.viewer,
+        ...readyState(job),
+        ...(fixture.starting
+          ? { version: 0, stage: 'opening', ready: false }
+          : {}),
+        meta: media,
       });
-    if (/\/jobs\/[^/]+\/chunk-\d+-\d+\.m4s$/.test(url)) {
+    }
+    if (/\/jobs\/[^/]+\/chunk-0-\d+\.m4s$/.test(url)) {
       const signal = init?.signal;
       // Like a real fetch, an abort ends the answer, or the body mid-way.
       if (fixture.segment === 'silent')
@@ -488,6 +552,12 @@ beforeEach(() => {
   fixture.segmentAborts = 0;
   fixture.full = false;
   fixture.releases = [];
+  fixture.leases = new Map();
+  fixture.releasedLeases = [];
+  fixture.prepareBodies = [];
+  fixture.starting = false;
+  fixture.states = [];
+  fixture.subtitleBodies = [];
   fixture.touchStatus = 200;
   fixture.extraction = [];
   fixture.subtitleCodec = 'subrip';
@@ -1138,6 +1208,85 @@ describe('converted media', () => {
     expect(fellBack.spec).toEqual(asked);
     expect(fellBack.effective).toEqual(converted);
   });
+  async function ownPlayback() {
+    const opened = await api('/own/open', 'host-token', {
+      itemId: 'c'.repeat(32),
+      sourceId: 'source',
+    });
+    const { token, revision } = (await opened.json()) as {
+      token: string;
+      revision: string;
+    };
+    const prepare = () =>
+      api('/own/prepare', token, {
+        revision,
+        quality: 'original',
+        positionMs: 0,
+        capabilities: {
+          video: true,
+          audio: false,
+          container: true,
+          hdr: false,
+        },
+      });
+    return { token, prepare };
+  }
+  it('waits for a conversion to play, following its state', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-starting' };
+    fixture.starting = true;
+    fixture.states = [{ version: 1, stage: 'encoding', ready: false }];
+    const { prepare } = await ownPlayback();
+    const res = await prepare();
+    expect(res.status).toBe(200);
+    expect(fixture.states).toHaveLength(0);
+    expect(fixture.releases).toEqual([]);
+  });
+  it('passes a source failure on with its code, and releases the playback', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-failing' };
+    fixture.starting = true;
+    fixture.states = [
+      {
+        version: 1,
+        stage: 'failed',
+        ready: false,
+        failure: {
+          class: 'source',
+          status: 502,
+          code: 'source_unreachable',
+          reason: 'The usenet source could not be read',
+        },
+      },
+    ];
+    const { prepare } = await ownPlayback();
+    const res = await prepare();
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'source_unreachable'
+    );
+    expect(fixture.releases).toEqual(['job-failing']);
+  });
+  it('releases a playback whose admission failed, which the transcoder may hold', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-refused' };
+    fixture.full = true;
+    const { prepare } = await ownPlayback();
+    expect((await prepare()).status).toBe(503);
+    expect(fixture.releasedLeases).toHaveLength(1);
+    expect(fixture.releasedLeases[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+  it('takes over the earlier playback, and names the file it plays', async () => {
+    fixture.prepared = { mode: 'audio', id: 'job-a' };
+    const { prepare } = await ownPlayback();
+    const first = (await (await prepare()).json()) as { lease: string };
+    fixture.prepared = { mode: 'audio', id: 'job-b' };
+    expect((await prepare()).status).toBe(200);
+    const [a, b] = fixture.prepareBodies;
+    expect(a.replaces).toBeUndefined();
+    expect(b.replaces).toBe(first.lease);
+    // The file's identity, not its link: the same for both.
+    expect(a.file).toMatch(/^[0-9a-f]{64}$/);
+    expect(b.file).toBe(a.file);
+    expect(fixture.releases).toContain('job-a');
+  });
   async function ownSegment() {
     fixture.prepared = { mode: 'audio', id: 'job-1' };
     const opened = await api('/own/open', 'host-token', {
@@ -1155,13 +1304,17 @@ describe('converted media', () => {
       capabilities: { video: true, audio: false, container: true, hdr: false },
     });
     const { url } = (await prepared.json()) as { url: string };
-    expect(url).toContain('/media/job-1/manifest.mpd');
-    return new URL(url.replace('manifest.mpd', 'chunk-0-00001.m4s'), base);
+    // This playback's manifest, written for its lease; segments under each job.
+    expect(url).toMatch(/\/media\/v\/[A-Za-z0-9_-]{43}\/manifest\.mpd/);
+    return new URL(
+      url.replace('manifest.mpd', 'job-1/chunk-0-00001.m4s'),
+      base
+    );
   }
   it('serves the manifest with this playback in its segment URLs', async () => {
     const segment = await ownSegment();
     const manifest = new URL(
-      segment.href.replace('chunk-0-00001.m4s', 'manifest.mpd')
+      segment.href.replace('job-1/chunk-0-00001.m4s', 'manifest.mpd')
     );
     const response = await originalFetch(manifest);
     expect(response.status).toBe(200);
@@ -1173,23 +1326,29 @@ describe('converted media', () => {
     const lease = manifest.searchParams.get('lease')!;
     // The player resolves segment URLs from these templates.
     expect(mpd).toContain(
-      `initialization="init-$RepresentationID$.m4s?token=${token}&amp;lease=${lease}"`
+      `initialization="job-1/init-0.m4s?token=${token}&amp;lease=${lease}"`
     );
     expect(mpd).toContain(
-      `media="chunk-$RepresentationID$-$Number%05d$.m4s?token=${token}&amp;lease=${lease}"`
+      `media="job-1/chunk-0-$Number%05d$.m4s?token=${token}&amp;lease=${lease}"`
     );
     // The rest of the manifest is untouched.
     expect(mpd).toContain('codecs="hvc1.2.4.L153.B0"');
     // A URL resolved from the template reaches the segment.
     const resolved = new URL(
-      'chunk-0-00001.m4s?token=' + token + '&lease=' + lease,
+      'job-1/chunk-0-00001.m4s?token=' + token + '&lease=' + lease,
       manifest
     );
     expect((await originalFetch(resolved)).status).toBe(200);
   });
   it('refuses file names the transcoder does not write', async () => {
     const segment = await ownSegment();
-    for (const name of ['index.m3u8', 'init.mp4', '..%2Fsecret', 'chunk-0.m4s'])
+    for (const name of [
+      'index.m3u8',
+      'init.mp4',
+      '..%2Fsecret',
+      'chunk-0.m4s',
+      'chunk-1-00001.m4s',
+    ])
       expect(
         (
           await originalFetch(
@@ -1197,6 +1356,11 @@ describe('converted media', () => {
           )
         ).status
       ).toBe(404);
+    // Another job's segments: not this playback's.
+    expect(
+      (await originalFetch(new URL(segment.href.replace('job-1/', 'job-2/'))))
+        .status
+    ).toBe(410);
   });
   it('adds credentials to segment templates only', () => {
     const mpd = withCredentials(
@@ -1410,6 +1574,11 @@ describe('subtitles for the browser', () => {
     const ready = await get('/subtitle/2');
     expect(ready.status).toBe(200);
     expect(await ready.text()).toContain('WEBVTT');
+    // Kept by the file (not its link), and held by this playback's lease.
+    const sent = fixture.subtitleBodies.at(-1)!;
+    expect(sent.file).toMatch(/^[0-9a-f]{64}$/);
+    expect(sent.viewer).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(fixture.leases.has(sent.viewer as string)).toBe(true);
   });
   it('serves ASS as it is, and its fonts', async () => {
     const get = await playing('ass');

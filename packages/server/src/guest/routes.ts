@@ -41,7 +41,12 @@ import { locate, ensureMemo } from '../routes/jellyfin/playback.js';
 import { itemFromDescriptor } from '../routes/jellyfin/items.js';
 import { guestPartyState } from '../party/relay.js';
 import { ticketExpiry } from '../party/ticket.js';
-import { guestSessions, randomSecret, type GuestSession } from './sessions.js';
+import {
+  guestSessions,
+  randomSecret,
+  type GuestSession,
+  type PlaybackJobs,
+} from './sessions.js';
 import { StaticFiles } from '../utils/static-errors.js';
 
 const router: Router = Router();
@@ -140,7 +145,7 @@ interface OwnSession {
   media: GuestMedia;
   revision: string;
   source: string;
-  job?: string;
+  jobs?: PlaybackJobs;
   lease?: string;
   offsetMs?: number;
   generation?: number;
@@ -217,7 +222,13 @@ async function worker(path: string, body?: unknown): Promise<any> {
       const error = (await res.json().catch(() => ({}))) as {
         error?: string;
         retryAfter?: number;
+        class?: string;
+        code?: string;
       };
+      // The source failed (AIOStreams' reader said so), not the conversion: its own code.
+      const sourceFailed =
+        error.class === 'source' &&
+        (error.code === 'source_failed' || error.code === 'source_unreachable');
       logger.warn(
         { path, status: res.status, error: error.error },
         res.status === 401
@@ -235,7 +246,10 @@ async function worker(path: string, body?: unknown): Promise<any> {
             ? 'transcoder_busy'
             : res.status === 401
               ? 'transcoder_misconfigured'
-              : 'conversion_failed',
+              : sourceFailed
+                ? error.code
+                : 'conversion_failed',
+        class: error.class,
         // A full transcoder says when to come back.
         retryAfter:
           res.status === 503 && typeof error.retryAfter === 'number'
@@ -572,14 +586,84 @@ const playbackSchema = z.object({
   positionMs: z.number().finite().min(0).max(1e9),
   force: z.boolean().optional(),
 });
-async function release(session: { job?: string; lease?: string }) {
-  const job = session.job;
-  session.job = undefined;
-  if (job)
-    await worker(`/jobs/${job}/touch`, {
-      viewer: session.lease,
-      release: true,
-    }).catch(() => {});
+async function release(session: { jobs?: PlaybackJobs; lease?: string }) {
+  const lease = session.lease;
+  const held = session.jobs;
+  session.jobs = undefined;
+  if (held && lease) await releaseLease(lease);
+}
+/** Lets the transcoder know a playback has gone: its jobs no longer count it. */
+async function releaseLease(lease: string) {
+  await worker(`/viewers/${lease}/release`, {}).catch(() => {});
+}
+/** The source file's identity, the same across new links to it: what subtitles are kept by. */
+function fileKey(source: Source): string {
+  return digest([
+    'file',
+    source.record.msid ?? '',
+    source.record.filename ?? '',
+    readers.get(source.handle)?.size() ?? null,
+  ]);
+}
+/** How long /prepare waits for a converted playback to start before the player asks again. */
+const PLAYING_WAIT_MS = 60_000;
+/**
+ * Starts a playback at the transcoder: admitted at once (`replaces`: the playback it takes over,
+ * whose jobs it may use or free), then, until the page follows the state itself, waited on here
+ * until it plays. Any failure, or the wait running out, releases its lease.
+ */
+async function startPlayback(
+  source: Source,
+  lease: string,
+  body: z.infer<typeof playbackSchema>,
+  replaces?: string
+) {
+  let answer;
+  try {
+    answer = await worker('/prepare', {
+      input: input(source),
+      viewer: lease,
+      request: body,
+      replaces,
+      file: fileKey(source),
+    });
+  } catch (error) {
+    // The transcoder may have admitted it before failing to answer (the 75 s timeout).
+    await releaseLease(lease);
+    throw error;
+  }
+  if (answer.mode === 'direct') return answer;
+  try {
+    const started = Date.now();
+    let state = answer;
+    while (!state.ready && !state.failure) {
+      if (Date.now() - started > PLAYING_WAIT_MS)
+        throw Object.assign(
+          new Error('Conversion is still starting; retry shortly'),
+          { status: 503, retryAfter: 2, code: 'transcoder_busy' }
+        );
+      state = await worker(
+        `/viewers/${lease}/state?after=${state.version ?? -1}`
+      );
+    }
+    if (state.failure) {
+      const sourceFailed = state.failure.class === 'source';
+      throw Object.assign(
+        new Error(state.failure.reason ?? 'Conversion failed'),
+        {
+          status: 502,
+          class: state.failure.class,
+          code: sourceFailed
+            ? (state.failure.code ?? 'source_failed')
+            : 'conversion_failed',
+        }
+      );
+    }
+    return { ...answer, ...state };
+  } catch (error) {
+    await releaseLease(lease);
+    throw error;
+  }
 }
 router.use((_req, res, next) => {
   res.set('Cache-Control', 'no-store');
@@ -782,22 +866,11 @@ router.post('/prepare', async (req, res) => {
   const generation = (session.generation ?? 0) + 1;
   session.generation = generation;
   const lease = randomSecret();
-  // The job playing now is released only once its replacement has started (below): released
-  // first, a request that then fails (a source slow to open) or is replaced would leave the
-  // stream still playing with no viewer, which the transcoder drops as soon as any job starts.
-  const result = await worker('/prepare', {
-    input: input(source),
-    viewer: lease,
-    request: body,
-  });
+  // This playback takes over the guest's current one (a seek, a track switch): jobs only that
+  // one holds are free for it, at capacity too.
+  const result = await startPlayback(source, lease, body, session.lease);
   // A seek or episode change can finish while FFmpeg is starting.
-  const drop = async () => {
-    if (result.id)
-      await worker(`/jobs/${result.id}/touch`, {
-        viewer: lease,
-        release: true,
-      }).catch(() => {});
-  };
+  const drop = () => releaseLease(lease);
   let latest: Awaited<ReturnType<typeof current>>;
   try {
     latest = await current(req);
@@ -819,11 +892,11 @@ router.post('/prepare', async (req, res) => {
     // Another prepare from this guest started since (a seek): the newest wins.
     fail(409, 'A newer request replaced this one', 'superseded');
   }
-  // The earlier job's lease goes now (the same job keeps this request's).
-  if (session.job) await release(session);
-  session.job = result.id;
+  // The earlier playback's lease goes now (the transcoder freed it on admission already).
+  if (session.jobs && session.lease !== lease) await release(session);
+  session.jobs = result.jobs ? jobIds(result.jobs) : undefined;
   session.lease = lease;
-  session.offsetMs = result.offsetMs ?? 0;
+  session.offsetMs = 0;
   session.source = source.handle;
   session.revision = source.revision;
   res.json(
@@ -838,7 +911,6 @@ function playbackResponse(
   media: GuestMedia,
   body: z.infer<typeof playbackSchema>,
   result: {
-    id?: string;
     mode: GuestPlayback['mode'];
     offsetMs?: number;
     spec: GuestPlaybackSpec;
@@ -856,7 +928,7 @@ function playbackResponse(
     media,
     mode: result.mode,
     offsetMs: result.offsetMs ?? 0,
-    url: `${base}${result.mode === 'direct' ? 'original' : `${result.id}/manifest.mpd`}${query}`,
+    url: `${base}${result.mode === 'direct' ? 'original' : `v/${lease}/manifest.mpd`}${query}`,
     spec: result.spec,
     effective: result.effective,
   };
@@ -952,25 +1024,22 @@ router.post('/own/prepare', async (req, res) => {
   const generation = (session.generation ?? 0) + 1;
   session.generation = generation;
   const lease = randomSecret();
-  // Released once the new job has started, as for guests (below).
-  const result = await worker('/prepare', {
-    input: input(session.stream),
-    viewer: lease,
-    request: body,
-  });
+  // Takes over the current playback, as for guests.
+  const result = await startPlayback(
+    session.stream,
+    lease,
+    body,
+    session.lease
+  );
   // A later seek can finish first; this one is then out of date.
   if (session.generation !== generation || !owns.has(digest(session.token))) {
-    if (result.id)
-      await worker(`/jobs/${result.id}/touch`, {
-        viewer: lease,
-        release: true,
-      }).catch(() => {});
+    await releaseLease(lease);
     fail(409, 'Playback changed');
   }
-  if (session.job) await release(session);
-  session.job = result.id;
+  if (session.jobs && session.lease !== lease) await release(session);
+  session.jobs = result.jobs ? jobIds(result.jobs) : undefined;
   session.lease = lease;
-  session.offsetMs = result.offsetMs ?? 0;
+  session.offsetMs = 0;
   res.json(
     playbackResponse(
       req,
@@ -997,10 +1066,9 @@ router.post(['/touch', '/own/touch'], async (req, res) => {
     .parse(req.body);
   if (body.lease !== session.lease) return void res.json({ ok: true });
   if (body.release) await release(session);
-  else if (session.job)
+  else if (session.jobs)
     try {
-      await worker(`/jobs/${session.job}/touch`, {
-        viewer: session.lease,
+      await worker(`/viewers/${session.lease}/touch`, {
         positionMs: body.positionMs,
       });
     } catch (error) {
@@ -1009,10 +1077,10 @@ router.post(['/touch', '/own/touch'], async (req, res) => {
       const answered = (error as { workerStatus?: number }).workerStatus;
       if (answered === 404 || answered === 403) {
         logger.info(
-          { job: session.job, status: answered },
+          { status: answered },
           'guest stream gone from the transcoder; the player starts another'
         );
-        session.job = undefined;
+        session.jobs = undefined;
         fail(409, 'This stream ended on the server', 'stream_gone');
       }
       throw error;
@@ -1621,8 +1689,12 @@ router.get('/subtitle/:index', async (req, res) => {
     fail(404, 'Subtitle not found');
   const upstream = await extracted('/subtitle', {
     input: input(source),
+    // Kept by the file, not its link: extracted once across new links to it.
+    file: fileKey(source),
     index,
     format,
+    // Held by this playback's lease, and released with its other jobs.
+    viewer: session.lease,
   });
   if (format === 'vtt')
     return void res
@@ -1670,69 +1742,124 @@ export function withCredentials(mpd: string, token: string, lease: string) {
     )
   );
 }
-router.get('/media/:job/:file', async (req, res) => {
-  const { session, source } = await streaming(req);
-  if (
-    session.revision !== source.revision ||
-    session.job !== req.params.job ||
-    req.query.lease !== session.lease
-  )
-    fail(410, 'Playback changed');
-  const file = String(req.params.file);
-  if (!/^(manifest\.mpd|init-\d+\.m4s|chunk-\d+-\d+\.m4s)$/.test(file))
-    fail(404, 'Media not found');
-  // A viewer that goes away stops the transcoder's answer too.
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  res.on('close', abort);
-  const timer = setTimeout(abort, MEDIA_TIMEOUT.headersMs);
-  let upstream: globalThis.Response;
-  try {
-    upstream = await fetch(transcoder(`/jobs/${session.job}/${file}`), {
-      headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (res.destroyed) return;
-    logger.warn(
-      { file, cause: errorCause(error) },
-      'transcoder did not answer'
-    );
-    fail(504, 'Conversion did not answer');
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!upstream.ok) {
-    logger.warn(
-      { status: upstream.status, file },
-      'transcoder media request failed'
-    );
-    fail(502, 'Conversion is unavailable');
-  }
-  if (file === 'manifest.mpd') {
-    res
-      .type('application/dash+xml')
-      .send(
-        withCredentials(await upstream.text(), session.token, session.lease!)
-      );
-  } else {
-    if (!upstream.body) fail(502, 'Conversion returned no media');
-    res.type('video/mp4');
-    const length = upstream.headers.get('content-length');
-    if (length) res.set('Content-Length', length);
-    const stream = Readable.fromWeb(
-      upstream.body as import('node:stream/web').ReadableStream
-    );
-    const revoke = guestSessions.onRevoke(session.token, () => res.destroy());
-    try {
-      await pipeline(stream, res);
-    } finally {
-      revoke();
-      res.off('close', abort);
+/** A playback's jobs, as the transcoder names them. */
+function jobIds(
+  jobs: Record<string, { id: string } | null | undefined>
+): PlaybackJobs {
+  return {
+    video: jobs.video!.id,
+    ...(jobs.audio ? { audio: jobs.audio.id } : {}),
+    ...(jobs.subtitle ? { subtitle: jobs.subtitle.id } : {}),
+  };
+}
+/**
+ * A converted playback's media: its manifest (written by the transcoder for this lease from its
+ * jobs' segments), and each job's init and media segments, which the manifest names relative to
+ * itself (`<job>/init-0.m4s`). Only this playback's lease and its own jobs.
+ */
+router.get(
+  ['/media/v/:lease/manifest.mpd', '/media/v/:lease/:job/:file'],
+  async (req, res) => {
+    const { session, source } = await streaming(req);
+    const lease = String(req.params.lease);
+    if (
+      session.revision !== source.revision ||
+      session.lease !== lease ||
+      req.query.lease !== lease ||
+      !session.jobs
+    )
+      fail(410, 'Playback changed');
+    const job = req.params.job ? String(req.params.job) : null;
+    const file = job ? String(req.params.file) : 'manifest.mpd';
+    if (job) {
+      if (!Object.values(session.jobs).includes(job))
+        fail(410, 'Playback changed');
+      if (!/^(init-0\.m4s|chunk-0-\d+\.m4s)$/.test(file))
+        fail(404, 'Media not found');
     }
+    const path = job
+      ? `/jobs/${job}/${file}`
+      : `/viewers/${lease}/manifest.mpd`;
+    // A viewer that goes away stops the transcoder's answer too.
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    res.on('close', abort);
+    const timer = setTimeout(abort, MEDIA_TIMEOUT.headersMs);
+    let upstream: globalThis.Response;
+    try {
+      upstream = await fetch(transcoder(path), {
+        headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (res.destroyed) return;
+      logger.warn(
+        { file, cause: errorCause(error) },
+        'transcoder did not answer'
+      );
+      fail(504, 'Conversion did not answer');
+    } finally {
+      clearTimeout(timer);
+    }
+    // Not written yet (404) and left the window (410) are the player's to handle.
+    if (upstream.status === 404 || upstream.status === 410) {
+      res.off('close', abort);
+      fail(
+        upstream.status,
+        upstream.status === 410 ? 'Segment left the window' : 'Not written yet'
+      );
+    }
+    if (!upstream.ok) {
+      logger.warn(
+        { status: upstream.status, file },
+        'transcoder media request failed'
+      );
+      fail(502, 'Conversion is unavailable');
+    }
+    if (!job) {
+      res
+        .type('application/dash+xml')
+        .send(withCredentials(await upstream.text(), session.token, lease));
+    } else {
+      if (!upstream.body) fail(502, 'Conversion returned no media');
+      res.type('video/mp4');
+      const length = upstream.headers.get('content-length');
+      if (length) res.set('Content-Length', length);
+      const stream = Readable.fromWeb(
+        upstream.body as import('node:stream/web').ReadableStream
+      );
+      const revoke = guestSessions.onRevoke(session.token, () => res.destroy());
+      try {
+        await pipeline(stream, res);
+      } finally {
+        revoke();
+      }
+    }
+    res.off('close', abort);
   }
-  res.off('close', abort);
-});
+);
+/**
+ * A playback's state, as the transcoder has it: a long poll (`after`: the version last seen),
+ * for the page to follow its start (the stage), what it plays (the effective spec) and any
+ * failure.
+ */
+router.get(
+  ['/prepare/:lease/state', '/own/prepare/:lease/state'],
+  async (req, res) => {
+    const token = bearer(req);
+    const { session } = token.startsWith('own.')
+      ? { session: ownSession(token) }
+      : await active(req);
+    const lease = String(req.params.lease);
+    if (session.lease !== lease) fail(410, 'Playback changed');
+    const after = Number(req.query.after ?? -1);
+    res.json(
+      await worker(
+        `/viewers/${lease}/state?after=${Number.isFinite(after) ? after : -1}`
+      )
+    );
+  }
+);
 router.all('/media/original', async (req, res) => {
   const { session, source } = await streaming(req);
   if (
