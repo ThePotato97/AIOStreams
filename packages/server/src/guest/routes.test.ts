@@ -96,30 +96,37 @@ vi.mock('../../../core/src/logging/logger.js', () => ({
     debug: () => {},
   }),
 }));
-// The shared store as a server without Redis has it, and sealing as core's (AES-GCM, by the key).
+// The shared store as a server without Redis has it (kept in its database, SQLite here), and
+// sealing as core's (AES-GCM, by the key). A restart stops the store and starts another on the
+// same database, as a new process does.
+interface Store {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  flush(): Promise<void>;
+}
 const shared = vi.hoisted(() => ({
-  backend: undefined as unknown,
-  /** Each kind's records, by name: a restarted server (a fresh import) reads the same ones. */
-  kinds: new Map<string, { live: Map<string, unknown> }>(),
+  backend: undefined as unknown as Store,
+  db: undefined as unknown as {
+    query(text: string): Promise<Record<string, unknown>[]>;
+  },
+  make: undefined as unknown as () => Store,
 }));
 vi.mock('@aiostreams/core', async () => ({
   sharedBackend: await (async () => {
-    const { MemoryBackend } =
-      await import('../../../core/src/sync/store/memory.js');
-    shared.backend ??= new MemoryBackend();
-    const backend = shared.backend as InstanceType<typeof MemoryBackend>;
-    return () => ({
-      records: (kind: { name: string }) => {
-        if (!shared.kinds.has(kind.name))
-          shared.kinds.set(
-            kind.name,
-            backend.records(kind as never) as unknown as {
-              live: Map<string, unknown>;
-            }
-          );
-        return shared.kinds.get(kind.name);
-      },
-    });
+    const { PersistedBackend } =
+      await import('../../../core/src/sync/store/persisted.js');
+    const { SqliteDriver } =
+      await import('../../../core/src/db/driver/sqlite.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const db = new SqliteDriver(
+      `${mkdtempSync(`${tmpdir()}/guest-store-`)}/db.sqlite`
+    );
+    shared.db = db as never;
+    shared.make = () => new PersistedBackend(() => db) as never;
+    shared.backend = shared.make();
+    await shared.backend.start();
+    return () => shared.backend;
   })(),
   encryptString: (value: string) => {
     const { createCipheriv, createHash, randomBytes } = nodeCrypto;
@@ -293,6 +300,8 @@ const MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
 \t</Period>
 </MPD>`;
 import { guestSessions } from './sessions.js';
+/** The guest sessions of the server running now (a restart imports them anew). */
+let liveSessions = guestSessions;
 /** A converted playback's state at the transcoder, once it plays. */
 const readyState = (job: string) => ({
   version: 1,
@@ -365,7 +374,7 @@ async function guest(secret: string) {
   return ((await result.json()) as { token: string }).token as string;
 }
 async function join(token: string) {
-  expect(await guestSessions.claimSeat(token, 'guest')).toBe(true);
+  expect(await liveSessions.claimSeat(token, 'guest')).toBe(true);
   fixture.members.push({ id: 'guest', key: 'g'.repeat(22) });
 }
 let upstream: Server, internalServer: Server;
@@ -1771,13 +1780,9 @@ describe('subtitles for the browser', () => {
 });
 
 describe('through a restart', () => {
-  let before: string;
   const servers: Server[] = [];
-  beforeEach(() => {
-    before = base;
-  });
+  // The process before a restart is gone (its store stopped): later tests use the one running.
   afterEach(() => {
-    base = before;
     fixture.secretKey = 'k'.repeat(64);
   });
   afterAll(() => {
@@ -1785,8 +1790,13 @@ describe('through a restart', () => {
   });
   /** This server restarts: its routes and sessions anew, with nothing in memory, the store kept. */
   async function restart() {
+    // The process goes (its store written out), and a new one starts on the same database.
+    await shared.backend.stop();
+    shared.backend = shared.make();
+    await shared.backend.start();
     vi.resetModules();
     const fresh = await import('./routes.js');
+    liveSessions = (await import('./sessions.js')).guestSessions;
     fresh.CURRENT_WAIT.ms = 1500;
     const routes = fresh.default;
     const app = express();
@@ -1955,9 +1965,13 @@ describe('through a restart', () => {
     const was = await playing();
     await restart();
     await api('/current', was.token);
+    await shared.backend.flush();
     const stored = JSON.stringify(
-      [...shared.kinds.values()].map((k) => [...k.live])
+      await shared.db.query('SELECT * FROM fork_shared_records')
     );
+    // The share, the guest session and the playback are what was written.
+    for (const kind of ['guest-share', 'guest-session'])
+      expect(stored).toContain(`"kind":"${kind}"`);
     for (const secret of [was.token, was.secret, was.handle, 'host-token'])
       expect(stored).not.toContain(secret);
     expect(JSON.stringify(fixture.logs)).not.toContain(was.handle);
