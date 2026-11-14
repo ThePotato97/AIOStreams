@@ -3,10 +3,10 @@ import { t } from '@lingui/core/macro';
 import { Button } from '@aiostreams/ui/button';
 import { toast } from 'sonner';
 import { copyToClipboard } from '@aiostreams/ui/utils/clipboard';
-import { party, useParty } from '../party/party';
-import { usePartyIdentity } from '../party/actions';
-import { playbackNow } from '../playback/session';
-import { partyItemTitle } from '../party/items';
+import { party, useParty } from '@/lib/party/party';
+import { usePartyIdentity } from '@/lib/party/actions';
+import { playbackNow } from '@/lib/playback/session';
+import { partyItemTitle } from '@/lib/party/items';
 import { GuestApi } from './api';
 
 const active = new Set<string>();

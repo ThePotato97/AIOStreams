@@ -4,15 +4,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@lingui/core/macro', () => ({
   t: (s: TemplateStringsArray, ...v: unknown[]) => String.raw({ raw: s }, ...v),
 }));
-vi.mock('../hosts', () => ({ currentHost: () => ({ name: 'browser' }) }));
-vi.mock('../hosts/shell/bridge', () => ({ appBridge: () => null }));
-vi.mock('../connection', () => ({ reached: () => {}, unreachable: () => {} }));
+vi.mock('@/lib/hosts', () => ({ currentHost: () => ({ name: 'browser' }) }));
+vi.mock('@/lib/hosts/shell/bridge', () => ({ appBridge: () => null }));
+vi.mock('@/lib/jellyfin/connection', () => ({
+  reached: () => {},
+  unreachable: () => {},
+}));
 const forgotten = vi.hoisted(() => [] as [string, string][]);
-vi.mock('../cache', () => ({
+vi.mock('@/lib/cache', () => ({
   forgetUser: (base: string, user: string) => forgotten.push([base, user]),
 }));
 const saved = vi.hoisted(() => new Map<string, unknown>());
-vi.mock('../storage', () => ({
+vi.mock('@/lib/storage', () => ({
   storage: {
     get: (key: string) => saved.get(key) ?? null,
     set: (key: string, value: unknown) => saved.set(key, value),
@@ -27,34 +30,22 @@ const fetchSpy = vi.fn();
 vi.stubGlobal('fetch', fetchSpy);
 
 const { GuestJellyfinClient } = await import('./guest-client');
-const { JellyfinError } = await import('../client');
-const { rememberTrack } = await import('./track-memory');
+const { JellyfinError } = await import('@/lib/jellyfin/client');
+const { keepPicks } = await import('./track-memory');
 
 const current: {
   revision: string;
   playlistItemId: string;
   itemId: string;
   title: string;
-  media: {
-    durationMs: number;
-    container: string;
-    bitrate: number;
-    tracks: never[];
-    chapters: never[];
-  };
+  file: { container: string | null; durationMs: number | null };
   artwork?: Record<string, unknown>;
 } = {
   revision: 'rev-1',
   playlistItemId: 'p1',
   itemId: 'item-1',
   title: 'Show S1E2',
-  media: {
-    durationMs: 1_200_000,
-    container: 'matroska',
-    bitrate: 1,
-    tracks: [],
-    chapters: [],
-  },
+  file: { container: 'mkv', durationMs: 1_200_000 },
 };
 const queue = [
   {
@@ -78,7 +69,9 @@ const client = () =>
     () => current as never,
     () => queue,
     async () => (segmentRequests.push(1), hostSegments as never),
-    'https://aio.example/jellyfin'
+    'https://aio.example/jellyfin',
+    (playing) =>
+      `https://aio.example/party/guest/media/original?revision=${playing.revision}`
   );
 
 beforeEach(() => {
@@ -140,6 +133,9 @@ describe("a guest's player page asking its server", () => {
     expect(info.MediaSources).toEqual([
       expect.objectContaining({
         Id: 'rev-1',
+        // The player reads the file directly, and its own subtitles by its container.
+        Path: 'https://aio.example/party/guest/media/original?revision=rev-1',
+        Container: 'mkv',
         RunTimeTicks: 12_000_000_000,
         MediaStreams: [],
       }),
@@ -151,7 +147,7 @@ describe("a guest's player page asking its server", () => {
     expect(other.MediaSources).toEqual([]);
   });
   it("gets the guest's own track languages as its settings", async () => {
-    rememberTrack('audio', 'jpn');
+    keepPicks('aiostreams-web-tracks', { show: 'jpn|' });
     const me = await client().get<{ Configuration: object }>('/Users/Me');
     expect(me.Configuration).toEqual({
       PlayDefaultAudioTrack: false,
@@ -191,13 +187,15 @@ describe("a guest's player page asking its server", () => {
     });
     expect(Items[1].ImageTags).toBeUndefined();
   });
-  it('has no show picks or playback records', async () => {
+  it('keeps the show picks the player writes in this browser, and no playback records', async () => {
     const c = client();
-    expect(
-      await c.get('/DisplayPreferences/aiostreams-web-tracks', {
-        client: 'aiostreams-web-tracks',
-      })
-    ).toEqual({ CustomPrefs: {} });
+    const prefs = '/DisplayPreferences/aiostreams-web-tracks';
+    expect(await c.get(prefs, { client: 'aiostreams-web-tracks' })).toEqual({
+      CustomPrefs: {},
+    });
+    await c.post(prefs, { CustomPrefs: { show: 'jpn|eng' } });
+    expect(await c.get(prefs)).toEqual({ CustomPrefs: { show: 'jpn|eng' } });
+    expect(fetchSpy).not.toHaveBeenCalled();
     await expect(
       c.post('/Sessions/Playing/Progress', {})
     ).resolves.toBeUndefined();

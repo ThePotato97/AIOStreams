@@ -1,20 +1,107 @@
 import { t } from '@lingui/core/macro';
 import type React from 'react';
-import { checkSubtitleFile, readSubtitleFile } from '../subtitles/files';
-import { toast } from 'sonner';
-import { subtitleLine } from '../subtitles/style';
-import { corsFor, setServerBinaural, virtualSurround } from './headphones';
-import { ofType, ownTrackLabel } from './controller';
+import { currentHost } from '@/lib/hosts';
+import type { VideoFit } from '@/lib/settings';
+import {
+  embeddedSubtitles,
+  readsOwnSubtitles,
+  type EmbeddedSubtitles,
+} from '@/lib/subtitles/embedded';
+import type { FileSubtitle } from '@/lib/subtitles/file-subtitle';
+import {
+  checkSubtitleFile,
+  readSubtitleFile,
+  READABLE_SUBTITLE_TYPES,
+} from '@/lib/subtitles/files';
+import { subtitleHeight, subtitleLine } from '@/lib/subtitles/style';
+import { videoSurface, type SubtitleLayer } from '@/lib/subtitles/surface';
 import type {
   EngineFactory,
   EngineFile,
   EngineState,
   EngineTrack,
-  ServerSubtitle,
 } from './engine';
-import { isFullscreen, toggleDocumentFullscreen } from './fullscreen';
+import { ownTrackLabel } from './controller';
+import {
+  canFullscreen,
+  isFullscreen,
+  onFullscreenChange,
+  toggleDocumentFullscreen,
+} from './fullscreen';
+import {
+  drawSubtitle,
+  ownLines,
+  ownSubtitleTrack,
+  ownTrackLost,
+} from './page-subtitles';
 
-const SUBTITLE_TYPES = ['srt', 'vtt', 'ass', 'ssa'];
+/** A cue would show `{\an8}`-style tags as text. */
+const cueText = (text: string) => text.replace(/\{\\[^}]*\}/g, '');
+
+/** HLS through a script, for a browser with no player for it, until the next file. */
+async function openHls(
+  el: HTMLVideoElement,
+  file: EngineFile,
+  current: () => boolean,
+  failed: (error: string) => void
+): Promise<{ destroy(): void } | null> {
+  const { default: Hls } = await import('hls.js/light');
+  if (!current()) return null;
+  if (!Hls.isSupported()) {
+    failed(browserCannot());
+    return null;
+  }
+  const hls = new Hls({
+    startPosition: file.source.IsInfiniteStream ? -1 : file.startMs / 1000,
+  });
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    if (data.fatal)
+      failed(
+        t({
+          comment: 'Follows "Playback failed:"',
+          message: 'the stream stopped loading',
+        })
+      );
+  });
+  hls.loadSource(file.url);
+  hls.attachMedia(el);
+  return hls;
+}
+
+/** Null before the video says. */
+function bufferedAhead(el: HTMLVideoElement): number | null {
+  const { buffered, currentTime } = el;
+  for (let i = 0; i < buffered.length; i++)
+    if (buffered.start(i) <= currentTime && currentTime <= buffered.end(i))
+      return (buffered.end(i) - currentTime) * 1000;
+  return buffered.length ? 0 : null;
+}
+
+const browserCannot = () =>
+  t({
+    comment: 'Follows "Playback failed:"',
+    message:
+      'this browser cannot play this version. Nothing is converted on the server, so try another version, an external player or the desktop app.',
+  });
+
+const HLS = 'application/vnd.apple.mpegurl';
+
+const LINK_TYPES = new Map([
+  ['m3u8', HLS],
+  ['m3u', HLS],
+  ['ts', 'video/mp2t'],
+]);
+
+function linkType(url: string): string | undefined {
+  const name = url.split(/[?#]/)[0].split('/').pop() ?? '';
+  return LINK_TYPES.get(name.slice(name.lastIndexOf('.') + 1).toLowerCase());
+}
+
+/** A failed load from another site hides its cause, but a link's type can be asked about. */
+function declinesLink(el: HTMLVideoElement, url: string): boolean {
+  const type = linkType(url);
+  return !!type && !el.canPlayType(type);
+}
 
 interface AudioTrack {
   enabled: boolean;
@@ -41,21 +128,33 @@ interface FileTrack {
 }
 
 /**
- * The page's own `<video>`. The server's subtitles are `<track>`s, and files
- * the user adds are text tracks after them.
+ * The page's own `<video>`. Styled scripts and a file's own pictures draw in
+ * layers over it; text shows as its text tracks.
  */
 export function videoEngine(
-  video: React.RefObject<HTMLVideoElement | null>,
-  attach?: (video: HTMLVideoElement, url: string) => void
+  video: React.RefObject<HTMLVideoElement | null>
 ): EngineFactory {
   return (emit) => {
     let file: EngineFile | null = null;
     let elements: HTMLTrackElement[] = [];
     let files: FileTrack[] = [];
     let delayMs = 0;
+    let height = subtitleHeight();
+    let fit: VideoFit | undefined;
     let line = subtitleLine();
+    let layer: SubtitleLayer | null = null;
+    let assFailed = false;
+    let embedded: EmbeddedSubtitles | null = null;
+    let ownTracks: FileSubtitle[] = [];
+    // The one shown as text goes through this track; a video's text tracks can't be removed.
+    let ownText: { el: HTMLVideoElement; track: TextTrack } | null = null;
+    let stopOwnText = () => {};
     let detach = () => {};
-    let surround: (() => void) | null = null;
+    let hls: { destroy(): void } | null = null;
+    const dropHls = () => {
+      hls?.destroy();
+      hls = null;
+    };
     // A text track's cues load late, so each one remembers the shift it has.
     const shifted = new WeakMap<TextTrack, number>();
     // Browsers disagree on where a cue the file leaves unplaced goes.
@@ -64,6 +163,7 @@ export function videoEngine(
     const textTracks = () => [
       ...elements.map((e) => e.track),
       ...files.map((f) => f.track),
+      ...(ownText ? [ownText.track] : []),
     ];
     const shiftCues = () => {
       for (const track of textTracks()) {
@@ -78,25 +178,62 @@ export function videoEngine(
         shifted.set(track, delayMs);
       }
     };
+    const placeCue = (vtt: VTTCue) => {
+      if (vtt.line !== 'auto' && !placed.has(vtt)) return;
+      placed.add(vtt);
+      vtt.snapToLines = false;
+      vtt.line = line;
+      vtt.lineAlign = 'end';
+    };
     const placeCues = () => {
-      for (const track of textTracks()) {
-        for (const cue of Array.from(track.cues ?? [])) {
-          const vtt = cue as VTTCue;
-          if (vtt.line !== 'auto' && !placed.has(vtt)) continue;
-          placed.add(vtt);
-          vtt.snapToLines = false;
-          vtt.line = line;
-          vtt.lineAlign = 'end';
-        }
-      }
+      for (const track of textTracks())
+        for (const cue of Array.from(track.cues ?? [])) placeCue(cue as VTTCue);
+    };
+    const hideOwnText = () => {
+      stopOwnText();
+      stopOwnText = () => {};
+      const track = ownText?.track;
+      if (!track) return;
+      // A disabled track has no cues to remove.
+      track.mode = 'hidden';
+      for (const cue of Array.from(track.cues ?? [])) track.removeCue(cue);
+      track.mode = 'disabled';
+      shifted.delete(track);
+    };
+    const showOwnText = (
+      el: HTMLVideoElement,
+      reading: EmbeddedSubtitles,
+      number: number
+    ) => {
+      if (ownText?.el !== el)
+        ownText = { el, track: el.addTextTrack('subtitles') };
+      const { track } = ownText;
+      const stop = reading.read(number, {
+        events(events) {
+          const by = (shifted.get(track) ?? 0) / 1000;
+          for (const event of events) {
+            const text = cueText(event.text);
+            if (!text) continue;
+            const cue = new VTTCue(
+              event.startMs / 1000 + by,
+              event.endMs / 1000 + by,
+              text
+            );
+            track.addCue(cue);
+            placeCue(cue);
+          }
+          shiftCues();
+        },
+        lost: ownTrackLost,
+      });
+      if (!stop) return false;
+      stopOwnText = stop;
+      track.mode = 'showing';
+      return true;
     };
     const listTracks = () => {
       const audio = video.current && audioTracksOf(video.current);
       const audioTracks = audio ? listed(audio) : [];
-      // The server's streams in the same order, where the browser lists as many: their format.
-      const streams = file ? ofType(file.source, 'Audio') : [];
-      const stream = (i: number) =>
-        streams.length === audioTracks.length ? streams[i] : undefined;
       const tracks: EngineTrack[] = [
         ...audioTracks.map((t, i) => ({
           id: String(i),
@@ -104,12 +241,8 @@ export function videoEngine(
           label: ownTrackLabel(t.label, t.language, i + 1),
           lang: t.language,
           title: t.label,
-          codec: stream(i)?.Codec ?? undefined,
-          profile: stream(i)?.Profile ?? undefined,
-          channels: stream(i)?.Channels ?? undefined,
-          layout: stream(i)?.ChannelLayout ?? undefined,
-          default: stream(i)?.IsDefault ?? undefined,
         })),
+        ...ownTracks.map(ownSubtitleTrack),
         ...files.map(({ id, label }) => ({
           id,
           type: 'subtitle' as const,
@@ -127,7 +260,28 @@ export function videoEngine(
     };
     const setSubtitle = (id: string | null) => {
       const at = file?.subtitles.findIndex((s) => s.id === id) ?? -1;
-      const shown = elements[at];
+      layer?.destroy();
+      layer = null;
+      hideOwnText();
+      const el = video.current;
+      const picked = drawSubtitle(
+        id,
+        { own: ownTracks, embedded, server: file?.subtitles ?? [] },
+        el && videoSurface(el),
+        { delayMs, height },
+        {
+          assFailed,
+          onAssFail() {
+            assFailed = true;
+            setSubtitle(id);
+          },
+        }
+      );
+      layer = picked.layer;
+      const own = picked.own;
+      if (!picked.drawn && el && own && embedded && own.kind !== 'pgs')
+        showOwnText(el, embedded, own.number);
+      const shown = layer ? undefined : elements[at];
       if (shown && shown.readyState >= HTMLTrackElement.LOADED) {
         const fresh = shown.cloneNode() as HTMLTrackElement;
         fresh.addEventListener('load', onTrackLoad);
@@ -136,7 +290,8 @@ export function videoEngine(
         elements[at] = fresh;
       }
       elements.forEach((e, i) => {
-        e.track.mode = file?.subtitles[i]?.id === id ? 'showing' : 'disabled';
+        e.track.mode =
+          !layer && file?.subtitles[i]?.id === id ? 'showing' : 'disabled';
       });
       for (const f of files)
         f.track.mode = f.id === id ? 'showing' : 'disabled';
@@ -144,34 +299,59 @@ export function videoEngine(
       set({ subtitle: id });
     };
     const set = (state: EngineState) => emit({ type: 'state', state });
-    const trackFor = (el: HTMLVideoElement, s: ServerSubtitle) => {
-      const track = document.createElement('track');
-      track.kind = 'subtitles';
-      track.src = s.url;
-      track.label = s.label;
-      if (s.lang) track.srclang = s.lang;
-      el.append(track);
-      return track;
-    };
     const removeElements = () => {
       for (const e of elements) e.remove();
       elements = [];
+      layer?.destroy();
+      layer = null;
+      hideOwnText();
+      embedded?.close();
+      embedded = null;
+      ownTracks = [];
     };
 
     return {
-      virtualSurround: typeof AudioContext !== 'undefined',
       load(next) {
         const el = video.current;
         if (!el) return;
         detach();
+        dropHls();
         removeElements();
         file = next;
         delayMs = next.subtitleDelayMs;
-        elements = next.subtitles.map((s) => trackFor(el, s));
+        elements = next.subtitles.map((s) => {
+          const track = document.createElement('track');
+          track.kind = 'subtitles';
+          track.src = s.url;
+          track.label = s.label;
+          if (s.lang) track.srclang = s.lang;
+          el.append(track);
+          return track;
+        });
         if (next.volume) {
           el.volume = Math.min(1, next.volume.volume);
           el.muted = next.volume.muted;
         }
+        if (readsOwnSubtitles(next.source)) {
+          const opened = embeddedSubtitles(
+            next.url,
+            next.headers,
+            currentHost().fetchFile
+          );
+          embedded = opened;
+          void opened.subtitles.then((found) => {
+            if (embedded !== opened) return;
+            ownTracks = found;
+            if (ownTracks.length) listTracks();
+          });
+        }
+        const loaded = () => {
+          const reading = embedded;
+          if (!reading) return emit({ type: 'loaded' });
+          void reading.listed().then(() => {
+            if (embedded === reading) emit({ type: 'loaded' });
+          });
+        };
         // Each read is a new snapshot, whose ranges may have merged since the last.
         const buffered = () => {
           const ranges = el.buffered;
@@ -180,50 +360,49 @@ export function videoEngine(
             endMs: ranges.end(i) * 1000,
           }));
         };
-        // Tried with CORS for a player rendering for headphones: refused, it
-        // plays without, and without sound until the page loads again.
-        let cors = corsFor(el, next.url);
         const handlers: Record<string, () => void> = {
           loadedmetadata: () => {
-            cors = false;
             if (next.startMs) el.currentTime = next.startMs / 1000;
             set({ durationMs: el.duration * 1000 || 0 });
             listTracks();
-            emit({ type: 'loaded' });
+            loaded();
           },
           durationchange: () => set({ durationMs: el.duration * 1000 || 0 }),
-          playing: () => set({ started: true, paused: false, waiting: false }),
+          playing: () => {
+            embedded?.setPlaying(true);
+            set({ started: true, paused: false, waiting: false });
+          },
           pause: () => set({ paused: true }),
           play: () => set({ paused: false }),
           waiting: () => set({ waiting: true }),
           canplay: () => set({ waiting: false }),
-          timeupdate: () =>
+          timeupdate: () => {
+            embedded?.setPosition(el.currentTime * 1000, bufferedAhead(el));
             emit({
               type: 'position',
               positionMs: el.currentTime * 1000,
               buffered: buffered(),
-            }),
+            });
+          },
           progress: () => emit({ type: 'position', buffered: buffered() }),
           volumechange: () => set({ volume: el.volume, muted: el.muted }),
           ratechange: () => set({ rate: el.playbackRate }),
           ended: () => emit({ type: 'ended' }),
           error: () => {
-            if (cors) {
-              cors = false;
-              toast.warning(
-                t`This stream can't play through virtual surround, so it's silent until the page is reloaded.`
-              );
-              el.removeAttribute('crossorigin');
-              el.src = next.url;
-              return;
-            }
+            // A file the browser can't read may still play as the server converts it.
+            if (
+              !next.source.IsInfiniteStream &&
+              el.error?.code !== MediaError.MEDIA_ERR_NETWORK
+            )
+              return emit({
+                type: 'unplayable',
+                reason: browserCannot(),
+                positionMs: el.currentTime ? el.currentTime * 1000 : undefined,
+              });
             emit({
               type: 'failed',
-              error: t({
-                comment: 'Follows "Playback failed:"',
-                message:
-                  'this browser cannot play this version. Nothing is converted on the server, so try another version, an external player or the desktop app.',
-              }),
+              error: browserCannot(),
+              unsupported: declinesLink(el, next.url),
             });
           },
         };
@@ -235,30 +414,39 @@ export function videoEngine(
           audio?.addEventListener(event, listTracks);
         for (const e of elements) e.addEventListener('load', onTrackLoad);
         const onFullscreen = () => set({ fullscreen: isFullscreen() });
-        document.addEventListener('fullscreenchange', onFullscreen);
+        const stopFullscreen = onFullscreenChange(onFullscreen);
         detach = () => {
           for (const [event, handler] of Object.entries(handlers))
             el.removeEventListener(event, handler);
           for (const event of audioEvents)
             audio?.removeEventListener(event, listTracks);
           for (const e of elements) e.removeEventListener('load', onTrackLoad);
-          document.removeEventListener('fullscreenchange', onFullscreen);
+          stopFullscreen();
         };
         onFullscreen();
         el.autoplay = !next.paused;
         if (next.paused) set({ paused: true });
-        setServerBinaural(el, !!next.binaural);
-        surround ??= virtualSurround(el);
-        if (attach) attach(el, next.url);
+        if (linkType(next.url) === HLS && !el.canPlayType(HLS))
+          void openHls(
+            el,
+            next,
+            () => file === next,
+            // One that never loaded, as from a site without CORS, is the link's fault.
+            (error) =>
+              emit({ type: 'failed', error, unsupported: !el.readyState })
+          ).then((opened) => {
+            if (file === next) hls = opened;
+            else opened?.destroy();
+          });
         else el.src = next.url;
       },
       // Browsers keep a closed player in their media controls until its video drops the stream.
       close() {
         detach();
         detach = () => {};
-        surround?.();
-        surround = null;
+        dropHls();
         removeElements();
+        file = null;
         const el = video.current;
         if (!el) return;
         el.pause();
@@ -293,26 +481,32 @@ export function videoEngine(
       setSubtitleDelay(ms) {
         delayMs = ms;
         shiftCues();
+        layer?.setDelay(ms);
       },
-      setStyle({ subtitleStyle, height }) {
-        line = subtitleLine(subtitleStyle, height);
+      setStyle({ subtitleStyle, fit: nextFit, height: next }) {
+        height = next;
+        line = subtitleLine(subtitleStyle, next);
         placeCues();
+        layer?.setHeight(next);
+        if (nextFit !== fit) layer?.place();
+        fit = nextFit;
       },
-      toggleFullscreen: toggleDocumentFullscreen,
+      toggleFullscreen: canFullscreen() ? toggleDocumentFullscreen : undefined,
+      ...(document.pictureInPictureEnabled && {
+        togglePictureInPicture() {
+          const el = video.current;
+          if (!el) return;
+          if (document.pictureInPictureElement === el)
+            void document.exitPictureInPicture().catch(() => {});
+          else void el.requestPictureInPicture().catch(() => {});
+        },
+      }),
       ownText: (id) => files.find((f) => f.id === id)?.text ?? null,
-      // A server subtitle that became ready after the file opened.
-      addServerSubtitle(added) {
-        const el = video.current;
-        if (!el || !file) return;
-        const track = trackFor(el, added);
-        track.addEventListener('load', onTrackLoad);
-        elements = [...elements, track];
-        file = { ...file, subtitles: [...file.subtitles, added] };
-      },
+      ...ownLines(() => embedded),
       subtitleFiles: {
-        types: SUBTITLE_TYPES,
+        types: READABLE_SUBTITLE_TYPES,
         add: async (added) => {
-          checkSubtitleFile(added, SUBTITLE_TYPES);
+          checkSubtitleFile(added, READABLE_SUBTITLE_TYPES);
           const { text, cues } = await readSubtitleFile(added);
           const el = video.current;
           if (!el) return;

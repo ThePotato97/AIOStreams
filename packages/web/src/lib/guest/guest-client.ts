@@ -4,15 +4,24 @@
  * are answered here, from what the guest routes and the party already give the guest: the title
  * playing (`/current`, with the host's artwork) and the party's queue. The host's segments come
  * from the guest routes (`/segments`); nothing else is sent. Images load from the host's image
- * route, which reads the image tags without a session.
+ * route, which reads the image tags without a session. The track picks the player keeps per show
+ * are kept in this browser.
  */
 import { t } from '@lingui/core/macro';
-import { JellyfinClient, JellyfinError, type Query } from '../client';
-import { forgetUser } from '../cache';
-import type { PartyItem } from '../party/items';
-import type { BaseItemDto, MediaSegmentDto, SourceInfo } from '../types';
+import {
+  JellyfinClient,
+  JellyfinError,
+  type Query,
+} from '@/lib/jellyfin/client';
+import { forgetUser } from '@/lib/cache';
+import type { PartyItem } from '@/lib/party/items';
+import type {
+  BaseItemDto,
+  MediaSegmentDto,
+  SourceInfo,
+} from '@/lib/jellyfin/types';
 import type { GuestCurrent } from './api';
-import { guestPrefs } from './track-memory';
+import { guestPrefs, keptPicks, keepPicks } from './track-memory';
 
 /** The user id the guest's session has, which keys its queries. */
 export const GUEST_USER_ID = 'guest';
@@ -34,7 +43,9 @@ export class GuestJellyfinClient extends JellyfinClient {
     /** The host's segments for the title playing, from the guest routes. */
     private readonly segments: () => Promise<{ Items: MediaSegmentDto[] }>,
     /** Where the host's server serves item images: its Jellyfin routes. */
-    private readonly images: string
+    private readonly images: string,
+    /** The address the player reads the title's file from. */
+    private readonly mediaUrl: (current: GuestCurrent) => string
   ) {
     super(base);
     // Answered here and from nothing kept: a saved copy would open the next file on old answers.
@@ -59,17 +70,22 @@ export class GuestJellyfinClient extends JellyfinClient {
     return queued ? itemOf(queued.id, queued) : null;
   }
 
-  /** The version the guest plays: the party's file, as the guest routes probed it. */
+  /**
+   * The version the guest plays: the party's file, which the player reads directly. Its container
+   * lets the player draw the file's own subtitles; the player lists its tracks itself.
+   */
   source(): SourceInfo | null {
     const current = this.playing();
     if (!current) return null;
+    const { container, durationMs } = current.file;
     return {
       Id: current.revision,
       Type: 'Default',
       Protocol: 'Http',
       Name: current.title,
-      RunTimeTicks: current.media.durationMs * TICKS_PER_MS,
-      // The guest engine lists the file's tracks and draws its subtitles itself.
+      Path: this.mediaUrl(current),
+      ...(container ? { Container: container } : {}),
+      ...(durationMs ? { RunTimeTicks: durationMs * TICKS_PER_MS } : {}),
       MediaStreams: [],
     } as SourceInfo;
   }
@@ -79,13 +95,14 @@ export class GuestJellyfinClient extends JellyfinClient {
     path: string,
     init: { query?: Query; body?: unknown } = {}
   ): Promise<T> {
-    return (await this.answer(method, path, init.query ?? {})) as T;
+    return (await this.answer(method, path, init.query ?? {}, init.body)) as T;
   }
 
   private async answer(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
-    query: Query
+    query: Query,
+    body?: unknown
   ): Promise<unknown> {
     const none = { Items: [], TotalRecordCount: 0 };
     if (method === 'GET' && path === '/Items') {
@@ -110,8 +127,15 @@ export class GuestJellyfinClient extends JellyfinClient {
     }
     if (method === 'GET' && path === '/Users/Me')
       return { Id: GUEST_USER_ID, Configuration: guestPrefs() };
-    if (path.startsWith('/DisplayPreferences/'))
-      return method === 'GET' ? { CustomPrefs: {} } : undefined;
+    if (path.startsWith('/DisplayPreferences/')) {
+      const id = path.slice('/DisplayPreferences/'.length);
+      if (method === 'GET') return { CustomPrefs: keptPicks(id) };
+      keepPicks(
+        id,
+        (body as { CustomPrefs?: Record<string, string> })?.CustomPrefs ?? {}
+      );
+      return undefined;
+    }
     if (method === 'GET' && path.startsWith('/MediaSegments/')) {
       // Only the title playing has the host's; another's would be the next title's own.
       const id = path.slice('/MediaSegments/'.length);
@@ -139,7 +163,7 @@ function itemOf(
   entry: PartyItem | undefined,
   current?: GuestCurrent
 ): BaseItemDto {
-  const runtimeMs = current?.media.durationMs ?? entry?.runtimeMs;
+  const runtimeMs = current?.file.durationMs ?? entry?.runtimeMs;
   const episode = entry?.type === 'Episode';
   return {
     Id: id,

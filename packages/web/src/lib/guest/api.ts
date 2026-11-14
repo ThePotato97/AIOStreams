@@ -1,19 +1,14 @@
-import type {
-  GuestArtwork,
-  GuestMedia,
-  GuestPlayback,
-  GuestPlaybackRequest,
-  GuestPlaybackState,
-} from '@aiostreams/core';
+import type { GuestArtwork, GuestFile } from '@aiostreams/core';
 export interface GuestCurrent {
   revision: string;
   playlistItemId: string;
   itemId: string;
   title: string;
-  media: GuestMedia;
+  /** The file, as far as the server knows it; the player reads its tracks itself. */
+  file: GuestFile;
   /** The host's artwork for it, where the host's server has the item. */
   artwork?: GuestArtwork;
-  /** Where the title is (the long poll): resolved and probed, being resolved, or failed. */
+  /** Where the title is (the long poll): resolved and opened, being resolved, or failed. */
   state?: 'ready' | 'resolving' | 'failed';
   /** What to send back as `after`, to wait for a change. */
   token?: string;
@@ -24,8 +19,7 @@ export interface GuestCurrent {
 export class GuestApi {
   constructor(
     readonly base: string,
-    // Set later for a user's own playback, once the server opens it.
-    public token: string
+    readonly token: string
   ) {}
   async request<T>(
     path: string,
@@ -57,7 +51,7 @@ export class GuestApi {
         {
           status: res.status,
           retryAfter: data.retryAfter as number | undefined,
-          // Why, where the server knows: transcoder_unreachable, transcoder_busy, ...
+          // Why, where the server knows: source_failed, session_restarted, ...
           code: typeof data.code === 'string' ? data.code : undefined,
         }
       );
@@ -66,7 +60,7 @@ export class GuestApi {
   /**
    * The title the party plays. With `after` (the token of the last answer), a long poll: answered
    * when it changes (a title, a version, a failure, a recovery), within 25 s. A title still being
-   * resolved answers `resolving` at once, without its media.
+   * resolved answers `resolving` at once, without its file.
    */
   current(signal?: AbortSignal, after?: string) {
     return this.request<GuestCurrent>(
@@ -77,16 +71,13 @@ export class GuestApi {
       signal
     );
   }
-  prepare(body: GuestPlaybackRequest, signal?: AbortSignal) {
-    return this.request<GuestPlayback>('/prepare', body, signal);
-  }
-  /** A converted playback's state, once it changes past `after` (a long poll, 25 s at most). */
-  state(lease: string, after: number, signal?: AbortSignal) {
-    return this.request<GuestPlaybackState>(
-      `/prepare/${lease}/state?after=${after}`,
-      undefined,
-      signal
-    );
+  /**
+   * The file the party plays, for the player to read directly: the guest's session and the
+   * revision it plays, which the server checks on every read (a new title or version ends it).
+   */
+  mediaUrl(revision: string): string {
+    const query = new URLSearchParams({ token: this.token, revision });
+    return `${this.base}/media/original?${query}`;
   }
 }
 export function guestBase() {

@@ -1,5 +1,4 @@
 import { Readable } from 'node:stream';
-import { offsetWebVtt } from './subtitles.js';
 import { Router, type Request, type Response } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
@@ -16,9 +15,7 @@ import {
   segmentsFor,
   type GuestArtwork,
   type GuestSegment,
-  type GuestMedia,
-  type GuestPlayback,
-  type GuestPlaybackSpec,
+  type GuestFile,
   type MediaSourceRecord,
   type PlaybackMemo,
   isMemoFresh,
@@ -44,13 +41,7 @@ import { locate, ensureMemo } from '../routes/jellyfin/playback.js';
 import { itemFromDescriptor } from '../routes/jellyfin/items.js';
 import { guestPartyState } from '../party/relay.js';
 import { ticketExpiry } from '../party/ticket.js';
-import {
-  guestSessions,
-  fromBeforeRestart,
-  randomSecret,
-  type PlaybackJobs,
-  type SavedGuestSession,
-} from './sessions.js';
+import { guestSessions, fromBeforeRestart, randomSecret } from './sessions.js';
 import { StaticFiles } from '../utils/static-errors.js';
 
 const router: Router = Router();
@@ -100,7 +91,7 @@ interface SavedShare {
   ownerToken: string;
   revisions: Record<string, SavedRevision>;
 }
-/** A share as this process holds it: unsealed, with what it resolved and probed here. */
+/** A share as this process holds it: unsealed, with what it resolved and opened here. */
 interface Binding {
   party: string;
   ownerToken: string;
@@ -109,7 +100,7 @@ interface Binding {
   expiresAt: number;
   entries: Map<string, Entry>;
   sources: Map<string, Promise<Source>>;
-  /** Recent resolution or probe failures, so polling guests don't retry them. */
+  /** Recent failures to resolve or open a source, so polling guests don't retry them. */
   failures: Map<string, { error: unknown; until: number; count: number }>;
   /** When `ownerToken` was last confirmed to belong to a signed-in host. */
   ownerCheckedAt: number;
@@ -126,16 +117,17 @@ interface Source {
   itemId: string;
   title: string;
   record: MediaSourceRecord;
-  media?: Promise<GuestMedia>;
-  /** Probed: its media are known, and /current answers with them at once. */
-  probed?: boolean;
+  /** The shared reader's first open of the file, which /current waits for once. */
+  opened?: Promise<void>;
+  /** Opened: /current answers at once. */
+  ready?: boolean;
   /** The host's item, found under the host's configuration: its artwork and segments. */
   host?: Located;
   artwork?: Promise<GuestArtwork>;
   segments?: Promise<GuestSegment[]>;
   /**
    * Where the source's redirects lead, followed once. Each range request of
-   * a probe or conversion goes here directly: going back through the
+   * the shared reader goes here directly: going back through the
    * playback route re-runs its failover chain, which can pick another file.
    */
   pinned?: { url: URL; headers: Record<string, string> };
@@ -256,63 +248,6 @@ async function endShare(party: string): Promise<void> {
   await shareStore.update(party, (_s, tx) => tx.drop());
   await guestSessions.revokeParty(party);
 }
-/** Marks a source opened by a signed-in user for their own playback. */
-const OWN = 'own';
-const OWN_TTL_MS = 6 * 60 * 60 * 1000;
-const OWN_PER_USER = 4;
-/**
- * A signed-in user's own converted playback: the web app uses it when the
- * browser can't decode a source's audio. Shaped like a guest session so the
- * media routes serve both.
- */
-interface SavedOwn {
-  uuid: string;
-  expiresAt: number;
-  createdAt: number;
-  revision: string;
-  itemId: string;
-  /** The file it plays: what it reopens after a restart, and only that one. */
-  msid: string;
-  filename?: string;
-  /** The key the sealed values were sealed with: another reads as gone. */
-  keyId: string;
-  /** The user's token and the source's handle, sealed with the server's key. */
-  userToken: string;
-  handle: string;
-  /** The handle's digest: what the source route finds it by. */
-  ref: string;
-  jobs?: PlaybackJobs;
-  lease?: string;
-  generation?: number;
-  offsetMs?: number;
-}
-interface OwnSession extends SavedOwn {
-  token: string;
-  stream: Source;
-  media: GuestMedia;
-  /** The playing source's handle digest, as guest sessions name it. */
-  sourceRef: string;
-  /** When this process last read it from the store, and last wrote its expiry. */
-  readAt: number;
-  touchedAt: number;
-}
-/** Own tokens minted since own playback was kept in the store; older ones were in memory only. */
-const OWN_PREFIX = 'own.v2.';
-/** How often a playback's sliding expiry is written back to the store. */
-const OWN_TOUCH_MS = 10 * 60_000;
-const ownStore = sharedBackend().records<SavedOwn>({
-  name: 'guest-own',
-  ownCap: true,
-  save: (s) => s,
-  load: (s) => s,
-  due: (s) => s.expiresAt,
-  tags: (s) => [`user:${s.uuid}`],
-  refs: (s) => [`src:${s.ref}`],
-  receive: () => {},
-  lapse: (id) => dropOwn(id),
-});
-/** Own playbacks this process has read, with their source and media. */
-const owns = new Map<string, OwnSession>();
 const sources = new Map<string, Source>();
 /** Each source's shared reader: every read of a source goes through it. */
 const readers = new Map<string, SourceReader>();
@@ -345,12 +280,7 @@ const digest = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const bearer = (req: Request) =>
   req.get('authorization')?.replace(/^Bearer /i, '') ?? '';
-/** A transcoder is configured: what both guest and own playback need. */
-const transcoderReady = () =>
-  !!config.party.transcoderUrl &&
-  (config.party.transcoderSecret?.length ?? 0) >= 32 &&
-  !!config.party.internalUrl;
-const enabled = () => config.party.guestStreaming && transcoderReady();
+const enabled = () => config.party.guestStreaming;
 function fail(status: number, message: string, code?: string): never {
   throw Object.assign(new Error(message), { status, code });
 }
@@ -363,82 +293,6 @@ function limit(req: Request) {
     for (const [k] of requests)
       if (!k.endsWith(`:${Math.floor(Date.now() / 60000)}`)) requests.delete(k);
 }
-const transcoder = (path: string) =>
-  `${config.party.transcoderUrl!.replace(/\/+$/, '')}${path}`;
-/** How soon a player asks again while the transcoder is unreachable. */
-const TRANSCODER_RETRY_S = 5;
-async function worker(path: string, body?: unknown): Promise<any> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 75000);
-  try {
-    const res = await fetch(transcoder(path), {
-      method: body === undefined ? 'GET' : 'POST',
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${config.party.transcoderSecret}`,
-        'Content-Type': 'application/json',
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const error = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        retryAfter?: number;
-        class?: string;
-        code?: string;
-      };
-      // The source failed (AIOStreams' reader said so), not the conversion: its own code.
-      const sourceFailed =
-        error.class === 'source' &&
-        (error.code === 'source_failed' || error.code === 'source_unreachable');
-      logger.warn(
-        { path, status: res.status, error: error.error },
-        res.status === 401
-          ? 'transcoder rejected the shared secret'
-          : 'transcoder request failed'
-      );
-      throw Object.assign(new Error(error.error ?? 'Transcoder unavailable'), {
-        status: res.status === 503 ? 503 : 502,
-        // What the transcoder answered, for callers that read it (a job it no longer has).
-        workerStatus: res.status,
-        // The transcoder's own condition (busy, misconfigured), or a conversion
-        // that failed, which can be the file's.
-        code:
-          res.status === 503
-            ? 'transcoder_busy'
-            : res.status === 401
-              ? 'transcoder_misconfigured'
-              : sourceFailed
-                ? error.code
-                : 'conversion_failed',
-        class: error.class,
-        // A full transcoder says when to come back.
-        retryAfter:
-          res.status === 503 && typeof error.retryAfter === 'number'
-            ? error.retryAfter
-            : undefined,
-      });
-    }
-    return await res.json();
-  } catch (error) {
-    if (typeof (error as any).status === 'number') throw error;
-    logger.warn(
-      { path, cause: errorCause(error), url: config.party.transcoderUrl },
-      'transcoder unreachable'
-    );
-    // Usually restarting (a new image, a crash): the player waits and asks again.
-    throw Object.assign(new Error("The transcoder isn't reachable"), {
-      status: 503,
-      retryAfter: TRANSCODER_RETRY_S,
-      code: 'transcoder_unreachable',
-      unreachable: true,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-const input = (s: Source) =>
-  `${config.party.internalUrl!.replace(/\/$/, '')}/party/guest/source/${s.handle}`;
 async function host(req: Request, proof: z.infer<typeof hostSchema>) {
   const token = bearer(req);
   const [user, party] = await Promise.all([
@@ -605,22 +459,29 @@ async function current(req: Request) {
   if (failure && failure.until > Date.now()) throw failure.error;
   const pending = sourceFor(req, state.binding, playing, entry);
   const source = await pending;
-  // Concurrent polls share one probe.
-  const probe = (source.media ??= probeMedia(source));
-  let media: GuestMedia;
+  // The reader opens the file once (shared): a link that's gone or a placeholder fails here,
+  // as the long poll's `failed`, rather than in the guest's player.
+  const opened = (source.opened ??= readerFor(source).describe());
   try {
-    media = await probe;
+    await opened;
   } catch (error) {
-    if (source.media === probe) {
-      source.media = undefined;
+    if (source.opened === opened) {
+      source.opened = undefined;
       remember(state.binding, revision, error);
     }
     throw error;
   }
-  source.probed = true;
+  source.ready = true;
   // Working again: the next failure starts from the shortest wait.
   state.binding.failures.delete(revision);
-  return { ...state, source, media };
+  return { ...state, source, file: fileOf(source) };
+}
+/** What the page is told of the file: no probe; the player reads its tracks itself. */
+function fileOf(source: Source): GuestFile {
+  return {
+    container: source.record.container || null,
+    durationMs: source.record.durationMs ?? null,
+  };
 }
 /**
  * Remember a failure for a while: every guest polls /current every couple of seconds, and each
@@ -658,7 +519,7 @@ function remember(binding: Binding, revision: string, error: unknown): void {
       if (f.until <= Date.now()) binding.failures.delete(k);
 }
 /**
- * The source a revision plays, resolved once for every guest, the page and the transcoder alike.
+ * The source a revision plays, resolved once for every guest and the page alike.
  * A revision the share kept a source for (before a restart) reopens as that source: its handle,
  * and its file. Otherwise, or if that file is gone, a new one, which the share then keeps.
  */
@@ -764,7 +625,7 @@ function revisionOf(
 /** Each resolved source, by the resolve that found it: whether one has finished, without waiting. */
 const settled = new WeakMap<Promise<Source>, Source>();
 /**
- * Where the title playing is, without waiting for it: `ready` (resolved and probed), `resolving`,
+ * Where the title playing is, without waiting for it: `ready` (resolved and opened), `resolving`,
  * or `failed` (backing off after a failure). Null if there is none to play yet.
  */
 function peek(state: Awaited<ReturnType<typeof active>>) {
@@ -778,337 +639,15 @@ function peek(state: Awaited<ReturnType<typeof active>>) {
   const now: 'ready' | 'resolving' | 'failed' =
     failure && failure.until > Date.now()
       ? 'failed'
-      : source?.probed
+      : source?.ready
         ? 'ready'
         : 'resolving';
   return { revision, playing, entry, state: now, failure };
 }
 /** How long /current waits for the title to change before answering what it is. */
 export const CURRENT_WAIT = { ms: 25_000 };
-/** A handle's digest: what stored records name a source by, never the handle itself. */
-const refOf = (handle: string) => digest(['handle', handle]);
-/** Sources being rebuilt after a restart, one rebuild per handle. */
-const rebuilding = new Map<string, Promise<Source | null>>();
-function once(
-  handle: string,
-  build: () => Promise<Source | null>
-): Promise<Source | null> {
-  let pending = rebuilding.get(handle);
-  if (!pending) {
-    pending = build().finally(() => rebuilding.delete(handle));
-    rebuilding.set(handle, pending);
-  }
-  return pending;
-}
-/** A not-found that means the playback is gone (a version missing, another file), not a failure. */
-const gone = (error: unknown) =>
-  [404, 409, 410].includes((error as { status?: number }).status ?? 0);
-/**
- * A source this process doesn't have (it restarted, or another process made it): rebuilt from
- * the record that keeps its handle, if that record still plays it. Null if none does.
- */
-function rebuild(handle: string, req: Request): Promise<Source | null> {
-  const known = sources.get(handle);
-  if (known) return Promise.resolve(known);
-  return once(handle, async () => {
-    const ref = refOf(handle);
-    const party = await shareStore.find(`src:${ref}`);
-    if (party) return rebuildShared(req, party, handle, ref);
-    const own = await ownStore.find(`src:${ref}`);
-    const saved = own ? await ownStore.get(own) : undefined;
-    if (!saved || saved.ref !== ref || saved.expiresAt <= Date.now())
-      return null;
-    return buildOwnStream(req, saved, handle);
-  });
-}
-/**
- * A share's source: only the revision the party plays now, while the share is live and its host
- * signed in. It's the page's own resolve (`sourceFor`), so the page and FFmpeg share it.
- */
-async function rebuildShared(
-  req: Request,
-  party: string,
-  handle: string,
-  ref: string
-): Promise<Source | null> {
-  if (!enabled()) return null;
-  const binding = await loadBinding(party);
-  const state = binding && (await guestPartyState(party));
-  if (!binding || !state || !(await ownerSignedIn(binding))) return null;
-  const playing = state.playing;
-  const entry = playing && binding.entries.get(playing.ref);
-  if (!playing || !entry) return null;
-  const revision = revisionOf(playing, entry);
-  if (binding.revisions[revision]?.ref !== ref) return null;
-  try {
-    const source = await sourceFor(req, binding, playing, entry);
-    return source.handle === handle ? source : null;
-  } catch (error) {
-    if (gone(error)) return null;
-    throw error;
-  }
-}
-/** An own playback's source, from its record: the same file, for the same signed-in user. */
-async function buildOwnStream(
-  req: Request,
-  saved: SavedOwn,
-  handle: string
-): Promise<Source | null> {
-  const userToken = saved.keyId === keyId() && unseal(saved.userToken);
-  if (!userToken || unseal(saved.handle) !== handle) return null;
-  const user = await userForToken(userToken);
-  if (!user || user.uuid !== saved.uuid) return null;
-  const entry = {
-    itemId: saved.itemId,
-    sourceId: saved.msid,
-    filename: saved.filename,
-  };
-  let record: MediaSourceRecord;
-  try {
-    record = await lookupRecord(req, user, entry, undefined, 'own');
-  } catch (error) {
-    if (gone(error)) return null;
-    throw error;
-  }
-  if (digest([OWN, user.uuid, saved.itemId, record.msid]) !== saved.revision)
-    return null;
-  return (
-    sources.get(handle) ??
-    ownSource(req, user, entry, record, handle, saved.revision)
-  );
-}
-/** An own playback's source, made known to the source route. */
-function ownSource(
-  req: Request,
-  user: TokenUser,
-  entry: { itemId: string; sourceId?: string; filename?: string },
-  record: MediaSourceRecord,
-  handle: string,
-  revision: string
-): Source {
-  const stream: Source = {
-    handle,
-    party: OWN,
-    revision,
-    playlistItemId: '',
-    itemId: entry.itemId,
-    title: '',
-    record,
-    // The user's configuration again, for a fresh list of this version (its credentials).
-    refresh: () =>
-      lookupRecord(req, user, entry, undefined, 'own', undefined, true),
-  };
-  sources.set(handle, stream);
-  return stream;
-}
-const reopening = new Map<string, Promise<OwnSession | null>>();
-/** An own playback from the store: this process's copy refreshed, or rebuilt after a restart. */
-function reopenOwn(req: Request, token: string): Promise<OwnSession | null> {
-  const key = digest(token);
-  let pending = reopening.get(key);
-  if (!pending) {
-    pending = (async () => {
-      const saved = await ownStore.get(key);
-      const live = owns.get(key);
-      if (!saved || saved.expiresAt <= Date.now() || saved.keyId !== keyId()) {
-        if (live) forgetOwn(key, live);
-        if (saved) void dropOwn(key).catch(() => {});
-        return null;
-      }
-      const now = Date.now();
-      if (live && live.sourceRef === saved.ref) {
-        Object.assign(live, saved, {
-          expiresAt: Math.max(live.expiresAt, saved.expiresAt),
-          readAt: now,
-        });
-        return live;
-      }
-      const handle = unseal(saved.handle);
-      if (!handle) return null;
-      const stream = await once(handle, () =>
-        buildOwnStream(req, saved, handle)
-      );
-      if (!stream) return null;
-      const media = await (stream.media ??= probeMedia(stream));
-      const session: OwnSession = {
-        ...saved,
-        token,
-        stream,
-        media,
-        sourceRef: saved.ref,
-        readAt: now,
-        touchedAt: now,
-      };
-      owns.set(key, session);
-      return session;
-    })().finally(() => reopening.delete(key));
-    reopening.set(key, pending);
-  }
-  return pending;
-}
-async function ownSession(req: Request, token: string): Promise<OwnSession> {
-  const key = digest(token);
-  let session = transcoderReady() ? owns.get(key) : undefined;
-  if (
-    transcoderReady() &&
-    (!session || Date.now() - session.readAt >= SHARE_CACHE_MS)
-  )
-    session = (await reopenOwn(req, token)) ?? undefined;
-  if (!session || session.expiresAt <= Date.now()) {
-    // A playback from before own playback was kept: the restart dropped it.
-    if (token.startsWith('own.') && !token.startsWith(OWN_PREFIX))
-      fail(
-        401,
-        'The server restarted; start playback again',
-        'session_restarted'
-      );
-    fail(401, 'This playback has expired; start it again');
-  }
-  const now = Date.now();
-  session.expiresAt = now + OWN_TTL_MS;
-  if (now - session.touchedAt > OWN_TOUCH_MS) {
-    session.touchedAt = now;
-    const expiresAt = session.expiresAt;
-    void Promise.resolve(
-      ownStore.update(key, (s) => {
-        s.expiresAt = Math.max(s.expiresAt, expiresAt);
-      })
-    ).catch(() => {});
-  }
-  return session;
-}
-/** Forgets an own playback in this process: its source goes too. */
-function forgetOwn(key: string, session: OwnSession) {
-  owns.delete(key);
-  dropSource(session.stream.handle);
-}
-/** Ends an own playback: its record, and its lease at the transcoder (read from the record). */
-async function dropOwn(key: string): Promise<void> {
-  const live = owns.get(key);
-  if (live) forgetOwn(key, live);
-  const lease = await ownStore.update(key, (s, tx) => {
-    tx.drop();
-    return s.jobs ? s.lease : undefined;
-  });
-  if (lease) await releaseLease(lease);
-}
-/** Changes a stored own playback (`change` may run more than once); this process's copy follows. */
-async function changeOwn<R>(
-  token: string,
-  change: (saved: SavedOwn) => R
-): Promise<R | undefined> {
-  const key = digest(token);
-  let after: SavedOwn | undefined;
-  const result = await ownStore.update(key, (saved) => {
-    const r = change(saved);
-    after = { ...saved };
-    return r;
-  });
-  const live = owns.get(key);
-  if (after && live)
-    Object.assign(live, after, {
-      expiresAt: Math.max(live.expiresAt, after.expiresAt),
-    });
-  return result;
-}
-/** What a playback's change acts on, guest or own. */
-type PlaybackState = Pick<
-  SavedGuestSession,
-  'jobs' | 'lease' | 'generation' | 'offsetMs'
->;
-/** Changes a playback in the store, a guest's or a user's own, by its token. */
-function changePlayback<R>(
-  token: string,
-  change: (saved: PlaybackState) => R
-): Promise<R | undefined> {
-  return token.startsWith('own.')
-    ? changeOwn(token, change)
-    : guestSessions.update(token, change);
-}
-/** The playback a media URL belongs to: a guest's party, or a user's own. */
-async function streaming(req: Request) {
-  const token =
-    typeof req.query.token === 'string' ? req.query.token : bearer(req);
-  if (token.startsWith('own.')) {
-    const own = await ownSession(req, token);
-    return { session: own, source: own.stream, media: own.media };
-  }
-  return current(req);
-}
-const capabilitySchema = z.object({
-  video: z.boolean(),
-  audio: z.boolean(),
-  container: z.boolean(),
-  hdr: z.boolean(),
-  surround: z.boolean().optional(),
-  lossless: z.boolean().optional(),
-  binaural: z.boolean().optional(),
-  clientBinaural: z
-    .array(z.enum(['truehd', 'eac3', 'ac3', 'dts']))
-    .max(4)
-    .optional(),
-  binauralMode: z.enum(['near', 'far']).optional(),
-  subtitles: z
-    .array(z.enum(['ass', 'pgs']))
-    .max(2)
-    .optional(),
-  picture: z
-    .array(z.enum(['dovi', 'tonemap-sdr']))
-    .max(2)
-    .optional(),
-  display: z.enum(['sdr', 'hdr']).optional(),
-  demux: z
-    .array(z.enum(['matroska']))
-    .max(1)
-    .optional(),
-});
-const playbackSchema = z.object({
-  revision: z.string().length(64),
-  capabilities: capabilitySchema,
-  quality: z.enum(['original', '1080p', '720p']),
-  audio: z.number().int().nonnegative().optional(),
-  subtitle: z.number().int().nonnegative().optional(),
-  positionMs: z.number().finite().min(0).max(1e9),
-  force: z.boolean().optional(),
-});
-/** Lets the transcoder know a playback has gone: its jobs no longer count it. */
-async function releaseLease(lease: string) {
-  await worker(`/viewers/${lease}/release`, {}).catch(() => {});
-}
-/** The source file's identity, the same across new links to it: what subtitles are kept by. */
-function fileKey(source: Source): string {
-  return digest([
-    'file',
-    source.record.msid ?? '',
-    source.record.filename ?? '',
-    readers.get(source.handle)?.size() ?? null,
-  ]);
-}
-/**
- * Starts a playback at the transcoder: admitted at once (`replaces`: the playback it takes over,
- * whose jobs it may use or free). The answer carries its state; the page follows it from there
- * (`/prepare/:lease/state`). An admission that fails releases its lease: the transcoder may have
- * admitted it before failing to answer (the 75 s timeout).
- */
-async function startPlayback(
-  source: Source,
-  lease: string,
-  body: z.infer<typeof playbackSchema>,
-  replaces?: string
-) {
-  try {
-    return await worker('/prepare', {
-      input: input(source),
-      viewer: lease,
-      request: body,
-      replaces,
-      file: fileKey(source),
-    });
-  } catch (error) {
-    await releaseLease(lease);
-    throw error;
-  }
-}
+/** The party playback a media URL belongs to. */
+const streaming = (req: Request) => current(req);
 router.use((_req, res, next) => {
   res.set('Cache-Control', 'no-store');
   res.set('Referrer-Policy', 'no-referrer');
@@ -1117,23 +656,12 @@ router.use((_req, res, next) => {
 // Apps that load the web app from elsewhere (TVs, the standalone build) call
 // these from another origin; the guest page itself is same-origin.
 router.use(
-  [
-    '/available',
-    '/host',
-    '/publish',
-    '/disable',
-    '/own',
-    '/media',
-    '/subtitle',
-  ],
+  ['/available', '/host', '/publish', '/disable', '/media'],
   jellyfinCors
 );
-router.get('/available', (_req, res) =>
-  res.json({ enabled: enabled(), conversion: transcoderReady() })
-);
+router.get('/available', (_req, res) => res.json({ enabled: enabled() }));
 router.post('/host', async (req, res) => {
-  if (!enabled())
-    fail(503, 'Configure and enable the transcoder companion first');
+  if (!enabled()) fail(503, 'Guest streaming is not enabled on this server');
   const body = hostSchema.parse(req.body);
   const { party, token } = await host(req, body);
   let binding = await loadBinding(body.party);
@@ -1207,12 +735,12 @@ router.post('/exchange', async (req, res) => {
     fail(410, 'This guest invitation has expired');
   if (party.joinsClosed || party.members.length >= 16)
     fail(403, 'This party is closed or full');
-  // Revoking it (a kick, the share ending) frees its playback at the transcoder, from its record.
+  // Revoked by a kick or the share ending, which ends its reads (`onRevoke`).
   const session = await guestSessions.create(body.party, binding.expiresAt);
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });
 /**
- * The title the party plays, its media and artwork. With `after` (what the page has: its token,
+ * The title the party plays, its file and artwork. With `after` (what the page has: its token,
  * `<revision>:<ready|resolving|failed>`), a long poll: it answers at once when that's changed (a
  * title change, a host's version switch, a failure, a recovery), otherwise when it changes, within
  * 25 s. A title still resolving is answered as `resolving` at once, its resolve going on behind;
@@ -1221,7 +749,7 @@ router.post('/exchange', async (req, res) => {
 router.get('/current', async (req, res) => {
   const after = typeof req.query.after === 'string' ? req.query.after : null;
   const answer = async () => {
-    const { source, media } = await current(req);
+    const { source, file } = await current(req);
     // Found once per title, shared by every guest's poll.
     const artwork = await (source.artwork ??= artworkOf(source));
     res.json({
@@ -1231,7 +759,7 @@ router.get('/current', async (req, res) => {
       playlistItemId: source.playlistItemId,
       itemId: source.itemId,
       title: source.title,
-      media,
+      file,
       artwork,
     });
   };
@@ -1273,11 +801,11 @@ router.get('/current', async (req, res) => {
 });
 /** The host's intro, recap and credits for the title playing, as their own player gets them. */
 router.get('/segments', async (req, res) => {
-  const { source, media } = await current(req);
-  const segments = await (source.segments ??= segmentsOf(
-    source,
-    media.durationMs
-  ));
+  const { source, file } = await current(req);
+  // The title's runtime, as the host's own segment route has it, else the file's.
+  const runtimeMs =
+    source.host?.memo?.runtimeMs ?? file.durationMs ?? undefined;
+  const segments = await (source.segments ??= segmentsOf(source, runtimeMs));
   res.json({ Items: segments });
 });
 /**
@@ -1313,11 +841,11 @@ async function artworkOf(source: Source): Promise<GuestArtwork> {
 }
 /**
  * The host's segments for the title, by the host's configuration (its providers, the types it
- * turned on), at the file's own runtime. None where segments are off or can't be looked up.
+ * turned on), at the title's runtime. None where segments are off or can't be looked up.
  */
 async function segmentsOf(
   source: Source,
-  runtimeMs: number
+  runtimeMs: number | undefined
 ): Promise<GuestSegment[]> {
   const host = source.host;
   if (!host || !segmentsEnabled()) return [];
@@ -1351,313 +879,6 @@ async function segmentsOf(
     return [];
   }
 }
-router.post('/prepare', async (req, res) => {
-  const body = playbackSchema.parse(req.body);
-  const { source, session, media } = await current(req);
-  // The track numbers and capabilities sent belong to the file the guest has open: the party
-  // moved on since, and the guest's page picks the new title up on its next look.
-  if (body.revision !== source.revision) {
-    logger.info(
-      { party: session.party },
-      'guest prepare for a title the party has left'
-    );
-    fail(409, 'The party has changed titles', 'title_changed');
-  }
-  const generation = await guestSessions.update(
-    session.token,
-    (s) => (s.generation = (s.generation ?? 0) + 1)
-  );
-  if (generation === undefined) fail(401, 'This guest session has expired');
-  const lease = randomSecret();
-  // This playback takes over the guest's current one (a seek, a track switch): jobs only that
-  // one holds are free for it, at capacity too.
-  const result = await startPlayback(source, lease, body, session.lease);
-  // A seek or episode change can finish while FFmpeg is starting.
-  const drop = () => releaseLease(lease);
-  let latest: Awaited<ReturnType<typeof current>>;
-  try {
-    latest = await current(req);
-  } catch (error) {
-    // What's wrong now (the source failing, the host's session ending), not a title change.
-    await drop();
-    throw error;
-  }
-  if (latest.source.revision !== source.revision) {
-    await drop();
-    logger.info(
-      { party: latest.session.party },
-      'guest prepare outrun by a title change'
-    );
-    fail(409, 'The party has changed titles', 'title_changed');
-  }
-  const sourceRef = refOf(source.handle);
-  const jobs = result.jobs ? jobIds(result.jobs) : undefined;
-  // Only if no newer prepare from this guest started since (a seek): the newest wins.
-  const won = await guestSessions.update(session.token, (s) => {
-    if (s.generation !== generation) return null;
-    const old = s.jobs && s.lease !== lease ? s.lease : undefined;
-    s.jobs = jobs;
-    s.lease = lease;
-    s.offsetMs = 0;
-    s.sourceRef = sourceRef;
-    s.revision = source.revision;
-    return { old };
-  });
-  if (won === undefined) {
-    await drop();
-    fail(401, 'This guest session has expired');
-  }
-  if (!won) {
-    await drop();
-    fail(409, 'A newer request replaced this one', 'superseded');
-  }
-  // The earlier playback's lease goes now (the transcoder freed it on admission already).
-  if (won.old) await releaseLease(won.old);
-  res.json(
-    playbackResponse(req, session.token, lease, source, media, body, result)
-  );
-});
-function playbackResponse(
-  req: Request,
-  token: string,
-  lease: string,
-  source: Source,
-  media: GuestMedia,
-  body: z.infer<typeof playbackSchema>,
-  result: {
-    mode: GuestPlayback['mode'];
-    offsetMs?: number;
-    spec: GuestPlaybackSpec;
-    effective: GuestPlaybackSpec;
-    version?: number;
-    stage?: GuestPlayback['stage'];
-    ready?: boolean;
-    failure?: GuestPlayback['failure'];
-  }
-): GuestPlayback {
-  const query = `?token=${encodeURIComponent(token)}&lease=${lease}`;
-  const base = `${req.baseUrl}/media/`;
-  const response: GuestPlayback = {
-    lease,
-    revision: source.revision,
-    playlistItemId: source.playlistItemId,
-    itemId: source.itemId,
-    title: source.title,
-    media,
-    mode: result.mode,
-    offsetMs: result.offsetMs ?? 0,
-    url: `${base}${result.mode === 'direct' ? 'original' : `v/${lease}/manifest.mpd`}${query}`,
-    spec: result.spec,
-    effective: result.effective,
-    // Converted: where it is now (the page follows it until ready). Direct: ready at once.
-    version: result.version ?? 0,
-    stage: result.stage ?? 'ready',
-    ready: result.mode === 'direct' ? true : !!result.ready,
-    failure: result.failure ?? null,
-  };
-  const track =
-    body.subtitle == null
-      ? undefined
-      : media.tracks.find(
-          (t) => t.type === 'subtitle' && t.index === body.subtitle
-        );
-  const format = track && subtitleFormat(track.codec);
-  // Text is always served; ASS and PGS where the browser draws them, and
-  // otherwise they're burned into the video.
-  const drawn = body.capabilities.subtitles ?? [];
-  if (
-    format === 'vtt' ||
-    (format === 'ass' && drawn.includes('ass')) ||
-    (format === 'sup' && drawn.includes('pgs'))
-  ) {
-    response.subtitleUrl = `${req.baseUrl}/subtitle/${body.subtitle}${query}${format === 'vtt' ? '' : `&format=${format}`}`;
-    response.subtitleFormat = format;
-    if (format === 'ass')
-      response.fontUrls = (media.fonts ?? []).map(
-        (f) => `${req.baseUrl}/font/${f.index}${query}`
-      );
-  }
-  return response;
-}
-const ownOpenSchema = z.object({
-  itemId: z.string().regex(/^[0-9a-f]{32}$/),
-  sourceId: z.string().max(100).optional(),
-  filename: z.string().max(1000).optional(),
-});
-// The web app converts its own playback when the browser can't decode a
-// source's audio. Signed in with the app's own token; no party needed.
-router.post('/own/open', async (req, res) => {
-  if (!transcoderReady()) fail(503, 'Conversion is not set up on this server');
-  const userToken = bearer(req);
-  const user = await userForToken(userToken);
-  if (!user) fail(401, 'Sign in to play this');
-  const body = ownOpenSchema.parse(req.body);
-  // The default version's id is the item's own: no explicit choice.
-  const entry =
-    body.sourceId === body.itemId ? { ...body, sourceId: undefined } : body;
-  const record = await lookupRecord(req, user, entry, undefined, 'own');
-  const revision = digest([OWN, user.uuid, body.itemId, record.msid]);
-  const handle = randomSecret();
-  const stream = ownSource(req, user, entry, record, handle, revision);
-  let media: GuestMedia;
-  try {
-    media = await (stream.media = probeMedia(stream));
-  } catch (error) {
-    dropSource(handle);
-    throw error;
-  }
-  const mine: [string, SavedOwn][] = [];
-  for (const id of await ownStore.tagged(`user:${user.uuid}`)) {
-    const saved = await ownStore.get(id);
-    if (saved) mine.push([id, saved]);
-  }
-  // Opening the same item and version again (resume, retry, a reload)
-  // replaces the earlier playback: its conversion is released at once,
-  // rather than holding a place until its heartbeats lapse.
-  for (const [id, old] of mine)
-    if (old.revision === revision || old.expiresAt <= Date.now())
-      await dropOwn(id);
-  // A user keeps a few at once (tabs, versions); the oldest go first.
-  const others = mine
-    .filter(([, o]) => o.revision !== revision && o.expiresAt > Date.now())
-    .sort(([, a], [, b]) => a.createdAt - b.createdAt);
-  for (const [id] of others.slice(
-    0,
-    Math.max(0, others.length - OWN_PER_USER + 1)
-  ))
-    await dropOwn(id);
-  const token = `${OWN_PREFIX}${randomSecret()}`;
-  const now = Date.now();
-  const saved: SavedOwn = {
-    uuid: user.uuid,
-    expiresAt: now + OWN_TTL_MS,
-    createdAt: now,
-    revision,
-    itemId: body.itemId,
-    msid: record.msid,
-    filename: record.filename ?? undefined,
-    keyId: keyId(),
-    userToken: seal(userToken),
-    handle: seal(handle),
-    ref: refOf(handle),
-  };
-  const made = await ownStore.create(
-    digest(token),
-    () => ({ ...saved }),
-    16000
-  );
-  if (made !== 'ok') {
-    dropSource(handle);
-    fail(
-      503,
-      made === 'busy'
-        ? 'Conversion capacity reached; retry later'
-        : 'Playback could not be started; retry'
-    );
-  }
-  owns.set(digest(token), {
-    ...saved,
-    token,
-    stream,
-    media,
-    sourceRef: saved.ref,
-    readAt: now,
-    touchedAt: now,
-  });
-  res.json({ token, revision, media });
-});
-router.post('/own/prepare', async (req, res) => {
-  const token = bearer(req);
-  const session = await ownSession(req, token);
-  const body = playbackSchema.parse(req.body);
-  if (body.revision !== session.revision) fail(409, 'Playback changed');
-  const generation = await changeOwn(
-    token,
-    (s) => (s.generation = (s.generation ?? 0) + 1)
-  );
-  if (generation === undefined)
-    fail(401, 'This playback has expired; start it again');
-  const lease = randomSecret();
-  // Takes over the current playback, as for guests.
-  const result = await startPlayback(
-    session.stream,
-    lease,
-    body,
-    session.lease
-  );
-  const jobs = result.jobs ? jobIds(result.jobs) : undefined;
-  // A later seek can finish first; this one is then out of date.
-  const won = await changeOwn(token, (s) => {
-    if (s.generation !== generation) return null;
-    const old = s.jobs && s.lease !== lease ? s.lease : undefined;
-    s.jobs = jobs;
-    s.lease = lease;
-    s.offsetMs = 0;
-    return { old };
-  });
-  if (!won) {
-    await releaseLease(lease);
-    fail(409, 'Playback changed');
-  }
-  if (won.old) await releaseLease(won.old);
-  res.json(
-    playbackResponse(
-      req,
-      token,
-      lease,
-      session.stream,
-      session.media,
-      body,
-      result
-    )
-  );
-});
-router.post(['/touch', '/own/touch'], async (req, res) => {
-  const token = bearer(req);
-  const session = token.startsWith('own.')
-    ? await ownSession(req, token)
-    : (await active(req)).session;
-  const body = z
-    .object({
-      positionMs: z.number().finite().min(0).max(1e9),
-      release: z.boolean().optional(),
-      lease: z.string().length(43),
-    })
-    .parse(req.body);
-  if (body.lease !== session.lease) return void res.json({ ok: true });
-  let waitingSource = false;
-  if (body.release) {
-    // Its jobs, if this lease still holds them: a release and a prepare may cross.
-    const lease = await changePlayback(token, (s) => {
-      if (s.lease !== body.lease || !s.jobs) return undefined;
-      s.jobs = undefined;
-      return s.lease;
-    });
-    if (lease) await releaseLease(lease);
-  } else if (session.jobs)
-    try {
-      const answer = await worker(`/viewers/${session.lease}/touch`, {
-        positionMs: body.positionMs,
-      });
-      waitingSource = answer?.waitingSource === true;
-    } catch (error) {
-      // The transcoder no longer has the job (it ended, failed or restarted), or no longer
-      // counts this viewer on it: its stream won't go on, so the player starts another.
-      const answered = (error as { workerStatus?: number }).workerStatus;
-      if (answered === 404 || answered === 403) {
-        logger.info(
-          { status: answered },
-          'guest stream gone from the transcoder; the player starts another'
-        );
-        await changePlayback(token, (s) => {
-          if (s.lease === body.lease) s.jobs = undefined;
-        });
-        fail(409, 'This stream ended on the server', 'stream_gone');
-      }
-      throw error;
-    }
-  res.json({ ok: true, waitingSource });
-});
 const CROSS_ORIGIN_HEADERS = new Set(['range', 'user-agent', 'accept']);
 const MAX_REDIRECTS = 10;
 /**
@@ -2092,27 +1313,6 @@ const sourceError = (status: number, message: string, code?: SourceCode) =>
     retryAfter: RETRY_AFTER[status],
     code,
   });
-/** Probe failures a second try can get past: a slow or dropped connection. */
-const TRANSIENT =
-  /timed out|refused|reset|broken pipe|i\/o error|end of file|server returned 5\d\d/i;
-/**
- * Opens the source through its reader (resolving it, and checking it's the file and not a
- * placeholder clip or an error page, which would otherwise be converted as if it were the
- * episode), then probes it, trying once more if the probe failed in a way that can change. Bad
- * data won't, and neither will a down or full transcoder.
- */
-async function probeMedia(source: Source): Promise<GuestMedia> {
-  await readerFor(source).describe();
-  try {
-    return await worker('/probe', { input: input(source) });
-  } catch (error) {
-    const e = error as Error & { status?: number; unreachable?: boolean };
-    if (e.status === 503 || e.unreachable || !TRANSIENT.test(e.message))
-      throw error;
-    await new Promise((r) => setTimeout(r, 1000));
-    return await worker('/probe', { input: input(source) });
-  }
-}
 /**
  * Serves a source to one reader: from its shared reader, or, for a source that doesn't serve
  * ranges or say its size, passed through per request (`forward`).
@@ -2134,7 +1334,7 @@ async function forward(source: Source, req: Request, res: Response) {
   );
   // AIOStreams' own usenet streams always serve ranges, so they're never passed through.
   if (!upstream) fail(500, 'The source is read through its reader');
-  // A clip in place of the file must not reach FFmpeg as the episode.
+  // A clip in place of the file must not reach a guest's player as the episode.
   const placeholder = placeholderOf(next);
   if (placeholder) {
     await upstream.body.dump().catch(() => {});
@@ -2172,303 +1372,14 @@ async function forward(source: Source, req: Request, res: Response) {
     res.off('close', abort);
   }
 }
-// Opaque input handles are known only to this server and its private companion.
-router.all('/source/:handle', async (req, res) => {
-  const handle = String(req.params.handle);
-  const refuse = (reason: string): never => {
-    logger.warn({ reason }, 'guest source handle refused');
-    fail(404, 'Source expired');
-  };
-  if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Method not allowed');
-  // After a restart, FFmpeg's next read reopens the source its record keeps.
-  const source = sources.get(handle) ?? (await rebuild(handle, req));
-  if (!source) return refuse('unknown handle');
-  if (source.party === OWN) {
-    if (!transcoderReady()) refuse('transcoder not configured');
-  } else if (!enabled()) refuse('guest streaming off');
-  else if (!(await loadBinding(source.party))) refuse('party no longer shared');
-  else if (!(await guestPartyState(source.party))) refuse('party ended');
-  await serveSource(source, req, res);
-});
-/** How long the status answers before saying a source being rebuilt is still resolving. */
-const STATUS_WAIT_MS = 1000;
 /**
- * How the source's reader stands: `ok`, `resolving`, or `failed {class, code}`, for the
- * transcoder to tell a source that failed from its own failure. A source this process doesn't
- * have yet (a restart) is `resolving` while its record reopens it.
+ * The file the party plays, for a guest's player to read directly: authorised by the guest's
+ * session token and the revision it was given (a host's new title or version ends it), and read
+ * through the source's shared reader, so every guest shares one read of the upstream file.
  */
-router.get('/source/:handle/status', async (req, res) => {
-  const handle = String(req.params.handle);
-  if (!sources.has(handle)) {
-    const pending = rebuild(handle, req);
-    const first = await Promise.race([
-      pending.then(
-        (s) => ({ s }),
-        (error: unknown) => ({ error })
-      ),
-      new Promise<null>((r) => setTimeout(() => r(null), STATUS_WAIT_MS)),
-    ]);
-    if (!first) return void res.json({ state: 'resolving' });
-    if ('error' in first) {
-      const e = first.error as {
-        status?: number;
-        code?: string;
-        message?: string;
-      };
-      return void res.json({
-        state: 'failed',
-        class: 'source',
-        status: typeof e.status === 'number' ? e.status : 502,
-        code: e.code,
-        message: e.message ?? 'The source failed',
-      });
-    }
-    if (!first.s) fail(404, 'Source expired');
-  }
-  res.json(readers.get(handle)?.status() ?? { state: 'idle' });
-});
-/**
- * How a subtitle reaches the browser, as the transcoder serves it: text as
- * WebVTT, ASS/SSA as itself (JASSUB), PGS as .sup (libpgs).
- */
-export function subtitleFormat(codec: string): 'vtt' | 'ass' | 'sup' | null {
-  if (['subrip', 'webvtt', 'mov_text', 'text'].includes(codec)) return 'vtt';
-  if (codec === 'ass' || codec === 'ssa') return 'ass';
-  if (codec === 'hdmv_pgs_subtitle') return 'sup';
-  return null;
-}
-/** Asks the transcoder for an extracted file; it may still be extracting. */
-async function extracted(
-  path: string,
-  body: object
-): Promise<globalThis.Response> {
-  const upstream = await fetch(transcoder(path), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.party.transcoderSecret}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(65000),
-  });
-  if (upstream.status === 425 || upstream.status === 503)
-    throw Object.assign(
-      new Error(
-        upstream.status === 425
-          ? 'Subtitles are still being extracted'
-          : 'Subtitle extraction is busy'
-      ),
-      {
-        status: upstream.status,
-        retryAfter: Number(upstream.headers.get('retry-after')) || 5,
-      }
-    );
-  if (!upstream.ok) {
-    logger.warn(
-      { path, status: upstream.status },
-      'transcoder subtitle extraction failed'
-    );
-    fail(502, 'Subtitle extraction failed');
-  }
-  return upstream;
-}
-router.get('/subtitle/:index', async (req, res) => {
-  const { source, session, media } = await streaming(req);
-  if (
-    session.revision !== source.revision ||
-    session.sourceRef !== refOf(source.handle) ||
-    req.query.lease !== session.lease
-  )
-    fail(410, 'Source changed');
-  const index = Number(req.params.index);
-  const format =
-    typeof req.query.format === 'string' ? req.query.format : 'vtt';
-  const track = media.tracks.find(
-    (t) => t.type === 'subtitle' && t.index === index
-  );
-  if (!track || subtitleFormat(track.codec) !== format)
-    fail(404, 'Subtitle not found');
-  const upstream = await extracted('/subtitle', {
-    input: input(source),
-    // Kept by the file, not its link: extracted once across new links to it.
-    file: fileKey(source),
-    index,
-    format,
-    // Held by this playback's lease, and released with its other jobs.
-    viewer: session.lease,
-  });
-  if (format === 'vtt')
-    return void res
-      .type('text/vtt')
-      .send(offsetWebVtt(await upstream.text(), session.offsetMs ?? 0));
-  // ASS keeps the source's own times, which are the player's.
-  res.type(format === 'ass' ? 'text/x-ssa' : 'application/octet-stream');
-  res.send(Buffer.from(await upstream.arrayBuffer()));
-});
-router.get('/font/:index', async (req, res) => {
-  const { source, session, media } = await streaming(req);
-  if (
-    session.revision !== source.revision ||
-    session.sourceRef !== refOf(source.handle) ||
-    req.query.lease !== session.lease
-  )
-    fail(410, 'Source changed');
-  const index = Number(req.params.index);
-  if (!media.fonts?.some((f) => f.index === index)) fail(404, 'Font not found');
-  const upstream = await extracted('/font', { input: input(source), index });
-  res.type(upstream.headers.get('content-type') ?? 'font/ttf');
-  // Fonts don't change for a file: the player may keep them.
-  res.set('Cache-Control', 'private, max-age=86400');
-  res.send(Buffer.from(await upstream.arrayBuffer()));
-});
-/**
- * How long the transcoder may take to start answering for converted media.
- * Only the wait is timed: a segment then streams as fast as the viewer reads
- * it, which for a copied 4K video can take a while.
- */
-export const MEDIA_TIMEOUT = { headersMs: 30_000 };
-/**
- * A DASH manifest whose segment URLs carry this playback's token and lease,
- * as the manifest's own URL does: the player resolves them from the
- * manifest's templates.
- */
-export function withCredentials(mpd: string, token: string, lease: string) {
-  // Inside an XML attribute: & is written &amp;.
-  const query = `?token=${encodeURIComponent(token)}&amp;lease=${encodeURIComponent(lease)}`;
-  return mpd.replace(/<SegmentTemplate\b[^>]*>/g, (tag) =>
-    tag.replace(
-      /(\s(?:initialization|media)=")([^"?]+)(")/g,
-      (_whole, before: string, url: string, after: string) =>
-        `${before}${url}${query}${after}`
-    )
-  );
-}
-/** A playback's jobs, as the transcoder names them. */
-function jobIds(
-  jobs: Record<string, { id: string } | null | undefined>
-): PlaybackJobs {
-  return {
-    video: jobs.video!.id,
-    ...(jobs.audio ? { audio: jobs.audio.id } : {}),
-    ...(jobs.subtitle ? { subtitle: jobs.subtitle.id } : {}),
-  };
-}
-/**
- * A converted playback's media: its manifest (written by the transcoder for this lease from its
- * jobs' segments), and each job's init and media segments, which the manifest names relative to
- * itself (`<job>/init-0.m4s`). Only this playback's lease and its own jobs.
- */
-router.get(
-  ['/media/v/:lease/manifest.mpd', '/media/v/:lease/:job/:file'],
-  async (req, res) => {
-    const { session, source } = await streaming(req);
-    const lease = String(req.params.lease);
-    if (
-      session.revision !== source.revision ||
-      session.lease !== lease ||
-      req.query.lease !== lease ||
-      !session.jobs
-    )
-      fail(410, 'Playback changed');
-    const job = req.params.job ? String(req.params.job) : null;
-    const file = job ? String(req.params.file) : 'manifest.mpd';
-    if (job) {
-      if (!Object.values(session.jobs).includes(job))
-        fail(410, 'Playback changed');
-      if (!/^(init-0\.m4s|chunk-0-\d+\.m4s)$/.test(file))
-        fail(404, 'Media not found');
-    }
-    const path = job
-      ? `/jobs/${job}/${file}`
-      : `/viewers/${lease}/manifest.mpd`;
-    // A viewer that goes away stops the transcoder's answer too.
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    res.on('close', abort);
-    const timer = setTimeout(abort, MEDIA_TIMEOUT.headersMs);
-    let upstream: globalThis.Response;
-    try {
-      upstream = await fetch(transcoder(path), {
-        headers: { Authorization: `Bearer ${config.party.transcoderSecret}` },
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (res.destroyed) return;
-      logger.warn(
-        { file, cause: errorCause(error) },
-        'transcoder did not answer'
-      );
-      fail(504, 'Conversion did not answer');
-    } finally {
-      clearTimeout(timer);
-    }
-    // Not written yet (404) and left the window (410) are the player's to handle.
-    if (upstream.status === 404 || upstream.status === 410) {
-      res.off('close', abort);
-      fail(
-        upstream.status,
-        upstream.status === 410 ? 'Segment left the window' : 'Not written yet'
-      );
-    }
-    if (!upstream.ok) {
-      logger.warn(
-        { status: upstream.status, file },
-        'transcoder media request failed'
-      );
-      fail(502, 'Conversion is unavailable');
-    }
-    if (!job) {
-      res
-        .type('application/dash+xml')
-        .send(withCredentials(await upstream.text(), session.token, lease));
-    } else {
-      if (!upstream.body) fail(502, 'Conversion returned no media');
-      res.type('video/mp4');
-      const length = upstream.headers.get('content-length');
-      if (length) res.set('Content-Length', length);
-      const stream = Readable.fromWeb(
-        upstream.body as import('node:stream/web').ReadableStream
-      );
-      const revoke = guestSessions.onRevoke(session.token, () => res.destroy());
-      try {
-        await pipeline(stream, res);
-      } finally {
-        revoke();
-      }
-    }
-    res.off('close', abort);
-  }
-);
-/**
- * A playback's state, as the transcoder has it: a long poll (`after`: the version last seen),
- * for the page to follow its start (the stage), what it plays (the effective spec) and any
- * failure.
- */
-router.get(
-  ['/prepare/:lease/state', '/own/prepare/:lease/state'],
-  async (req, res) => {
-    const token = bearer(req);
-    const session = token.startsWith('own.')
-      ? await ownSession(req, token)
-      : (await active(req)).session;
-    const lease = String(req.params.lease);
-    if (session.lease !== lease) fail(410, 'Playback changed');
-    const after = Number(req.query.after ?? -1);
-    res.json(
-      await worker(
-        `/viewers/${lease}/state?after=${Number.isFinite(after) ? after : -1}`
-      )
-    );
-  }
-);
 router.all('/media/original', async (req, res) => {
   const { session, source } = await streaming(req);
-  if (
-    session.revision !== source.revision ||
-    session.sourceRef !== refOf(source.handle) ||
-    req.query.lease !== session.lease
-  )
-    fail(410, 'Playback changed');
+  if (req.query.revision !== source.revision) fail(410, 'Playback changed');
   const revoke = guestSessions.onRevoke(session.token, () => res.destroy());
   let checking = false;
   const timer = setInterval(() => {
@@ -2476,11 +1387,7 @@ router.all('/media/original', async (req, res) => {
     checking = true;
     void streaming(req)
       .then((now) => {
-        if (
-          now.source.revision !== source.revision ||
-          req.query.lease !== now.session.lease
-        )
-          res.destroy();
+        if (now.source.revision !== source.revision) res.destroy();
       })
       .catch(() => res.destroy())
       .finally(() => {
@@ -2516,16 +1423,12 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
           ? 'Invalid request'
           : error.message,
     retryAfter: error.retryAfter,
-    // Machine-readable cause, where one is known (transcoder_unreachable, ...).
+    // Machine-readable cause, where one is known (source_failed, ...).
     code: typeof error.code === 'string' ? error.code : undefined,
   });
 });
-// Revoking a guest session frees its playback at the transcoder, by the lease its record holds.
-guestSessions.releaseLease = releaseLease;
 const sweep = setInterval(() => {
   guestSessions.sweep();
-  for (const [key, own] of owns)
-    if (own.expiresAt <= Date.now()) void dropOwn(key).catch(() => {});
   for (const [id, b] of bindings)
     void guestPartyState(id)
       .then((p) => {

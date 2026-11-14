@@ -143,56 +143,7 @@ A catalog's row on the home page says what it holds, such as **Shows** or **Movi
 
 ### Hide spoilers
 
-Blur the pictures, titles and descriptions of episodes you haven't watched. Pointing at one fades it in.
-
-```css
-/* Episodes you haven't watched, until you point at one */
-:is([data-ui='episode-card'], [data-ui='episode-list-item']):not(
-    [data-watched],
-    :hover,
-    :focus-within
-  )
-  [data-ui='artwork'] {
-  filter: blur(12px);
-}
-:is([data-ui='episode-card'], [data-ui='episode-list-item']):not(
-    [data-watched],
-    :hover,
-    :focus-within
-  )
-  :is(
-    [data-ui='episode-title'] > span,
-    p[data-ui='episode-title'],
-    [data-ui='episode-synopsis']
-  ) {
-  filter: blur(5px);
-}
-
-/* Next up and upcoming episodes, but not what you're partway through */
-:is([data-row='next-up'], [data-row='upcoming'], [data-row='resume'])
-  [data-ui='wide-card']:not([data-in-progress], :hover, :focus-within)
-  [data-ui='artwork'] {
-  filter: blur(12px);
-}
-:is([data-row='next-up'], [data-row='upcoming'], [data-row='resume'])
-  [data-ui='wide-card']:not([data-in-progress], :hover, :focus-within)
-  [data-ui='wide-card-subtitle'] {
-  filter: blur(5px);
-}
-
-/* Fade the blur in and out */
-[data-ui='artwork'] {
-  transition-property: filter, transform, opacity;
-}
-[data-ui='episode-title'] > span,
-p[data-ui='episode-title'],
-[data-ui='episode-synopsis'],
-[data-ui='wide-card-subtitle'] {
-  transition: filter 0.3s;
-}
-```
-
-Blur the text inside an episode's title rather than the title itself: the title is what makes the whole episode play when pressed, and a blur on it would shrink that to the title alone.
+This needs no CSS: turn on **Blur episodes you haven't started** under **Settings → Interface → Spoilers**. It covers title pages, the player's episode list and the continue watching, next up and upcoming rows.
 
 ### Hide buttons on title pages
 
@@ -217,6 +168,27 @@ one out, name it:
   display: none;
 }
 ```
+
+### Pages in the bottom bar
+
+The bar shows Home, Discover, Search and Favourites and lists the other pages under You. Every page is
+in both, with `data-shown` on the ones the bar shows. To swap Favourites for Live TV:
+
+```css
+[data-ui='mobile-nav-item'][data-name='live'] {
+  display: flex;
+}
+[data-ui='mobile-nav-item'][data-name='favourites'],
+[data-ui='account-menu-page'][data-name='live'] {
+  display: none;
+}
+[data-ui='account-menu-page'][data-name='favourites'] {
+  display: flex;
+}
+```
+
+The pages are `home`, `discover`, `search`, `favourites`, `live`, `calendar`, `activity`, `playlists`,
+`party` and `downloads`. Live TV shows only on a server with live channels.
 
 ### Smaller icons in the bottom bar
 
@@ -435,6 +407,19 @@ On a phone they stay at the top, where they span the screen.
 }
 ```
 
+### One colour from the artwork
+
+With **Background from artwork** on, the pages and the version list can take the artwork's colour instead of the blurred artwork.
+
+```css
+[data-ui='art-wash'] canvas {
+  display: none;
+}
+[data-ui='art-wash'] {
+  background-color: var(--art-tint);
+}
+```
+
 ### Window buttons in a pill of their own
 
 With the navigation along the top, the desktop app puts its window buttons at the end of the last pill. To give them a pill of their own:
@@ -505,18 +490,22 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | `html[data-nav]`                                                             | The navigation on a wide screen: `sidebar`, on a touch screen `rail` or `bar`, and on a TV `tv-rail` or `tv-top`. A narrow screen always has the bar at the bottom                                                                                                                                                                                             |
 | `html[data-in-rows]`                                                         | Set while focus is in the rows under a banner that follows the selected card                                                                                                                                                                                                                                                                                   |
 | `html[data-pointer-focus]`                                                   | Set while focus came from a mouse or a touch, not from keys, a remote or a gamepad                                                                                                                                                                                                                                                                             |
+| `html[data-art-wash]`                                                        | Set while Background from artwork has put a title's artwork behind the pages                                                                                                                                                                                                                                                                                   |
+| `html[data-art-glass]`                                                       | Set while **Glass panels** is on: `frosted` or `liquid`, as **Glass surface** is set                                                                                                                                                                                                                                                                           |
 | `html.playing`                                                               | Set while the player fills the window, not in the mini player                                                                                                                                                                                                                                                                                                  |
-| `[data-page]`                                                                | Each page's container: `home`, `discover`, `library` (a catalog), `search`, `favourites`, `calendar`, `history`, `downloads`, `settings`, `item`, `person`, `player` or `sign-in`. A trailer's player is `player` with `data-name="trailer"`                                                                                                                   |
+| `html[data-blur-spoilers]`                                                   | Set while **Blur episodes you haven't started** is on                                                                                                                                                                                                                                                                                                          |
+| `[data-page]`                                                                | Each page's container: `home`, `discover`, `library` (a catalog), `search`, `favourites`, `live`, `calendar`, `history`, `downloads`, `settings`, `item`, `person`, `player` or `sign-in`. A trailer's player is `player` with `data-name="trailer"`                                                                                                           |
 | `[data-page='sign-in']`                                                      | The screens before you're signed in; `data-name` is `sign-in`, `quick-connect`, `user-picker`, `servers` or `unreachable`                                                                                                                                                                                                                                      |
 | `page-background`                                                            | The colour behind every page                                                                                                                                                                                                                                                                                                                                   |
+| `art-wash`                                                                   | The blurred artwork behind the pages and the version list, with `--art-tint` set on it                                                                                                                                                                                                                                                                         |
 | `shell`                                                                      | The pages and the navigation, kept under the player while a video plays                                                                                                                                                                                                                                                                                        |
 | `page-body`, `page-header`, `page-title`                                     | A page's padded column, its heading row and its title                                                                                                                                                                                                                                                                                                          |
 | `page-message`                                                               | A message that fills the page, such as when there are no catalogs. The message itself is `[data-luffy-error]` (see [shared components](#shared-components))                                                                                                                                                                                                    |
 | `section`, `section-title`                                                   | A titled part of a page; `data-name` is `episodes`, `collection`, `details` or `filmography`                                                                                                                                                                                                                                                                   |
-| `sidebar`                                                                    | The sidebar. Its items are `.UI-VerticalMenu__item`, with `data-name` (`home`, `discover`, `search`, `favourites`, `calendar`, `activity`, `downloads`, `party`, `settings`, `account`) and `data-current="true"` on the page you're on                                                                                                                        |
+| `sidebar`                                                                    | The sidebar. Its items are `.UI-VerticalMenu__item`, with `data-name` (`home`, `discover`, `search`, `favourites`, `live`, `calendar`, `activity`, `downloads`, `party`, `settings`, `account`) and `data-current="true"` on the page you're on                                                                                                                |
 | `sidebar-logo`, `brand-logo`                                                 | The logo in the sidebar, and the logo itself (also on the sign-in screens)                                                                                                                                                                                                                                                                                     |
 | `sidebar-history`                                                            | The back and forward buttons in the sidebar, where the browser has none; `data-name` is `back` or `forward`                                                                                                                                                                                                                                                    |
-| `mobile-nav`, `mobile-nav-item`                                              | The bar at the bottom on a phone, and on a touch screen set to it; `data-names` is `shown` or `hidden`, items have `data-name` as in the sidebar, and `aria-current` on the page you're on                                                                                                                                                                     |
+| `mobile-nav`, `mobile-nav-item`                                              | The bar at the bottom on a phone, and on a touch screen set to it; `data-names` is `shown` or `hidden`. Every page is an item, with `data-name` as in the sidebar, `data-shown` on those the bar shows and `aria-current` on the page you're on                                                                                                                |
 | `touch-rail`, `rail-item`                                                    | The rail down the side on a touch screen, and its items; `data-shape="floating"` when it floats over the page                                                                                                                                                                                                                                                  |
 | `tv-rail`                                                                    | A TV's navigation down the side; `data-shape="floating"` when it floats over the page                                                                                                                                                                                                                                                                          |
 | `top-tabs`, `top-history`                                                    | The navigation along the top, on a TV or a wide window set to it; `data-style` is `pill`, `bar` or `fade`. `top-history` holds its back and forward buttons, where no browser has them                                                                                                                                                                         |
@@ -524,7 +513,7 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | `corner-menu`                                                                | The navigation shrunk to a button in the top corner; `data-open` while it's open                                                                                                                                                                                                                                                                               |
 | `nav-item`                                                                   | An item in `tv-rail`, `top-tabs` and `corner-menu`; `data-name` as in the sidebar, and `aria-current` on the page you're on                                                                                                                                                                                                                                    |
 | `download-ring`                                                              | The ring around your picture while downloads run                                                                                                                                                                                                                                                                                                               |
-| `account-menu`                                                               | The menu under your picture; its items have `data-name`: `activity`, `downloads`, `calendar`, `settings`, `switch-user`, `configure`, `change-server`, `sign-out`                                                                                                                                                                                              |
+| `account-menu`                                                               | The menu under your picture; its items have `data-name`: `settings`, `switch-user`, `configure`, `change-server`, `sign-out`. From the bottom bar it also lists every page as `account-menu-page`, `data-shown` on those the bar shows                                                                                                                         |
 | `connection-note`, `connection-note-downloads`, `connection-note-dismiss`    | The note while the server can't be reached, its **Downloads** button and its close button; `data-state="small"` once it's shrunk to an icon                                                                                                                                                                                                                    |
 | `update-toast`                                                               | The message that an app update is ready. On a TV it's a dialog instead                                                                                                                                                                                                                                                                                         |
 | `window-controls`                                                            | The window buttons in the desktop app; each has `data-name`: `minimise`, `maximise`, `fullscreen` or `close`, and `data-fullscreen` is set while the window is full screen                                                                                                                                                                                     |
@@ -551,6 +540,8 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | `card-preview-logo`, `card-preview-title`, `card-preview-episode`, `card-preview-genres`, `card-preview-overview`                                | Its logo or title, the episode, the genres and the description                                                                                                                                                                                                                                                   |
 | `score`                                                                                                                                          | One rating in a line of facts, on title pages, the featured banner and card previews. `data-source` is `imdb`, `tomatoes`, `tomatoesAudience`, `metacritic`, `letterboxd`, `rogerebert`, `trakt`, `tmdb`, `mal`, or `community` for the server's own rating                                                      |
 | `card-preview-meta`                                                                                                                              | Its line of facts; each has `data-name` (`year`, or `aired` for an episode, `score`, `length`, `rating`), with a `meta-separator` between                                                                                                                                                                        |
+| `open-card`, `open-card-poster`                                                                                                                  | A card opened in its row in place of a preview, and the poster fading off its start as it opens. Its slide (`media-row-item`) has `data-open`, `data-opening` while it opens and `data-trailer` while a trailer plays in it |
+| `trailer-preview-video`, `trailer-preview-embed`                                                                                                 | A trailer playing by itself in a card, the banner or a title page, where the device has no player of its own beneath the page |
 
 ### The featured banner
 
@@ -558,6 +549,7 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `hero`                                                     | The banner; `data-follow` when it follows the selected card, `data-loading` while it loads                        |
 | `hero-backdrop`, `backdrop-frame`, `hero-backdrops`        | The picture, the box holding it, and the layer of them all in the rotating hero, which scrolls at half speed      |
+| `hero-art`                                                 | The still box around the picture, which fades its edges                                                           |
 | `hero-shade`                                               | The shading over the picture; `data-name` is `side` or `bottom`                                                   |
 | `hero-content`, `hero-logo`, `hero-title`, `hero-overview` | The text part, the logo or title, and the description                                                             |
 | `hero-meta`                                                | The line of facts; each has `data-name` (`year` or `episode`, `score`, `genres`), with a `meta-separator` between |
@@ -565,6 +557,7 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | `hero-dots`, `hero-dot`                                    | The dots for each title; `data-current` marks the one showing                                                     |
 | `hero-rows`                                                | The rows scrolling under the banner when it follows the selected card                                             |
 | `hero-corner`                                              | The picture in the top corner, when the banner keeps to the corner                                                |
+| `hero-trailer`                                             | The box a title's trailer plays in, at the banner's end |
 
 ### Title pages
 
@@ -572,6 +565,7 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `item-page`                                                                                                                              | The page; `data-type` is `Movie`, `Series` or `BoxSet`. States: `data-watched`, `data-favourite`                                                                                                                                                     |
 | `item-backdrop`, `item-backdrop-image`, `item-backdrop-shade`                                                                            | The backdrop, its picture (`data-wash` when a blurred poster stands in) and its shading (`data-name` is `side` or `bottom`)                                                                                                                          |
+| `item-trailer`, `item-trailer-hint`                                                                                                      | The title's trailer playing behind the whole page, with its shading, and the line over it naming it (`data-name` `playing`) and how to open the player (`data-name` `controls`) |
 | `item-body`, `item-header`                                                                                                               | Everything over the backdrop, and the top part                                                                                                                                                                                                       |
 | `item-poster`, `item-logo`, `item-title`, `item-tagline`, `item-next-airing`, `item-genres`, `item-genre`, `item-details`, `item-detail` | The parts of the header, and the details list; each detail has `data-name` (`studios`, `released`, `airs`, `country`)                                                                                                                                |
 | `item-meta`                                                                                                                              | The line of facts; each has `data-name` (`year`, `age-rating`, `runtime`, `score`, `status`), with a `meta-separator` between                                                                                                                        |
@@ -633,7 +627,7 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | `player-lock`, `player-unlock`                                                                               | The locked screen on a touch screen, and its button to unlock                                                                                                                                                                 |
 | `next-episode-card`, `next-episode-image`, `next-episode-action`, `next-episode-countdown`                   | The next episode's card near the end; its buttons have `data-name` `play` or `hide`                                                                                                                                           |
 | `still-watching`, `still-watching-image`, `still-watching-action`                                            | The check that you're still watching; its buttons have `data-name` `continue` or `back`                                                                                                                                       |
-| `player-episodes-header`, `player-episodes-seasons`, `player-episodes-list`, `player-episode`                | The player's episode list, `dialog[data-name='episodes']`; `data-current` marks the one playing                                                                                                                               |
+| `player-episodes-header`, `player-episodes-seasons`, `player-episodes-list`, `player-episode`                | The player's episode list, `dialog[data-name='episodes']`; `data-current` marks the one playing, and each has the states of `episode-card` and holds an `episode-image` and an `episode-title`                                 |
 | `player-chapters-header`, `player-chapters-list`, `player-chapter`, `player-chapter-image`                   | The player's chapter list, `dialog[data-name='chapters']`, with a picture of each where the app makes them; `data-current` marks the one playing                                                                              |
 | `sync-by-ear`, `sync-lines`, `sync-line`                                                                     | Subtitle syncing; `data-closest` marks the line nearest now                                                                                                                                                                   |
 | `player-cover`, `player-cover-image`, `player-error`                                                         | What shows while a video loads, and when it fails                                                                                                                                                                             |
@@ -675,6 +669,13 @@ States are attributes set only while true, such as `data-watched`. Match them wi
 | `discover-filters`, `catalog-picker`, `genre-pills`, `genre-pill`, `genre-picker`                                                                                                                                       | Discover's filters: the catalog picker, and the genres as buttons or, when there are many, a picker                                                                                                                                              |
 | `calendar-grid`, `calendar-agenda`, `calendar-day`, `calendar-entry`                                                                                                                                                    | The calendar as a month or a list; `data-today` marks today, `data-watched` a watched episode                                                                                                                                                    |
 | `calendar-nav`, `calendar-month`, `calendar-today`                                                                                                                                                                      | The month buttons (`data-name` is `previous` or `next`), the month shown, and **Today**                                                                                                                                                          |
+| `live-tv`, `channel-list`, `channel-row`, `live-side`, `live-preview`, `channel-details`, `live-watch`, `live-favourite`, `channel-later`, `docked-player`                                                              | Live TV: a group's channels (`data-active` on the one the keys are on, `data-playing` on the one playing), the preview the playing video fills, and the channel's programmes                                                                     |
+| `guide`, `guide-ruler`, `guide-row`, `guide-channel`, `guide-cell`, `guide-now`, `live-top`, `programme-details`                                                                                                        | Live TV's guide: a day of programmes by channel (`data-airing` and `data-active` on cells), the now line, and the programme above it                                                                                                             |
+| `live-group-picker`                                                                                                                                                                                                     | The searchable list of an addon's groups, when there are too many for pills. The pills are `pill-tabs` named `live-group` and `live-view`                                                                                                        |
+| `live-from-start`, `live-day-picker`                                                                                                                                                                                    | From the start, on a programme its channel keeps (its guide cell has `data-catchup`), and the list of the guide's days                                                                                                                           |
+| `player-live`, `live-pill`, `channel-number`, `previous-channel`                                                                                                                                                        | A channel in the player: the programme in place of the seek bar, the Live pill (`data-behind` after a pause), a typed number, and the channels sheet (a `dialog` named `channels`)                                                               |
+| `live-remind`                                                                                                                                                                                                           | Remind me on a later programme (`data-active` once set); its guide cell has `data-reminder`, and the reminder as it starts is a `dialog` named `reminder`                                                                                        |
+| `channel-number`                                                                                                                                                                                                        | The channel number being typed with a remote's digits, over the player or Live TV                                                                                                                                                                |
 | `history-day`, `history-tiles`, `history-tile`, `history-entry`, `history-entry-menu`, `history-table`, `history-view`, `user-chips`                                                                                    | The activity page; `data-open` marks an expanded tile                                                                                                                                                                                            |
 | `downloads-summary`, `downloads-action`                                                                                                                                                                                 | The downloads page's size and folder, and its buttons; `data-name` is `open-folder`, `change-folder`, `open-app`, `pause-all`, `resume-all` or `delete-all`                                                                                      |
 | `downloads-section`, `downloads-show`                                                                                                                                                                                   | A group of downloads (`data-name` is `running`, `attention`, `sent` or `done`), and a show's episodes in it                                                                                                                                      |
@@ -721,6 +722,7 @@ The theme's colours are CSS variables, which you can set in your CSS as well. Th
 | `--color-gray-50` to `--color-gray-950`               | The background's shades, used by panels and text, as `R G B` |
 | `--background`                                        | The page's colour                                            |
 | `--paper`                                             | The colour of menus and dialogs                              |
+| `--art-tint`                                          | The artwork's colour where it meets the page, on `art-wash`  |
 | `--foreground`, `--muted`, `--muted-highlight`        | Text, dimmed text, and dimmed text on hover                  |
 | `--border`, `--ring`                                  | Borders, and the ring around what has keyboard focus         |
 | `--subtle`, `--subtle-highlight`                      | Faint fills, such as behind a hovered item                   |

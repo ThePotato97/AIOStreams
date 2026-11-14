@@ -85,15 +85,10 @@ describe('guest session boundaries', () => {
 });
 
 describe('guest sessions through a restart', () => {
-  it('a session made before a restart is found after it, seat and playback included', async () => {
+  it('a session made before a restart is found after it, seat included', async () => {
     const before = new GuestSessions();
     const session = await before.create('party', Date.now() + 60000);
     await before.claimSeat(session.token, 'seat');
-    await before.update(session.token, (s) => {
-      s.lease = 'lease';
-      s.jobs = { video: 'v1' };
-      s.generation = 3;
-    });
     const after = restarted(before);
     // Nothing in this process yet: not a revocation.
     expect(after.get(session.token)).toBeUndefined();
@@ -101,9 +96,6 @@ describe('guest sessions through a restart', () => {
     expect(found).toMatchObject({
       party: 'party',
       member: 'seat',
-      lease: 'lease',
-      jobs: { video: 'v1' },
-      generation: 3,
     });
     // A reconnect after the restart takes the same seat back.
     expect(await after.claimSeat(session.token, 'seat')).toBe(true);
@@ -118,19 +110,12 @@ describe('guest sessions through a restart', () => {
     await store.releaseSeat(session.token, 'a');
     expect(await store.claimSeat(session.token, 'b')).toBe(true);
   });
-  it('frees the stored lease when a session is revoked, read from the record after a restart', async () => {
+  it('revoking a party after a restart removes its sessions, read from the store', async () => {
     const before = new GuestSessions();
     const session = await before.create('party', Date.now() + 60000);
     await before.claimSeat(session.token, 'seat');
-    await before.update(session.token, (s) => {
-      s.lease = 'lease-1';
-      s.jobs = { video: 'v1' };
-    });
     const after = restarted(before);
-    const released: string[] = [];
-    after.releaseLease = async (lease) => void released.push(lease);
     await after.revokeParty('party');
-    expect(released).toEqual(['lease-1']);
     expect(await after.load(session.token)).toBeUndefined();
   });
   it('keeps no token in what it stores', async () => {

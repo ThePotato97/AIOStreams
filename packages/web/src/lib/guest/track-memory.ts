@@ -1,29 +1,27 @@
 /*
  * A guest's track languages, kept in their browser: guests have no account, so no settings of
- * their own. The language of the audio and subtitle tracks they last picked themselves (or that
- * they turned subtitles off) becomes the preferences the next file opens with, picked by the
- * same rules as a signed-in user's.
+ * their own. The player keeps the tracks a viewer picks for a show in display preferences
+ * (`show-tracks.ts`), which the guest's client keeps here; the languages of the last pick also
+ * become the preferences the next file opens with, a film's included, picked by the same rules as
+ * a signed-in user's.
  */
-import type { EngineFactory } from '../playback/engine';
-import { storage } from '../storage';
-import type { GuestCurrent } from './api';
-import type { PlaybackPrefs } from '../user-config';
+import { storage } from '@/lib/storage';
+import type { PlaybackPrefs } from '@/lib/jellyfin/user-config';
 
 const KEY = 'aiostreams-web-guest-tracks';
+/** How the player writes "subtitles off" in a pick. */
+const OFF = 'off';
 
 interface Remembered {
   audio?: string;
   /** null: subtitles turned off. */
   subtitle?: string | null;
+  /** The display preferences the player keeps, by their id. */
+  picks?: Record<string, Record<string, string>>;
 }
 
 const read = (): Remembered => storage.get<Remembered>(KEY) ?? {};
 
-/**
- * The preferences a guest's next file opens with. The audio language wins over the file's
- * default track, as the guest picked it over that default; without one remembered, the file's
- * default plays as before.
- */
 export function guestPrefs(): PlaybackPrefs {
   const { audio, subtitle } = read();
   return {
@@ -40,65 +38,32 @@ export function guestPrefs(): PlaybackPrefs {
   };
 }
 
-/** Keeps the language of a track the guest picked; null for subtitles turned off. */
-export function rememberTrack(
-  type: 'audio' | 'subtitle',
-  lang: string | null
-): void {
-  if (type === 'audio') {
-    if (lang) storage.set(KEY, { ...read(), audio: lang });
-  } else storage.set(KEY, { ...read(), subtitle: lang });
-}
+/** The display preferences kept under `id`. */
+export const keptPicks = (id: string): Record<string, string> =>
+  read().picks?.[id] ?? {};
 
 /**
- * The guest engine, remembering the language of each track the guest picks (not the ones the
- * player picks as a file opens, which it does while reporting it loaded), and saying when the
- * stream has loaded.
+ * Keeps the display preferences the player writes under `id`. A pick that changed (`audio|subtitle`,
+ * as `show-tracks.ts` writes them) also sets the languages the next file opens with.
  */
-export function rememberingEngine(
-  factory: EngineFactory,
-  current: () => Pick<GuestCurrent, 'media'>,
-  onLoaded: () => void,
-  onRemembered: () => void
-): EngineFactory {
-  return (emit, opts) => {
-    let opening = false;
-    const engine = factory((event) => {
-      if (event.type !== 'loaded') return emit(event);
-      onLoaded();
-      opening = true;
-      try {
-        emit(event);
-      } finally {
-        opening = false;
-      }
-    }, opts);
-    const language = (id: string) =>
-      current().media.tracks.find((t) => String(t.index) === id)?.language;
-    return new Proxy(engine, {
-      get(target, key, receiver) {
-        if (key === 'setAudio')
-          return (id: string) => {
-            const lang = language(id);
-            if (!opening && lang) {
-              rememberTrack('audio', lang);
-              onRemembered();
-            }
-            target.setAudio(id);
-          };
-        if (key === 'setSubtitle')
-          return (id: string | null) => {
-            if (!opening) {
-              const lang = id === null ? null : language(id);
-              if (lang !== undefined) {
-                rememberTrack('subtitle', lang);
-                onRemembered();
-              }
-            }
-            target.setSubtitle(id);
-          };
-        return Reflect.get(target, key, receiver);
-      },
-    });
-  };
+export function keepPicks(id: string, prefs: Record<string, string>): void {
+  const remembered = read();
+  const before = remembered.picks?.[id] ?? {};
+  let { audio, subtitle } = remembered;
+  for (const [show, pick] of Object.entries(prefs)) {
+    if (!pick || pick === before[show]) continue;
+    const [pickedAudio, pickedSubtitle] = pick.split('|');
+    if (pickedAudio) audio = pickedAudio;
+    if (pickedSubtitle === OFF) subtitle = null;
+    else if (pickedSubtitle) subtitle = pickedSubtitle.split(':')[0];
+  }
+  const kept = Object.fromEntries(
+    Object.entries({ ...before, ...prefs }).filter(([, pick]) => !!pick)
+  );
+  storage.set(KEY, {
+    ...remembered,
+    audio,
+    subtitle,
+    picks: { ...remembered.picks, [id]: kept },
+  });
 }

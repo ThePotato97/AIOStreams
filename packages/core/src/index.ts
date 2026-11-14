@@ -72,6 +72,7 @@ export {
   type EasynewsNzbParams,
   SeaDexDataset,
   LibraryAddon,
+  XtreamAddon,
   preWarmLibraryCaches,
   refreshLibraryCacheForService,
   testNabEndpoint,
@@ -105,17 +106,4 @@ export type {
   RunPlayChainResult,
 } from './main/failover.js';
 
-export type {
-  GuestTrack,
-  GuestMedia,
-  GuestCapabilities,
-  GuestPlaybackRequest,
-  GuestPlayback,
-  GuestPlaybackSpec,
-  GuestPlaybackStage,
-  GuestPlaybackFailure,
-  GuestPlaybackState,
-  GuestArtwork,
-  GuestSegment,
-} from './guest.js';
-export { guestPlaybackSpecSchema } from './guest.js';
+export type { GuestFile, GuestArtwork, GuestSegment } from './guest.js';

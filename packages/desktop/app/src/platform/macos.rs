@@ -12,22 +12,27 @@ use aiostreams_desktop_core::bridge::{Outbound, VideoFrame};
 use aiostreams_desktop_core::mpv::Mpv;
 use aiostreams_desktop_core::playback::Fit;
 use aiostreams_desktop_core::render::RenderContext;
+use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use muda::accelerator::Accelerator;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use objc2::rc::Retained;
-use objc2::runtime::AnyClass;
+use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
     AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
 };
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSEvent, NSModalResponseOK, NSOpenPanel, NSResponder, NSView,
-    NSWindow, NSWindowButton, NSWindowOrderingMode,
+    NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowDidExitFullScreenNotification,
+    NSWindowOrderingMode,
 };
 use objc2_core_foundation::{CFString, CFTimeInterval, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGColor;
+use objc2_core_graphics::{CGColor, CGDisplayPixelsHigh, CGMainDisplayID};
 use objc2_core_video::CVTimeStamp;
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSString};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSObject, NSOperationQueue, NSPoint, NSRect, NSSize,
+    NSString,
+};
 use objc2_open_gl::{
     CGLChoosePixelFormat, CGLContextObj, CGLContextParameter, CGLCreateContext, CGLError,
     CGLLockContext, CGLOpenGLProfile, CGLPixelFormatAttribute, CGLPixelFormatObj, CGLRetainContext,
@@ -37,6 +42,7 @@ use objc2_quartz_core::{
     CAAutoresizingMask, CACornerMask, CALayer, CAMetalLayer, CAOpenGLLayer, CATransaction,
     kCAContentsFormatRGBA16Float,
 };
+use tao::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::platform::macos::WindowExtMacOS;
 use tao::window::{Icon, Window};
 
@@ -48,7 +54,77 @@ use video::Output;
 /// Custom protocols are served from `<scheme>://localhost` on macOS.
 pub const APP_URL: &str = "aiostreams://localhost/";
 pub const PLATFORM: &str = "macos";
+pub const PIP: bool = true;
 pub const WEB_DATA_DIR: &str = "WebKit";
+
+fn ns_window(window: &Window) -> &NSWindow {
+    // SAFETY: tao's window, alive as long as `window`.
+    unsafe { &*window.ns_window().cast::<NSWindow>() }
+}
+
+pub fn work_area(window: &Window) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
+    let area = ns_window(window).screen()?.visibleFrame();
+    // Cocoa's y runs up from the main screen's bottom, tao's down from its top.
+    let top = CGDisplayPixelsHigh(CGMainDisplayID()) as f64 - (area.origin.y + area.size.height);
+    let scale = window.scale_factor();
+    Some((
+        LogicalPosition::new(area.origin.x, top).to_physical(scale),
+        LogicalSize::new(area.size.width, area.size.height).to_physical(scale),
+    ))
+}
+
+pub fn keep_aspect(window: &Window, aspect: Option<f64>) {
+    let ns_window = ns_window(window);
+    match aspect {
+        Some(aspect) => ns_window.setContentAspectRatio(NSSize::new(aspect, 1.0)),
+        // AppKit keeps whichever of the two was set last.
+        None => ns_window.setContentResizeIncrements(NSSize::new(1.0, 1.0)),
+    }
+}
+
+thread_local! {
+    static OWN_BEHAVIOR: Cell<Option<NSWindowCollectionBehavior>> = const { Cell::new(None) };
+}
+
+/// Hides the traffic lights and the window's own full screen: the page's controls stand in for both.
+pub fn set_pip(window: &Window, on: bool) {
+    set_window_buttons(window, !on);
+    let ns_window = ns_window(window);
+    let behavior = if on {
+        let own = ns_window.collectionBehavior();
+        OWN_BEHAVIOR.set(Some(own));
+        let mut small = own;
+        small.remove(
+            NSWindowCollectionBehavior::FullScreenPrimary
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+        small.insert(NSWindowCollectionBehavior::FullScreenNone);
+        Some(small)
+    } else {
+        OWN_BEHAVIOR.take()
+    };
+    if let Some(behavior) = behavior {
+        ns_window.setCollectionBehavior(behavior);
+    }
+}
+
+/// Calls `left` as each animation out of full screen ends.
+pub fn on_fullscreen_left(
+    window: &Window,
+    left: impl Fn() + 'static,
+) -> Retained<ProtocolObject<dyn NSObjectProtocol>> {
+    let block = RcBlock::new(move |_: NonNull<NSNotification>| left());
+    let object: &AnyObject = ns_window(window);
+    // SAFETY: AppKit's own name, for this window, observed on the main queue.
+    unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(NSWindowDidExitFullScreenNotification),
+            Some(object),
+            Some(&NSOperationQueue::mainQueue()),
+            &block,
+        )
+    }
+}
 
 /// Held for as long as the app runs.
 pub struct SingleInstance(#[allow(dead_code)] Option<std::fs::File>);
@@ -505,6 +581,7 @@ impl VideoLayer {
             // SAFETY: the static is a valid, constant string.
             layer.setContentsFormat(unsafe { kCAContentsFormatRGBA16Float });
         }
+        video::set_sdr_colorspace(&layer);
         Ok(layer)
     }
 
@@ -792,8 +869,7 @@ pub fn window_icon() -> Option<Icon> {
 
 /// The traffic lights sit over the page, which hides them with the player's controls.
 pub fn set_window_buttons(window: &Window, visible: bool) {
-    // SAFETY: tao's window, alive as long as `window`.
-    let ns_window: &NSWindow = unsafe { &*window.ns_window().cast::<NSWindow>() };
+    let ns_window = ns_window(window);
     for kind in [
         NSWindowButton::CloseButton,
         NSWindowButton::MiniaturizeButton,
@@ -1014,6 +1090,17 @@ pub fn device_name() -> String {
     command_output("scutil", &["--get", "ComputerName"])
         .or_else(|| command_output("hostname", &["-s"]))
         .unwrap_or_else(|| "Mac".into())
+}
+
+/// The locale's hours, which follow the system's 24-hour switch.
+pub fn hours24() -> Option<bool> {
+    let pattern = objc2_foundation::NSDateFormatter::dateFormatFromTemplate_options_locale(
+        &NSString::from_str("j"),
+        0,
+        Some(&objc2_foundation::NSLocale::currentLocale()),
+    )?
+    .to_string();
+    Some(pattern.contains('H') || pattern.contains('k'))
 }
 
 /// `("2026-09-24", "21:03:04.123")`.

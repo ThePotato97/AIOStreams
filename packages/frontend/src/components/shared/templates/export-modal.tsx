@@ -228,9 +228,9 @@ export function TemplateExportModal({
               <p>
                 See the{' '}
                 <a
-                  href="https://docs.aiostreams.viren070.me/guides/templates"
+                  href="https://aiostreams.org/guides/templates"
                   target="_blank"
-                  className="text-[--brand] hover:text-[--brand]/80 hover:underline"
+                  className="text-[--brand] hover:text-brand-300/80 hover:underline"
                   rel="noopener noreferrer"
                 >
                   Templates docs

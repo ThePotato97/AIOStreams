@@ -1,6 +1,6 @@
 /*
- * One reader per source, shared by everything that reads it: the transcoder's probes and
- * FFmpegs, subtitle extraction, guests playing the original file. The source is read from
+ * One reader per source, shared by everything that reads it: every guest's player reading the
+ * party's file, and the page's own open of it. The source is read from
  * upstream once, in blocks kept on disk, by a few sequential cursors; every range request is
  * served from those blocks. A read inside a range a cursor is already fetching waits for it;
  * anything else starts a new cursor there. When the cache is over its budget, the blocks
@@ -59,7 +59,7 @@ export type SourceStatus =
   | { state: 'idle' | 'resolving' | 'ok' }
   | {
       state: 'failed';
-      /** The source failed (not the transcoder): what `code` says, as the guest routes name it. */
+      /** The source failed: what `code` says, as the guest routes name it. */
       class: 'source';
       status: number;
       code?: string;
@@ -362,7 +362,7 @@ export class SourceReader {
     this.readAhead = options.readAhead ?? READ_AHEAD;
   }
 
-  /** The reader's state, for the transcoder to tell a source failure from its own. */
+  /** The reader's state: whether it opened, is opening, or failed and why. */
   status(): SourceStatus {
     if (this.failure) return this.failure;
     if (this.length !== null) return { state: 'ok' };

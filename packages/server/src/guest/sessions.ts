@@ -15,26 +15,12 @@ const status = (code: number, message: string, code2?: string) =>
   });
 const logger = createLogger('guest');
 
-/** A playback's stream jobs at the transcoder: video, and audio and subtitles when converted. */
-export interface PlaybackJobs {
-  video: string;
-  audio?: string;
-  subtitle?: string;
-}
 /** What a guest session keeps, in the shared store: never its token, only the token's digest as its id. */
 export interface SavedGuestSession {
   party: string;
   member?: string;
   expiresAt: number;
   createdAt: number;
-  /** The converted playback's jobs at the transcoder, held by `lease`. */
-  jobs?: PlaybackJobs;
-  lease?: string;
-  generation?: number;
-  /** The playing source: its handle's digest (the handle itself is kept, sealed, with the share). */
-  sourceRef?: string;
-  offsetMs?: number;
-  revision?: string;
 }
 /** A guest session as this process holds it: what's stored, with the token it was asked by. */
 export interface GuestSession extends SavedGuestSession {
@@ -62,8 +48,6 @@ export class GuestSessions {
   private cache = new Map<string, { session: GuestSession; at: number }>();
   private tombstones = new Map<string, number>();
   private records: SharedRecords<SavedGuestSession> | undefined;
-  /** Frees a lease at the transcoder: the guest server sets it. */
-  releaseLease: (lease: string) => Promise<void> = async () => {};
 
   private store(): SharedRecords<SavedGuestSession> {
     return (this.records ??= sharedBackend().records<SavedGuestSession>({
@@ -89,7 +73,7 @@ export class GuestSessions {
     };
   }
 
-  /** Revoked here at once (a tombstone `load` honours), then in the store, its lease freed. */
+  /** Revoked here at once (a tombstone `load` honours), then in the store. */
   private revoke(key: string): void {
     this.tombstones.set(key, Date.now() + TOMBSTONE_MS);
     this.cache.delete(key);
@@ -101,14 +85,10 @@ export class GuestSessions {
     this.listeners.delete(key);
   }
 
-  /** Removes a stored session and frees what it held at the transcoder. */
+  /** Removes a stored session. */
   private async drop(key: string): Promise<void> {
     this.revoke(key);
-    const lease = await this.store().update(key, (s, tx) => {
-      tx.drop();
-      return s.jobs ? s.lease : undefined;
-    });
-    if (lease) await this.releaseLease(lease).catch(() => {});
+    await this.store().update(key, (_s, tx) => tx.drop());
   }
 
   /**
