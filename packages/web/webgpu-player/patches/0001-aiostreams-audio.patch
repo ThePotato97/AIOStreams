@@ -53,6 +53,134 @@ index d4696eb..818bc2c 100644
  /** Owns one decoder of an audio decoder package in the audio decode worker. */
  export default class PackageSoftwareAudioDecoder {
      private readonly decoder: AudioDecoderPackageInstance;
+diff --git a/src/demux/dolby-vision/DolbyVisionDisplayManagement.ts b/src/demux/dolby-vision/DolbyVisionDisplayManagement.ts
+new file mode 100644
+index 0000000..13fa095
+--- /dev/null
++++ b/src/demux/dolby-vision/DolbyVisionDisplayManagement.ts
+@@ -0,0 +1,104 @@
++import { DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH, DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH } from './DolbyVisionRPUParser';
++
++/** CIE xy of a display's primaries and white. */
++export type DolbyVisionPrimaries = Readonly<{
++    red: readonly [number, number]
++    green: readonly [number, number]
++    blue: readonly [number, number]
++    white: readonly [number, number]
++}>;
++
++/**
++ * A frame's Dolby Vision display-management levels as the RPU codes them (12-bit codes; 2048 is a neutral trim), in coded
++ * order: the first 8 L2, 5 L8 and 4 L10, and the last of each single level. Custom primaries are signed Q15 CIE xy.
++ */
++export type DolbyVisionDisplayManagement = Readonly<{
++    sourceMinPQ: number
++    sourceMaxPQ: number
++    level1: Readonly<{ min: number, avg: number, max: number }> | null
++    level2: readonly Readonly<{
++        targetMaxPQ: number, slope: number, offset: number, power: number, chromaWeight: number, saturationGain: number
++    }>[]
++    /** 2048 is no offset */
++    level3: Readonly<{ min: number, avg: number, max: number }> | null
++    level5: Readonly<{ left: number, right: number, top: number, bottom: number }> | null
++    level8: readonly Readonly<{
++        targetIndex: number, slope: number, offset: number, power: number, chromaWeight: number, saturationGain: number,
++        midContrast: number, clipTrim: number
++    }>[]
++    /** The index; at 19 and above, the custom primaries */
++    level9: Readonly<{ index: number, primaries: DolbyVisionPrimaries }> | null
++    level10: readonly Readonly<{
++        targetIndex: number, primaryIndex: number, targetMaxPQ: number, targetMinPQ: number, primaries: DolbyVisionPrimaries
++    }>[]
++    /** dm_version_index; null without an L254 */
++    level254: number | null
++}>;
++
++const FLAG_PRESENT = 1 << 0;
++const FLAG_LEVEL1 = 1 << 1;
++const FLAG_LEVEL3 = 1 << 2;
++const FLAG_LEVEL5 = 1 << 3;
++const FLAG_LEVEL9 = 1 << 4;
++const FLAG_LEVEL254 = 1 << 5;
++const MAXIMUM_L2 = 8;
++const MAXIMUM_L8 = 5;
++const MAXIMUM_L10 = 4;
++
++/** Returns a parser snapshot's display-management levels, or null when its RPU carries no display metadata. */
++export function readDolbyVisionDisplayManagement(packedData: ArrayBuffer): DolbyVisionDisplayManagement | null {
++    if (packedData.byteLength !== DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH) {
++        throw new RangeError(`packedData: ${packedData.byteLength} bytes, expected ${DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH}`);
++    }
++    const view = new DataView(packedData, DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH);
++    let word = 0;
++    const next = (): number => view.getUint32(4 * word++, true);
++    const flags = next();
++    if (!(flags & FLAG_PRESENT)) {
++        return null;
++    }
++    const q15 = (): number => ((next() << 16) >> 16) / 32_768;
++    const primaries = (): DolbyVisionPrimaries => ({
++        red: [ q15(), q15() ], green: [ q15(), q15() ], blue: [ q15(), q15() ], white: [ q15(), q15() ]
++    });
++    const sourceMinPQ = next();
++    const sourceMaxPQ = next();
++    const l1 = { min: next(), avg: next(), max: next() };
++    const l2Count = next();
++    const level2 = [];
++    for (let i = 0; i < MAXIMUM_L2; i++) {
++        const entry = { targetMaxPQ: next(), slope: next(), offset: next(), power: next(), chromaWeight: next(), saturationGain: next() };
++        if (i < l2Count) level2.push(entry);
++    }
++    const l3 = { min: next(), avg: next(), max: next() };
++    const l5 = { left: next(), right: next(), top: next(), bottom: next() };
++    const l8Count = next();
++    const level8 = [];
++    for (let i = 0; i < MAXIMUM_L8; i++) {
++        const entry = {
++            targetIndex: next(), slope: next(), offset: next(), power: next(), chromaWeight: next(), saturationGain: next(),
++            midContrast: next(), clipTrim: next()
++        };
++        if (i < l8Count) level8.push(entry);
++    }
++    const l9 = { index: next(), primaries: primaries() };
++    const l10Count = next();
++    const level10 = [];
++    for (let i = 0; i < MAXIMUM_L10; i++) {
++        const entry = { targetIndex: next(), primaryIndex: next(), targetMaxPQ: next(), targetMinPQ: next(), primaries: primaries() };
++        if (i < l10Count) level10.push(entry);
++    }
++    const l254 = next();
++    return {
++        sourceMinPQ,
++        sourceMaxPQ,
++        level1: flags & FLAG_LEVEL1 ? l1 : null,
++        level2,
++        level3: flags & FLAG_LEVEL3 ? l3 : null,
++        level5: flags & FLAG_LEVEL5 ? l5 : null,
++        level8,
++        level9: flags & FLAG_LEVEL9 ? l9 : null,
++        level10,
++        level254: flags & FLAG_LEVEL254 ? l254 : null
++    };
++}
+diff --git a/src/demux/dolby-vision/DolbyVisionRPUParser.ts b/src/demux/dolby-vision/DolbyVisionRPUParser.ts
+index 9e7b95a..9689973 100644
+--- a/src/demux/dolby-vision/DolbyVisionRPUParser.ts
++++ b/src/demux/dolby-vision/DolbyVisionRPUParser.ts
+@@ -19,8 +19,11 @@ import WorkerWASMInstanceCache, { isWASMTrap } from './WorkerWASMInstanceCache';
+ import { isDolbyVisionDualLayerProfile } from './DolbyVisionProfiles';
+ 
+ export const DOLBY_VISION_RPU_PARSER_WASM_ASSET: EngineAssetPath = 'libdovi/dovi-rpu-parser.wasm';
+-export const DOLBY_VISION_RPU_SCHEMA_VERSION = 2;
+-export const DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH = 3_232;
++export const DOLBY_VISION_RPU_SCHEMA_VERSION = 3;
++/** The reshaping snapshot the GPU reads, then the display-management levels (DolbyVisionDisplayManagement.ts). */
++export const DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH = 3_232;
++export const DOLBY_VISION_RPU_DISPLAY_MANAGEMENT_BYTE_LENGTH = 648;
++export const DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH = DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH + DOLBY_VISION_RPU_DISPLAY_MANAGEMENT_BYTE_LENGTH;
+ export const DOLBY_VISION_RPU_PARSER_REVISION_PREFIX = 0x38AD_EC04;
+ export const DOLBY_VISION_RPU_SCHEMA_MAGIC = 0x5052_5644;
+ export const MAXIMUM_DOLBY_VISION_RPU_PARSER_INPUT_BYTE_LENGTH = 64 * 1_024;
 diff --git a/src/embed/AtmosDetection.ts b/src/embed/AtmosDetection.ts
 new file mode 100644
 index 0000000..875d4d9
@@ -634,6 +762,537 @@ index 35dc39f..0068309 100644
              sampleRate: output.sampleRate
          }, attempt.streamingDownmixSettings);
          const sampleWindow = getAudioSampleWindow(
+diff --git a/src/presentation/WebGPUPresenter.ts b/src/presentation/WebGPUPresenter.ts
+index 18d2deb..940dbad 100644
+--- a/src/presentation/WebGPUPresenter.ts
++++ b/src/presentation/WebGPUPresenter.ts
+@@ -28,7 +28,13 @@ import {
+     isDolbyVisionDualLayerProfile,
+     type DolbyVisionReconstructionProfile
+ } from './PresentationInput';
+-import { readDolbyVisionRPUSnapshotHeader, type DolbyVisionRPUSnapshotHeader } from '../demux/dolby-vision/DolbyVisionRPUParser';
++import {
++    DOLBY_VISION_RPU_DISPLAY_MANAGEMENT_BYTE_LENGTH,
++    DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH,
++    readDolbyVisionRPUSnapshotHeader,
++    type DolbyVisionRPUSnapshotHeader
++} from '../demux/dolby-vision/DolbyVisionRPUParser';
++import { loadDolbyVisionDM, type DolbyVisionDMFrame, type DolbyVisionDMImplementation } from './dolby-vision-dm/DolbyVisionDM';
+ import {
+     getRawFormatBitDepth,
+     isRawDolbyVisionVideoFrameFormat,
+@@ -705,6 +711,33 @@ function withHDROutput(configuration: BuiltinChainConfiguration, hdrOutput: bool
+     return { ...configuration, hdrOutput };
+ }
+ 
++/** Returns a Dolby Vision route's chain configuration with the build's display management in place of the tone map, when it has one. */
++function withDolbyVisionDM(configuration: BuiltinChainConfiguration, dm: DolbyVisionDMImplementation | null): BuiltinChainConfiguration {
++    if (dm === null) {
++        return configuration;
++    }
++    switch (configuration.route) {
++        case 'external-dolby-vision':
++        case 'frame-pool-dolby-vision':
++        case 'raw-dolby-vision':
++            return { ...configuration, dolbyVisionDM: dm.wgsl };
++        default:
++            return configuration;
++    }
++}
++
++/** The display management's state for the frames presented: what it last computed, and the gamut LUT it reads. */
++type DolbyVisionDMState = {
++    block: Uint32Array | null
++    executor: PresentationExecutor | null
++    frame: DolbyVisionDMFrame | null
++    gamut: Readonly<{ name: string, texels: Uint32Array<ArrayBuffer> }> | null
++    gamutExecutor: PresentationExecutor | null
++    gamutLoading: string | null
++    gamutFailed: Set<string>
++    target: string
++};
++
+ /**
+  * Returns a route's chain configuration with field-aware chroma while plans deinterlace: the planar routes' signals then read an interlaced frame's 4:2:0 chroma
+  * within each field. External sources arrive with the browser's chroma upsampling, and the Dolby Vision routes never deinterlace.
+@@ -1486,6 +1519,11 @@ export default class WebGPUPresenter {
+     // The session's declared frame rate, which plans read as frame.rate
+     private streamFrameRate: number | null = null;
+     private settings: RenderSettings = createDefaultRenderSettings();
++    // The build's Dolby Vision display management, once loaded; null without one
++    private dolbyVisionDM: DolbyVisionDMImplementation | null = null;
++    private readonly dolbyVisionDMState: DolbyVisionDMState = {
++        block: null, executor: null, frame: null, gamut: null, gamutExecutor: null, gamutLoading: null, gamutFailed: new Set(), target: ''
++    };
+     private surface: PresentationSurface | null = null;
+     private submissionValidated = false;
+     private telemetry = createTelemetry(this.settings);
+@@ -1499,6 +1537,71 @@ export default class WebGPUPresenter {
+         this.decodedPresentationRefreshHandler = decodedPresentationRefreshHandler;
+         this.deviceLossHandler = deviceLossHandler;
+         this.scheduleDevicePrewarm();
++        void loadDolbyVisionDM().then((dm: DolbyVisionDMImplementation | null): void => {
++            if (!dm) {
++                return;
++            }
++            this.dolbyVisionDM = dm;
++            // A Dolby Vision route planned before it loaded plans again with it
++            if (withDolbyVisionDM(this.desiredChainConfiguration, dm) !== this.desiredChainConfiguration) {
++                this.planRevision += 1;
++                void this.applyPlanInputs().catch((): void => undefined);
++            }
++        });
++    }
++
++    /**
++     * Writes a frame's packed RPU, and the display management's tables when the plan reads them: computed again when the frame's
++     * display-management levels or the target change, with the gamut LUT the display wants once it has loaded.
++     */
++    private writeDolbyVisionRPU(executor: PresentationExecutor, packedRPUData: ArrayBuffer): void {
++        executor.writeDolbyVisionRPU(packedRPUData);
++        const dm = this.dolbyVisionDM;
++        if (!dm || !executor.bindsDolbyVisionDM) {
++            return;
++        }
++        const state = this.dolbyVisionDMState;
++        const block = new Uint32Array(packedRPUData, DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH, DOLBY_VISION_RPU_DISPLAY_MANAGEMENT_BYTE_LENGTH / 4);
++        const hdr = this.isHDROutputActive();
++        const target = { hdr, peakNits: this.settings.mode === 'hdr-to-sdr' ? this.settings.toneMapping.outputPeakNits : 100 };
++        const targetKey = `${target.hdr} ${target.peakNits} ${state.gamut?.name ?? ''}`;
++        const same = state.executor === executor && state.target === targetKey && state.block !== null
++            && state.block.length === block.length && state.block.every((word: number, index: number): boolean => word === block[index]);
++        if (!same) {
++            const frame = dm.compute(block, target, state.gamut?.name ?? null);
++            state.block = block.slice();
++            state.target = targetKey;
++            state.executor = executor;
++            if (frame) {
++                state.frame = frame;
++                if (frame.gamut && state.gamut?.name === frame.gamut && state.gamutExecutor !== executor) {
++                    executor.writeDolbyVisionGamut(state.gamut.texels);
++                    state.gamutExecutor = executor;
++                }
++                executor.writeDolbyVisionDM(frame.tables);
++                this.loadDolbyVisionGamut(dm, frame.wantedGamut);
++            }
++        }
++    }
++
++    /** Loads the gamut LUT the display management wants; the next frame computes its tables with it. */
++    private loadDolbyVisionGamut(dm: DolbyVisionDMImplementation, name: string | null): void {
++        const state = this.dolbyVisionDMState;
++        if (!name || state.gamut?.name === name || state.gamutLoading === name || state.gamutFailed.has(name)) {
++            return;
++        }
++        state.gamutLoading = name;
++        void dm.loadGamut(name).then((texels: Uint32Array<ArrayBuffer>): void => {
++            state.gamut = { name, texels };
++            state.gamutExecutor = null;
++            state.target = '';
++        }, (): void => {
++            state.gamutFailed.add(name);
++        }).finally((): void => {
++            if (state.gamutLoading === name) {
++                state.gamutLoading = null;
++            }
++        });
+     }
+ 
+     private scheduleDevicePrewarm(): void {
+@@ -3418,7 +3521,7 @@ export default class WebGPUPresenter {
+         const configuration = withStreamChroma(this.desiredChainConfiguration, this.streamChromaSubsampling, this.streamChromaLocation);
+         return {
+             blackBarAnalysis: this.blackBarCropEnabled,
+-            chain: createBuiltinChain(withInterlacedChroma(withHDROutput(configuration, hdrOutput), deinterlace !== null)),
++            chain: createBuiltinChain(withInterlacedChroma(withDolbyVisionDM(withHDROutput(configuration, hdrOutput), this.dolbyVisionDM), deinterlace !== null)),
+             deinterlace,
+             displayRateAvailable: this.decodedFramePushActive,
+             device: {
+@@ -3818,7 +3921,7 @@ export default class WebGPUPresenter {
+                     this.fallback(generation, 'dolby-vision-metadata-invalid', rpu.failure);
+                     return null;
+                 }
+-                executor.writeDolbyVisionRPU(rpu.data);
++                this.writeDolbyVisionRPU(executor, rpu.data);
+                 break;
+             }
+             case 'external-hdr': {
+@@ -3950,7 +4053,7 @@ export default class WebGPUPresenter {
+             this.fallback(generation, 'dolby-vision-metadata-invalid', rpu.failure);
+             return null;
+         }
+-        executor.writeDolbyVisionRPU(rpu.data.packedRPUData);
++        this.writeDolbyVisionRPU(executor, rpu.data.packedRPUData);
+         const submission = this.submitFrame(
+             { frame: decodedFrame.frame, kind: 'frame-pool' },
+             decodedFrame.displayWidth,
+@@ -4024,7 +4127,7 @@ export default class WebGPUPresenter {
+             return null;
+         }
+         const dualLayerRPUData = rpu.data.dualLayer;
+-        executor.writeDolbyVisionRPU(rpu.data.packedRPUData);
++        this.writeDolbyVisionRPU(executor, rpu.data.packedRPUData);
+         const enhancementFrame = getComposedEnhancementFrame(
+             dualLayerRPUData,
+             this.activeDolbyVisionFELReconstruction,
+diff --git a/src/presentation/dolby-vision-dm/DolbyVisionDM.ts b/src/presentation/dolby-vision-dm/DolbyVisionDM.ts
+new file mode 100644
+index 0000000..cb6ec2e
+--- /dev/null
++++ b/src/presentation/dolby-vision-dm/DolbyVisionDM.ts
+@@ -0,0 +1,61 @@
++// The hook for a Dolby Vision display management stage: a build may supply one (implementation.ts), which then takes the
++// tone map's place on the Dolby Vision routes. This file only holds the hook; the stock implementation.ts supplies none,
++// and the routes keep the engine's own tone map.
++import { resolveEngineAssetURL, type EngineAssetPath } from '../../EngineAssets';
++import { loadImplementation } from './implementation';
++
++/** The 'dolby-vision-dm' binding's size in floats, which an implementation's tables fit in. */
++export const DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY = 4_096;
++
++/** The 'dolby-vision-gamut' binding's size in words: a 65-node cube of RGBA uint16, the largest gamut LUT. */
++export const DOLBY_VISION_DM_GAMUT_WORD_CAPACITY = 65 * 65 * 65 * 2;
++
++/** The display the stage renders for. */
++export type DolbyVisionDMTarget = Readonly<{
++    /** HDR output: the canvas takes extended-range values; otherwise SDR. */
++    hdr: boolean
++    /** The display's peak in nits (HDR output's peak setting); SDR uses the DM's own SDR target. */
++    peakNits: number
++}>;
++
++/** What the stage writes for a frame: the 'dolby-vision-dm' binding's floats, and the gamut LUT those were made for. */
++export type DolbyVisionDMFrame = Readonly<{
++    tables: Float32Array<ArrayBuffer>
++    /** The gamut LUT the tables read, null for none; DolbyVisionDMImplementation.loadGamut gives its texels. */
++    gamut: string | null
++    /** The LUT the stage would rather read, when it differs from `gamut` because that one isn't loaded */
++    wantedGamut: string | null
++    /** Shown in the stats, such as "CM v4.0, 1000 nits" */
++    description: string
++}>;
++
++export type DolbyVisionDMImplementation = Readonly<{
++    /**
++     * WGSL defining `fn applyDolbyVisionDM(linearNits: vec3f) -> vec3f`: linear BT.2020 nits of the reconstructed signal to linear BT.2020, relative to SDR white, for
++     * the target, read through the 'dolby-vision-dm' resource (dolbyVisionDM, dolbyVisionGamut).
++     */
++    wgsl: string
++    /** The 'dolby-vision-dm' binding's length in floats. */
++    tableFloatCount: number
++    /**
++     * The tables for a frame's display-management levels (DolbyVisionDisplayManagement.ts, as the parser packs them) and the target,
++     * reading the gamut LUT `loadedGamut` when it is the one wanted; null when the frame carries no display metadata.
++     */
++    compute(block: Uint32Array, target: DolbyVisionDMTarget, loadedGamut: string | null): DolbyVisionDMFrame | null
++    /** A gamut LUT's nodes for the 'dolby-vision-gamut' binding, at most DOLBY_VISION_DM_GAMUT_WORD_CAPACITY words. */
++    loadGamut(name: string): Promise<Uint32Array<ArrayBuffer>>
++}>;
++
++/** Fetches a file of the stage, relative to `<asset base>/dolby-vision-dm/`. */
++export type DolbyVisionDMFetch = (path: string) => Promise<Response>;
++
++const fetchAsset: DolbyVisionDMFetch = (path: string): Promise<Response> =>
++    fetch(resolveEngineAssetURL(`dolby-vision-dm/${path}` as EngineAssetPath));
++
++let loading: Promise<DolbyVisionDMImplementation | null> | null = null;
++
++/** Loads the build's display management stage once; null when the build has none or it fails to load. */
++export function loadDolbyVisionDM(): Promise<DolbyVisionDMImplementation | null> {
++    loading ??= (loadImplementation?.(fetchAsset) ?? Promise.resolve(null)).catch((): null => null);
++    return loading;
++}
+diff --git a/src/presentation/dolby-vision-dm/implementation.ts b/src/presentation/dolby-vision-dm/implementation.ts
+new file mode 100644
+index 0000000..5eeb52e
+--- /dev/null
++++ b/src/presentation/dolby-vision-dm/implementation.ts
+@@ -0,0 +1,4 @@
++// The stock build has no Dolby Vision display management stage (DolbyVisionDM.ts); a build that has one replaces this file.
++import type { DolbyVisionDMFetch, DolbyVisionDMImplementation } from './DolbyVisionDM';
++
++export const loadImplementation: ((fetchAsset: DolbyVisionDMFetch) => Promise<DolbyVisionDMImplementation>) | null = null;
+diff --git a/src/presentation/passes/PassResources.ts b/src/presentation/passes/PassResources.ts
+index e99b1a7..687173c 100644
+--- a/src/presentation/passes/PassResources.ts
++++ b/src/presentation/passes/PassResources.ts
+@@ -96,6 +96,18 @@ const UNSIGNED_PLANE_LAYOUT: Omit<GPUBindGroupLayoutEntry, 'binding' | 'visibili
+ };
+ 
+ const ENGINE_BINDINGS: Readonly<Record<EngineBindingResource, EngineBindingDeclaration>> = {
++    // The Dolby Vision display management's tables and constants (src/presentation/dolby-vision-dm)
++    'dolby-vision-dm': {
++        declaration: 'var<storage, read> dolbyVisionDM: array<f32>;',
++        layout: { buffer: { type: 'read-only-storage' } },
++        structs: []
++    },
++    // Its gamut LUT, IPT to display RGB: RGBA uint16 nodes, two to a word pair (R | G << 16, B | A << 16), I fastest
++    'dolby-vision-gamut': {
++        declaration: 'var<storage, read> dolbyVisionGamut: array<u32>;',
++        layout: { buffer: { type: 'read-only-storage' } },
++        structs: []
++    },
+     'dolby-vision-rpu': {
+         declaration: 'var<storage, read> dolbyVisionRPU: DolbyVisionRPUData;',
+         layout: { buffer: { type: 'read-only-storage' } },
+@@ -169,6 +181,7 @@ const ENGINE_BINDINGS: Readonly<Record<EngineBindingResource, EngineBindingDecla
+ };
+ 
+ const ENGINE_RESOURCE_BINDINGS: Readonly<Record<EngineResource, readonly EngineBindingResource[]>> = {
++    'dolby-vision-dm': [ 'dolby-vision-dm', 'dolby-vision-gamut' ],
+     'dolby-vision-enhancement': [ 'enhancement-luma', 'enhancement-chroma-u', 'enhancement-chroma-v', 'enhancement-uniform' ],
+     'dolby-vision-rpu': [ 'dolby-vision-rpu' ],
+     'external-texture': [ 'external-texture' ],
+diff --git a/src/presentation/passes/PassTypes.ts b/src/presentation/passes/PassTypes.ts
+index 52c63c0..67e16ec 100644
+--- a/src/presentation/passes/PassTypes.ts
++++ b/src/presentation/passes/PassTypes.ts
+@@ -165,6 +165,7 @@ export type PassManifest = {
+ 
+ /** A group of engine-owned bindings that built-in code reads; PassResources expands each into its bindings. */
+ export type EngineResource =
++    | 'dolby-vision-dm'
+     | 'dolby-vision-enhancement'
+     | 'dolby-vision-rpu'
+     | 'external-texture'
+@@ -176,6 +177,8 @@ export type EngineResource =
+ 
+ /** One engine-owned binding, with a fixed WGSL variable name in PassResources. */
+ export type EngineBindingResource =
++    | 'dolby-vision-dm'
++    | 'dolby-vision-gamut'
+     | 'dolby-vision-rpu'
+     | 'enhancement-chroma-u'
+     | 'enhancement-chroma-v'
+@@ -307,6 +310,8 @@ export type BuiltinChainConfiguration =
+         format: RawDolbyVisionFrameFormat
+         hdrOutput: boolean
+         profile: DolbyVisionReconstructionProfile
++        /** A build's Dolby Vision display management WGSL, which replaces the tone map (presentation/dolby-vision-dm) */
++        dolbyVisionDM?: string | null
+         route: 'raw-dolby-vision'
+         settings: HDRToSDRRenderSettings
+     }
+@@ -346,10 +351,12 @@ export type BuiltinChainConfiguration =
+         format: GPUDecoderOutputFormat
+         hdrOutput: boolean
+         profile: DolbyVisionReconstructionProfile
++        /** A build's Dolby Vision display management WGSL, which replaces the tone map (presentation/dolby-vision-dm) */
++        dolbyVisionDM?: string | null
+         route: 'frame-pool-dolby-vision'
+         settings: HDRToSDRRenderSettings
+     }
+-    | { hdrOutput: boolean; route: 'external-dolby-vision'; settings: HDRToSDRRenderSettings }
++    | { dolbyVisionDM?: string | null; hdrOutput: boolean; route: 'external-dolby-vision'; settings: HDRToSDRRenderSettings }
+     | {
+         chromaLocation?: ChromaLocation | null
+         /** The stream's chroma subsampling, at which the planes derived from the browser's RGB hold chroma; null for chroma at the image's size */
+diff --git a/src/presentation/passes/PresentationExecutor.ts b/src/presentation/passes/PresentationExecutor.ts
+index 2bf5a4b..5ea1270 100644
+--- a/src/presentation/passes/PresentationExecutor.ts
++++ b/src/presentation/passes/PresentationExecutor.ts
+@@ -1,6 +1,7 @@
+ // Encodes frames from a presentation plan: it owns the plan's GPU resources, takes each frame's source, and records the passes in plan order.
+ // The Presentation section of docs/src/architecture.md describes the design it implements.
+ import { DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH } from '../../demux/dolby-vision/DolbyVisionRPUParser';
++import { DOLBY_VISION_DM_GAMUT_WORD_CAPACITY, DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY } from '../dolby-vision-dm/DolbyVisionDM';
+ import {
+     RAW_VIDEO_DOLBY_VISION_ENHANCEMENT_FRAME_FORMAT,
+     type RawVideoPlaneKind,
+@@ -92,6 +93,8 @@ const PRESENTATION_UNIFORMS_LABEL = 'Presentation uniforms';
+ const PARAMETERS_LABEL = 'Presentation parameters';
+ const RENDER_SETTINGS_LABEL = 'Presentation render settings';
+ const DOLBY_VISION_RPU_LABEL = 'Presentation Dolby Vision RPU';
++const DOLBY_VISION_DM_LABEL = 'Presentation Dolby Vision DM';
++const DOLBY_VISION_GAMUT_LABEL = 'Presentation Dolby Vision gamut LUT';
+ const ENHANCEMENT_UNIFORM_LABEL = 'Presentation Dolby Vision enhancement uniforms';
+ const SAMPLER_LABEL = 'Presentation linear sampler';
+ const PASS_SAMPLER_LABEL = 'Presentation texture block sampler';
+@@ -694,6 +697,8 @@ export class PresentationExecutor {
+     private readonly blackBarAnalysis: PlannedBlackBarAnalysis | null;
+     private readonly device: GPUDevice;
+     private readonly dolbyVisionRPUBuffer: GPUBuffer | null;
++    private readonly dolbyVisionDMBuffer: GPUBuffer | null;
++    private readonly dolbyVisionGamutBuffer: GPUBuffer | null;
+     private readonly enhancementBuffer: GPUBuffer | null;
+     private readonly enhancementView: DataView<ArrayBuffer> = new DataView(new ArrayBuffer(ENHANCEMENT_UNIFORM_BYTE_LENGTH));
+     // Frame pool bind groups per layout uniform, so a pool that names each slot with its own layout buffer never creates them per frame
+@@ -805,6 +810,18 @@ export class PresentationExecutor {
+                 DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH,
+                 GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+             );
++            this.dolbyVisionDMBuffer = this.createOptionalBuffer(
++                engineResources.has('dolby-vision-dm'),
++                DOLBY_VISION_DM_LABEL,
++                DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY * Float32Array.BYTES_PER_ELEMENT,
++                GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
++            );
++            this.dolbyVisionGamutBuffer = this.createOptionalBuffer(
++                engineResources.has('dolby-vision-gamut'),
++                DOLBY_VISION_GAMUT_LABEL,
++                DOLBY_VISION_DM_GAMUT_WORD_CAPACITY * Uint32Array.BYTES_PER_ELEMENT,
++                GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
++            );
+             this.sampler = engineResources.has('sampler-linear') ?
+                 device.createSampler({ label: SAMPLER_LABEL, magFilter: 'linear', minFilter: 'linear' }) :
+                 null;
+@@ -884,6 +901,33 @@ export class PresentationExecutor {
+         }
+     }
+ 
++    /** Whether a pass of the plan reads the Dolby Vision display management's tables. */
++    get bindsDolbyVisionDM(): boolean {
++        return this.dolbyVisionDMBuffer !== null;
++    }
++
++    /** Writes the Dolby Vision display management's tables and constants; it does nothing when no pass binds them. */
++    writeDolbyVisionDM(tables: Float32Array<ArrayBuffer>): void {
++        this.requireUsable();
++        if (tables.length > DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY) {
++            throw new RangeError(`Dolby Vision DM tables: ${tables.length} floats, above ${DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY}`);
++        }
++        if (this.dolbyVisionDMBuffer) {
++            this.device.queue.writeBuffer(this.dolbyVisionDMBuffer, 0, tables);
++        }
++    }
++
++    /** Writes the Dolby Vision gamut LUT's nodes; nothing when no pass binds them. */
++    writeDolbyVisionGamut(words: Uint32Array<ArrayBuffer>): void {
++        this.requireUsable();
++        if (words.length > DOLBY_VISION_DM_GAMUT_WORD_CAPACITY) {
++            throw new RangeError(`Dolby Vision gamut LUT: ${words.length} words, above ${DOLBY_VISION_DM_GAMUT_WORD_CAPACITY}`);
++        }
++        if (this.dolbyVisionGamutBuffer) {
++            this.device.queue.writeBuffer(this.dolbyVisionGamutBuffer, 0, words);
++        }
++    }
++
+     /** Writes the packed Dolby Vision RPU; it does nothing when no pass binds the RPU. */
+     writeDolbyVisionRPU(data: ArrayBuffer): void {
+         this.requireUsable();
+@@ -1271,6 +1315,10 @@ export class PresentationExecutor {
+         switch (resource) {
+             case 'dolby-vision-rpu':
+                 return this.dolbyVisionRPUBuffer && { buffer: this.dolbyVisionRPUBuffer };
++            case 'dolby-vision-dm':
++                return this.dolbyVisionDMBuffer && { buffer: this.dolbyVisionDMBuffer };
++            case 'dolby-vision-gamut':
++                return this.dolbyVisionGamutBuffer && { buffer: this.dolbyVisionGamutBuffer };
+             case 'enhancement-uniform':
+                 return this.enhancementBuffer && { buffer: this.enhancementBuffer };
+             case 'render-settings':
+diff --git a/src/presentation/passes/builtin/BuiltinChains.ts b/src/presentation/passes/builtin/BuiltinChains.ts
+index 01c5835..2c07240 100644
+--- a/src/presentation/passes/builtin/BuiltinChains.ts
++++ b/src/presentation/passes/builtin/BuiltinChains.ts
+@@ -32,7 +32,8 @@ function createColorTrackChain(
+     signal: SignalDefinition,
+     metadata: InputColorMetadata,
+     settings: RenderSettings,
+-    hdrOutput: boolean
++    hdrOutput: boolean,
++    dolbyVisionDM: string | null = null
+ ): BuiltinChain {
+     assertValidInputColorMetadata(metadata);
+     assertValidRenderSettings(settings);
+@@ -44,7 +45,7 @@ function createColorTrackChain(
+             { colorFunctions: [], linearLight, signal, sourceIsDisplay: true } :
+             { colorFunctions: [ gamutConversion ], linearLight, signal, sourceIsDisplay: false };
+     }
+-    return { colorFunctions: createBuiltinColorFunctions(metadata, hdrOutput), linearLight, signal, sourceIsDisplay: false };
++    return { colorFunctions: createBuiltinColorFunctions(metadata, hdrOutput, dolbyVisionDM), linearLight, signal, sourceIsDisplay: false };
+ }
+ 
+ /** Builds a route's built-in chain: its fixed signal and its default color functions, with the legacy fused shader's math in its order. */
+@@ -69,7 +70,8 @@ export function createBuiltinChain(configuration: BuiltinChainConfiguration): Bu
+                 createExternalDolbyVisionSignal(),
+                 DOLBY_VISION_OUTPUT_METADATA,
+                 configuration.settings,
+-                configuration.hdrOutput
++                configuration.hdrOutput,
++                configuration.dolbyVisionDM ?? null
+             );
+         case 'raw-yuv':
+             return createColorTrackChain(
+@@ -83,7 +85,8 @@ export function createBuiltinChain(configuration: BuiltinChainConfiguration): Bu
+                 createRawDolbyVisionSignal(configuration.format, configuration.profile, configuration.felReconstruction, configuration.chromaLocation ?? null),
+                 DOLBY_VISION_OUTPUT_METADATA,
+                 configuration.settings,
+-                configuration.hdrOutput
++                configuration.hdrOutput,
++                configuration.dolbyVisionDM ?? null
+             );
+         case 'frame-pool':
+             // The signal reads the GPU decoder's slots, and the color track is the raw YUV route's
+@@ -99,7 +102,8 @@ export function createBuiltinChain(configuration: BuiltinChainConfiguration): Bu
+                 createFramePoolDolbyVisionSignal(configuration.format, configuration.profile, configuration.chromaLocation ?? null),
+                 DOLBY_VISION_OUTPUT_METADATA,
+                 configuration.settings,
+-                configuration.hdrOutput
++                configuration.hdrOutput,
++                configuration.dolbyVisionDM ?? null
+             );
+     }
+ }
+diff --git a/src/presentation/passes/builtin/BuiltinColorFunctions.ts b/src/presentation/passes/builtin/BuiltinColorFunctions.ts
+index ae2613c..420c1ca 100644
+--- a/src/presentation/passes/builtin/BuiltinColorFunctions.ts
++++ b/src/presentation/passes/builtin/BuiltinColorFunctions.ts
+@@ -821,6 +821,34 @@ function createToneMapColorFunction(metadata: InputColorMetadata): BuiltinColorF
+     };
+ }
+ 
++const DOLBY_VISION_DM_RESOURCES: readonly EngineResource[] = Object.freeze([ 'render-settings', 'dolby-vision-dm' ]);
++
++/**
++ * Returns the tone map's step for a build's Dolby Vision display management (presentation/dolby-vision-dm), under the tone map's name.
++ * Its WGSL maps the reconstructed signal's linear nits to linear BT.2020 relative to SDR white; this step converts that to BT.709 and to the
++ * output encode's nits: the SDR encode's output peak is SDR white, and HDR output's paper white is.
++ */
++function createDolbyVisionDMColorFunction(metadata: InputColorMetadata, dmWGSL: string, hdrOutput: boolean): BuiltinColorFunction {
++    const white = hdrOutput ? 'renderSettings.paperWhiteNits' : 'renderSettings.outputPeakNits';
++    return {
++        code: joinWGSL([
++            createGamutConversionWGSL(metadata),
++            dmWGSL,
++            `
++fn ${TONE_MAP_ENTRY_POINT}(color: vec4f, position: vec2f) -> vec4f {
++    let relativeBT709 = convertToBT709(applyDolbyVisionDM(max(color.rgb, vec3f(0.0))));
++    return vec4f(relativeBT709 * ${white}, color.a);
++}`
++        ]),
++        entryPoint: TONE_MAP_ENTRY_POINT,
++        inputState: 'linear',
++        name: TONE_MAP_NAME,
++        outputState: 'display-linear',
++        pinnedToOutput: false,
++        resources: DOLBY_VISION_DM_RESOURCES
++    };
++}
++
+ /**
+  * Returns identity SDR's gamut conversion, from display-encoded RGB in the metadata's primaries to display-encoded BT.709, or null for BT.709 primaries
+  * and for HDR: the BT.709 curve decodes each component, the primaries' linear matrix converts it, the result clips to [0, 1], and the curve encodes it again.
+@@ -877,10 +905,17 @@ fn ${SDR_GAMUT_ENTRY_POINT}(color: vec4f, position: vec2f) -> vec4f {
+  * SDR output decodes, tone maps, encodes sRGB, applies the display controls, and dithers, as the legacy processColor did.
+  * HDR output decodes, tone maps, and encodes extended-range sRGB relative to paper white, without display controls or dither.
+  */
+-export function createBuiltinColorFunctions(metadata: InputColorMetadata, hdrOutput: boolean): readonly BuiltinColorFunction[] {
++export function createBuiltinColorFunctions(
++    metadata: InputColorMetadata,
++    hdrOutput: boolean,
++    dolbyVisionDM: string | null = null
++): readonly BuiltinColorFunction[] {
+     assertValidInputColorMetadata(metadata);
+     const colorFunctions: BuiltinColorFunction[] = [];
+-    colorFunctions.push(createTransferDecodeColorFunction(metadata), createToneMapColorFunction(metadata));
++    colorFunctions.push(
++        createTransferDecodeColorFunction(metadata),
++        dolbyVisionDM === null ? createToneMapColorFunction(metadata) : createDolbyVisionDMColorFunction(metadata, dolbyVisionDM, hdrOutput)
++    );
+     if (hdrOutput) {
+         colorFunctions.push(HDR_OUTPUT_ENCODE_COLOR_FUNCTION);
+         return colorFunctions;
 diff --git a/test/decode/audio/SelfLimitedPackage.test.ts b/test/decode/audio/SelfLimitedPackage.test.ts
 new file mode 100644
 index 0000000..70dcc3b
@@ -728,6 +1387,46 @@ index 0000000..70dcc3b
 +        expect(peak(output)).toBeLessThanOrEqual(CUSTOM_AUDIO_LIMITER_CEILING_GAIN + 1e-6);
 +    });
 +});
+diff --git a/test/demux/dolby-vision/DolbyVisionRPUParser.test.ts b/test/demux/dolby-vision/DolbyVisionRPUParser.test.ts
+index 45a3784..f5592d9 100644
+--- a/test/demux/dolby-vision/DolbyVisionRPUParser.test.ts
++++ b/test/demux/dolby-vision/DolbyVisionRPUParser.test.ts
+@@ -1,5 +1,6 @@
+ // @vitest-environment node
+ 
++import { readDolbyVisionDisplayManagement } from '../../../src/demux/dolby-vision/DolbyVisionDisplayManagement';
+ import { createDolbyVisionAV1ITUTT35Payload } from '../../helpers/dolbyVisionAV1ITUTT35Payload';
+ import {
+     createMixedDolbyVisionRPUVector,
+@@ -24,6 +25,7 @@ import DolbyVisionRPUParser, {
+     MAXIMUM_DOLBY_VISION_RPU_PARSER_MEMORY_BYTE_LENGTH,
+     readDolbyVisionRPUSnapshotHeader,
+     resolveDolbyVisionRPUParserWASMURL,
++    DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH,
+     type DolbyVisionRPUContainerProfile,
+     type DolbyVisionRPUParserDependencies,
+     type DolbyVisionRPULayerMode
+@@ -297,9 +299,17 @@ describe('DolbyVisionRPUParser pinned WASM integration', () => {
+                 expect(snapshot.components.map(component => component.mmrVectorCount)).toEqual(
+                     vector.componentMMRVectorCounts
+                 );
+-                expect(createHash('sha256')
+-                    .update(new Uint8Array(snapshot.packedData))
+-                    .digest('hex')).toBe(vector.sha256);
++                // The reshaping snapshot is schema 2's byte for byte, under its version and length words; the
++                // display-management levels follow it
++                const mapping = new Uint8Array(snapshot.packedData.slice(0, DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH));
++                const header = new DataView(mapping.buffer);
++                header.setUint32(4, 2, true);
++                header.setUint32(8, DOLBY_VISION_RPU_MAPPING_BYTE_LENGTH, true);
++                expect(createHash('sha256').update(mapping).digest('hex')).toBe(vector.sha256);
++                const dm = readDolbyVisionDisplayManagement(snapshot.packedData);
++                expect(dm).not.toBeNull();
++                expect([ dm?.sourceMinPQ, dm?.sourceMaxPQ ]).toEqual(vector.sourcePQ);
++                expect(dm?.level1 && [ dm.level1.min, dm.level1.max, dm.level1.avg ]).toEqual(vector.level1);
+             } finally {
+                 parser.close();
+             }
 diff --git a/test/embed/AtmosDetection.test.ts b/test/embed/AtmosDetection.test.ts
 new file mode 100644
 index 0000000..2c6a84e
@@ -790,3 +1489,298 @@ index 0000000..2c6a84e
 +        expect(readTrueHDAtmos(hex('628b4fadf8726fba'))).toBeNull();
 +    });
 +});
+diff --git a/wasm/libdovi/src/lib.rs b/wasm/libdovi/src/lib.rs
+index a3b4482..8ba83e8 100644
+--- a/wasm/libdovi/src/lib.rs
++++ b/wasm/libdovi/src/lib.rs
+@@ -15,7 +15,7 @@ use dolby_vision::rpu::rpu_data_nlq::DoviELType;
+ use dolby_vision::rpu::vdr_dm_data::VdrDmData;
+ 
+ const PARSER_SCHEMA_MAGIC: u32 = 0x5052_5644;
+-const PARSER_SCHEMA_VERSION: u32 = 2;
++const PARSER_SCHEMA_VERSION: u32 = 3;
+ const PARSER_REVISION_PREFIX: u32 = 0x38AD_EC04;
+ const MAXIMUM_LINEAR_MEMORY_BYTE_LENGTH: u32 = 16 * 1_024 * 1_024;
+ const MAXIMUM_SHARED_BUFFER_BYTE_LENGTH: usize = 64 * 1_024;
+@@ -38,9 +38,18 @@ const COMPONENT_BYTE_LENGTH: usize = (COMPONENT_HEADER_U32_COUNT
+     + COMPONENT_SEGMENT_FLOAT_COUNT
+     + COMPONENT_MMR_FLOAT_COUNT)
+     * size_of::<u32>();
+-const OUTPUT_BYTE_LENGTH: usize = HEADER_BYTE_LENGTH
++const MAPPING_BYTE_LENGTH: usize = HEADER_BYTE_LENGTH
+     + ((COLOR_FLOAT_COUNT + NLQ_FLOAT_COUNT) * size_of::<f32>())
+     + (3 * COMPONENT_BYTE_LENGTH);
++// The display-management levels follow the mapping: the raw 12-bit RPU codes of L0-L3, L5, L8-L10 and L254
++const DM_MAXIMUM_L2: usize = 8;
++const DM_MAXIMUM_L8: usize = 5;
++const DM_MAXIMUM_L10: usize = 4;
++const DM_U32_COUNT: usize = 1 + 2 + 3 + 1 + (DM_MAXIMUM_L2 * 6) + 3 + 4 + 1 + (DM_MAXIMUM_L8 * 8) + 1 + 8 + 1
++    + (DM_MAXIMUM_L10 * 12)
++    + 1;
++const DM_BYTE_LENGTH: usize = DM_U32_COUNT * size_of::<u32>();
++const OUTPUT_BYTE_LENGTH: usize = MAPPING_BYTE_LENGTH + DM_BYTE_LENGTH;
+ const LAST_ERROR_BYTE_LENGTH: usize = 512;
+ const MISSING_U32: u32 = u32::MAX;
+ 
+@@ -371,6 +380,162 @@ struct PackedSnapshot {
+     rpu_profile: u8,
+     rpu_header: dolby_vision::rpu::rpu_data_header::RpuDataHeader,
+     mapping_header: [u32; 5],
++    dm: PackedDisplayManagement,
++}
++
++/// The display-management levels a display-management stage reads, as the raw RPU codes, in coded order across the
++/// CM v2.9 then CM v4.0 sections: the first 8 L2, 5 L8 and 4 L10, and the last of each single level
++#[derive(Default)]
++struct PackedDisplayManagement {
++    flags: u32,
++    source_pq: [u32; 2],
++    level1: [u32; 3],
++    level2: Vec<[u32; 6]>,
++    level3: [u32; 3],
++    level5: [u32; 4],
++    level8: Vec<[u32; 8]>,
++    level9: [u32; 9],
++    level10: Vec<[u32; 12]>,
++    level254: u32,
++}
++
++const DM_FLAG_PRESENT: u32 = 1 << 0;
++const DM_FLAG_LEVEL1: u32 = 1 << 1;
++const DM_FLAG_LEVEL3: u32 = 1 << 2;
++const DM_FLAG_LEVEL5: u32 = 1 << 3;
++const DM_FLAG_LEVEL9: u32 = 1 << 4;
++const DM_FLAG_LEVEL254: u32 = 1 << 5;
++
++impl PackedDisplayManagement {
++    fn new(color: &VdrDmData, present: bool) -> Self {
++        let mut dm = Self {
++            source_pq: [color.source_min_pq as u32, color.source_max_pq as u32],
++            level3: [2_048; 3],
++            level254: MISSING_U32,
++            ..Default::default()
++        };
++        if !present {
++            return dm;
++        }
++        dm.flags = DM_FLAG_PRESENT;
++        let blocks = [&color.cmv29_metadata, &color.cmv40_metadata]
++            .into_iter()
++            .flatten()
++            .flat_map(|section| match section {
++                DmData::V29(metadata) => metadata.blocks_ref(),
++                DmData::V40(metadata) => metadata.blocks_ref(),
++            });
++        for block in blocks {
++            match block {
++                ExtMetadataBlock::Level1(b) => {
++                    dm.flags |= DM_FLAG_LEVEL1;
++                    dm.level1 = [b.min_pq as u32, b.avg_pq as u32, b.max_pq as u32];
++                }
++                ExtMetadataBlock::Level2(b) if dm.level2.len() < DM_MAXIMUM_L2 => {
++                    dm.level2.push([
++                        b.target_max_pq as u32,
++                        b.trim_slope as u32,
++                        b.trim_offset as u32,
++                        b.trim_power as u32,
++                        b.trim_chroma_weight as u32,
++                        b.trim_saturation_gain as u32,
++                    ]);
++                }
++                ExtMetadataBlock::Level3(b) => {
++                    dm.flags |= DM_FLAG_LEVEL3;
++                    dm.level3 = [b.min_pq_offset as u32, b.avg_pq_offset as u32, b.max_pq_offset as u32];
++                }
++                ExtMetadataBlock::Level5(b) => {
++                    dm.flags |= DM_FLAG_LEVEL5;
++                    dm.level5 = [
++                        b.active_area_left_offset as u32,
++                        b.active_area_right_offset as u32,
++                        b.active_area_top_offset as u32,
++                        b.active_area_bottom_offset as u32,
++                    ];
++                }
++                ExtMetadataBlock::Level8(b) if dm.level8.len() < DM_MAXIMUM_L8 => {
++                    dm.level8.push([
++                        b.target_display_index as u32,
++                        b.trim_slope as u32,
++                        b.trim_offset as u32,
++                        b.trim_power as u32,
++                        b.trim_chroma_weight as u32,
++                        b.trim_saturation_gain as u32,
++                        b.target_mid_contrast as u32,
++                        b.clip_trim as u32,
++                    ]);
++                }
++                ExtMetadataBlock::Level9(b) => {
++                    dm.flags |= DM_FLAG_LEVEL9;
++                    dm.level9 = [
++                        b.source_primary_index as u32,
++                        b.source_primary_red_x as u32,
++                        b.source_primary_red_y as u32,
++                        b.source_primary_green_x as u32,
++                        b.source_primary_green_y as u32,
++                        b.source_primary_blue_x as u32,
++                        b.source_primary_blue_y as u32,
++                        b.source_primary_white_x as u32,
++                        b.source_primary_white_y as u32,
++                    ];
++                }
++                // The DM drops custom-primary entries whose y values are all 0
++                ExtMetadataBlock::Level10(b)
++                    if dm.level10.len() < DM_MAXIMUM_L10
++                        && !(b.target_primary_index >= 19
++                            && b.target_primary_red_y == 0
++                            && b.target_primary_green_y == 0
++                            && b.target_primary_blue_y == 0) =>
++                {
++                    dm.level10.push([
++                        b.target_display_index as u32,
++                        b.target_primary_index as u32,
++                        b.target_max_pq as u32,
++                        b.target_min_pq as u32,
++                        b.target_primary_red_x as u32,
++                        b.target_primary_red_y as u32,
++                        b.target_primary_green_x as u32,
++                        b.target_primary_green_y as u32,
++                        b.target_primary_blue_x as u32,
++                        b.target_primary_blue_y as u32,
++                        b.target_primary_white_x as u32,
++                        b.target_primary_white_y as u32,
++                    ]);
++                }
++                ExtMetadataBlock::Level254(b) => {
++                    dm.flags |= DM_FLAG_LEVEL254;
++                    dm.level254 = b.dm_version_index as u32;
++                }
++                _ => {}
++            }
++        }
++        dm
++    }
++
++    fn write(&self, writer: &mut PackedWriter<'_>) {
++        let start = writer.offset;
++        writer.write_u32(self.flags);
++        self.source_pq.iter().for_each(|&v| writer.write_u32(v));
++        self.level1.iter().for_each(|&v| writer.write_u32(v));
++        writer.write_u32(self.level2.len() as u32);
++        for index in 0..DM_MAXIMUM_L2 {
++            self.level2.get(index).unwrap_or(&[0; 6]).iter().for_each(|&v| writer.write_u32(v));
++        }
++        self.level3.iter().for_each(|&v| writer.write_u32(v));
++        self.level5.iter().for_each(|&v| writer.write_u32(v));
++        writer.write_u32(self.level8.len() as u32);
++        for index in 0..DM_MAXIMUM_L8 {
++            self.level8.get(index).unwrap_or(&[0; 8]).iter().for_each(|&v| writer.write_u32(v));
++        }
++        self.level9.iter().for_each(|&v| writer.write_u32(v));
++        writer.write_u32(self.level10.len() as u32);
++        for index in 0..DM_MAXIMUM_L10 {
++            self.level10.get(index).unwrap_or(&[0; 12]).iter().for_each(|&v| writer.write_u32(v));
++        }
++        writer.write_u32(self.level254);
++        debug_assert_eq!(writer.offset - start, DM_BYTE_LENGTH);
++    }
+ }
+ 
+ impl PackedSnapshot {
+@@ -415,6 +580,7 @@ impl PackedSnapshot {
+                 }
+                 _ => None,
+             });
++        let dm = PackedDisplayManagement::new(&color, explicit_color_metadata);
+         let mut flags = nlq_flags;
+         if used_previous_mapping {
+             flags |= FLAG_USED_PREVIOUS_MAPPING;
+@@ -449,6 +615,7 @@ impl PackedSnapshot {
+                 require_u32(mapping.num_x_partitions_minus1 + 1, "X partition count")?,
+                 require_u32(mapping.num_y_partitions_minus1 + 1, "Y partition count")?,
+             ],
++            dm,
+         })
+     }
+ 
+@@ -564,6 +731,8 @@ impl PackedSnapshot {
+         for component in &self.components {
+             component.write(&mut writer);
+         }
++        debug_assert_eq!(writer.offset, MAPPING_BYTE_LENGTH);
++        self.dm.write(&mut writer);
+         debug_assert_eq!(writer.offset, OUTPUT_BYTE_LENGTH);
+         debug_assert_eq!(
+             self.explicit_color_metadata,
+@@ -2412,6 +2581,73 @@ mod tests {
+         assert_eq!(failure.code, STATUS_MISSING_MAPPING_STATE);
+     }
+ 
++    #[test]
++    fn display_management_levels_follow_the_mapping_as_raw_codes() {
++        use dolby_vision::rpu::extension_metadata::blocks::{
++            ExtMetadataBlockLevel10, ExtMetadataBlockLevel2, ExtMetadataBlockLevel254,
++            ExtMetadataBlockLevel3, ExtMetadataBlockLevel5, ExtMetadataBlockLevel8,
++            ExtMetadataBlockLevel9,
++        };
++        let mut rpu = profile8_rpu();
++        let color = rpu.vdr_dm_data.as_mut().unwrap();
++        for level in [1, 2, 3, 5, 8, 9, 10, 254] {
++            color.remove_metadata_level(level);
++        }
++        let blocks = [
++            ExtMetadataBlock::Level1(ExtMetadataBlockLevel1::new(7, 2_081, 1_247)),
++            ExtMetadataBlock::Level2(ExtMetadataBlockLevel2 {
++                target_max_pq: 2_081, trim_slope: 2_100, trim_offset: 2_000, trim_power: 2_200,
++                trim_chroma_weight: 2_048, trim_saturation_gain: 2_300, ms_weight: 2_048,
++            }),
++            ExtMetadataBlock::Level3(ExtMetadataBlockLevel3 { min_pq_offset: 2_040, max_pq_offset: 2_060, avg_pq_offset: 2_050 }),
++            ExtMetadataBlock::Level5(ExtMetadataBlockLevel5 {
++                active_area_left_offset: 0, active_area_right_offset: 0,
++                active_area_top_offset: 138, active_area_bottom_offset: 138,
++            }),
++            ExtMetadataBlock::Level8(ExtMetadataBlockLevel8 {
++                length: 10, target_display_index: 1, trim_slope: 1_900, ..Default::default()
++            }),
++            ExtMetadataBlock::Level9(ExtMetadataBlockLevel9 { length: 1, source_primary_index: 2, ..Default::default() }),
++            ExtMetadataBlock::Level10(ExtMetadataBlockLevel10 {
++                length: 5, target_display_index: 40, target_max_pq: 3_079, target_min_pq: 62,
++                target_primary_index: 0, ..Default::default()
++            }),
++            ExtMetadataBlock::Level254(ExtMetadataBlockLevel254 { dm_mode: 0, dm_version_index: 2 }),
++        ];
++        for block in blocks {
++            color.add_metadata_block(block).unwrap();
++        }
++        let mut context = ParserContext::default();
++        let output = parse_into(&mut context, &encode(&rpu)).unwrap();
++        let dm = |word: usize| header_word(&output[MAPPING_BYTE_LENGTH..], word);
++        assert_eq!(dm(0), DM_FLAG_PRESENT | DM_FLAG_LEVEL1 | DM_FLAG_LEVEL3 | DM_FLAG_LEVEL5 | DM_FLAG_LEVEL9 | DM_FLAG_LEVEL254);
++        assert_eq!([dm(3), dm(4), dm(5)], [7, 1_247, 2_081]);
++        // L2: count, then target, slope, offset, power, chroma weight, saturation gain
++        assert_eq!(dm(6), 1);
++        assert_eq!((7..13).map(dm).collect::<Vec<_>>(), [2_081, 2_100, 2_000, 2_200, 2_048, 2_300]);
++        let l3 = 7 + DM_MAXIMUM_L2 * 6;
++        assert_eq!([dm(l3), dm(l3 + 1), dm(l3 + 2)], [2_040, 2_050, 2_060]);
++        assert_eq!((l3 + 3..l3 + 7).map(dm).collect::<Vec<_>>(), [0, 0, 138, 138]);
++        // L8 of length 10: the fields it doesn't code read as the neutral 2048
++        let l8 = l3 + 7;
++        assert_eq!(dm(l8), 1);
++        assert_eq!((l8 + 1..l8 + 9).map(dm).collect::<Vec<_>>(), [1, 1_900, 2_048, 2_048, 2_048, 2_048, 2_048, 2_048]);
++        let l9 = l8 + 1 + DM_MAXIMUM_L8 * 8;
++        assert_eq!(dm(l9), 2);
++        let l10 = l9 + 9;
++        assert_eq!(dm(l10), 1);
++        assert_eq!((l10 + 1..l10 + 5).map(dm).collect::<Vec<_>>(), [40, 0, 3_079, 62]);
++        assert_eq!(dm(l10 + 1 + DM_MAXIMUM_L10 * 12), 2);
++        assert_eq!(l10 + 2 + DM_MAXIMUM_L10 * 12, DM_U32_COUNT);
++    }
++
++    #[test]
++    fn display_management_is_absent_without_display_metadata() {
++        let mut context = ParserContext::default();
++        let output = parse_into(&mut context, &encode(&without_color_metadata(profile8_rpu()))).unwrap();
++        assert_eq!(header_word(&output[MAPPING_BYTE_LENGTH..], 0), 0);
++    }
++
+     #[test]
+     fn rpu_without_display_metadata_presents_defaults_and_keeps_stored_metadata() {
+         let mut context = ParserContext::default();

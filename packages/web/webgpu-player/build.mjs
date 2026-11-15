@@ -4,14 +4,22 @@
 // pinned revision (engine.json) with this fork's patches (patches/*.patch), and our audio decoder
 // packages (atmos-render's: truehd, eac3, dts) in place of the engine's own.
 //
-// The engine's WebAssembly (its output stage, libdovi, its video decoder packages) is used as
-// published: none of the patches touch it, and rebuilding the facade and workers from the
-// unpatched source gives the published files byte for byte. So the build needs Node and Git only.
+// The engine's WebAssembly (its output stage, its video decoder packages) is used as published.
+// The Dolby Vision RPU parser (wasm/libdovi) is rebuilt from the patched source with the engine's
+// own Makefile target and pinned Rust, since the patch adds the display-management levels to its
+// output; unpatched, that target rebuilds the published parser byte for byte. Rebuilding the facade
+// and workers from the unpatched source gives the published files byte for byte too.
+//
+// With --dm, the build has a Dolby Vision display management stage: the directory's
+// implementation.ts replaces the engine's stub (src/presentation/dolby-vision-dm), and its dm.wasm
+// and luts/ are served at libraries/dolby-vision-dm/. Without it, Dolby Vision keeps the engine's
+// own tone map.
 //
 // The web app's build (rsbuild.config.ts) serves dist/libraries when dist/version.json exists, and
 // the published package otherwise.
 //
 // Usage: node build.mjs --packages <dir with truehd.wasm, eac3.wasm, dts.wasm and their notices>
+//                       [--dm <the Dolby Vision display management's build: implementation.ts, dm.wasm, luts/>]
 //                       [--engine <an engine checkout to use as it stands, patches already in it>]
 //                       [--published <the published package's tarball, in place of the installed one>]
 // The published package is the one packages/web installed, or a tarball (`npm pack`) that must match
@@ -50,6 +58,7 @@ const ASSET_KEY_LENGTH = 16;
 const { values } = parseArgs({
   options: {
     packages: { type: 'string' },
+    dm: { type: 'string' },
     engine: { type: 'string' },
     published: { type: 'string' },
   },
@@ -111,7 +120,7 @@ function patch(engine) {
   run('git', ['reset', '--hard', '--quiet'], engine);
   run(
     'git',
-    ['clean', '-d', '--force', '--quiet', '--', 'src', 'test'],
+    ['clean', '-d', '--force', '--quiet', '--', 'src', 'test', 'wasm/libdovi/src'],
     engine
   );
   for (const name of patches)
@@ -135,6 +144,15 @@ function files(root) {
 const publishedDirectory = publishedPackage();
 const engine = checkout();
 patch(engine);
+const DM_IMPLEMENTATION = join(engine, 'src', 'presentation', 'dolby-vision-dm', 'implementation.ts');
+if (values.dm) {
+  for (const name of ['implementation.ts', 'dm.wasm', join('luts', 'index.json')])
+    if (!existsSync(join(values.dm, name)))
+      throw new Error(`${name} is missing from ${values.dm}`);
+  copyFileSync(join(values.dm, 'implementation.ts'), DM_IMPLEMENTATION);
+}
+// The RPU parser, from the patched crate with its pinned Rust (rust-toolchain.toml, which rustup installs)
+run('make', ['-C', 'wasm', 'build-libdovi'], engine);
 // The engine's toolchain: esbuild, and the Mediabunny fork the facade and workers bundle.
 if (!existsSync(join(engine, 'node_modules', 'esbuild')))
   run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], engine);
@@ -194,6 +212,16 @@ for (const name of readdirSync(values.packages)) {
 for (const name of OUR_PACKAGES)
   if (!existsSync(join(values.packages, name)))
     throw new Error(`${name} is missing from ${values.packages}`);
+copyFileSync(
+  join(engine, 'wasm', 'build', 'libdovi', 'output', 'dovi-rpu-parser.wasm'),
+  join(libraries, 'libdovi', 'dovi-rpu-parser.wasm')
+);
+if (values.dm) {
+  const served = join(libraries, 'dolby-vision-dm');
+  mkdirSync(served, { recursive: true });
+  copyFileSync(join(values.dm, 'dm.wasm'), join(served, 'dm.wasm'));
+  cpSync(join(values.dm, 'luts'), join(served, 'luts'), { recursive: true });
+}
 // Each passes the engine's own package loader, as the player will load it.
 const { checkDecoderPackage } = await import(
   join(engine, 'tools', 'decoder-package-format.mjs')
@@ -225,6 +253,7 @@ for (const file of files(libraries).filter((f) => !rebuilt.has(f))) {
 }
 for (const name of patches)
   hash.update(readFileSync(join(HERE, 'patches', name)));
+hash.update(readFileSync(DM_IMPLEMENTATION));
 const assetKey = hash.digest('hex').slice(0, ASSET_KEY_LENGTH);
 
 // The workers and the facade, with the engine's own esbuild options (scripts/build.mjs and
@@ -267,8 +296,8 @@ await build({
 
 writeFileSync(
   join(DIST, 'version.json'),
-  `${JSON.stringify({ engine: PIN.tag, commit: PIN.commit, patches, assetKey }, null, 2)}\n`
+  `${JSON.stringify({ engine: PIN.tag, commit: PIN.commit, patches, dolbyVisionDM: Boolean(values.dm), assetKey }, null, 2)}\n`
 );
 console.log(
-  `webgpu-player: built ${PIN.tag} with ${patches.length} patches and our packages (key ${assetKey})`
+  `webgpu-player: built ${PIN.tag} with ${patches.length} patches, our packages${values.dm ? ' and the Dolby Vision DM' : ''} (key ${assetKey})`
 );

@@ -23,11 +23,10 @@ COPY services/atmos-render /atmos-render
 RUN sh /atmos-render/package/build.sh /packages
 
 # The WebGPU player the web app serves: its engine rebuilt from the pinned source with this fork's
-# patch, with the packages above (packages/web/webgpu-player/build.mjs). Also built once.
-FROM --platform=$BUILDPLATFORM node:24.18.1-slim AS webgpu-player
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+# patch, with the packages above (packages/web/webgpu-player/build.mjs). Also built once. On the
+# packages' stage, whose Rust (rustup) builds the patched Dolby Vision RPU parser with the crate's
+# pinned toolchain.
+FROM atmos-packages AS webgpu-player
 WORKDIR /build
 COPY pnpm-lock.yaml ./
 COPY packages/web/webgpu-player ./packages/web/webgpu-player
