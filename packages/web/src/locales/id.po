@@ -2425,10 +2425,6 @@ msgstr "macOS merender video dengan penggunaan daya lebih rendah dan menangani t
 msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
 msgstr ""
 
-#: src/features/share/share-links-card.tsx
-#~ msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
-#~ msgstr ""
-
 #: src/lib/i18n.ts
 msgid "Magenta"
 msgstr "Magenta"

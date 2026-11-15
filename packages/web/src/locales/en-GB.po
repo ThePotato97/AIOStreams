@@ -2510,10 +2510,6 @@ msgstr "macOS draws the video, using less power, and shows Dolby Vision itself. 
 msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
 msgstr "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
 
-#: src/features/share/share-links-card.tsx
-#~ msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
-#~ msgstr "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
-
 #: src/lib/i18n.ts
 msgid "Magenta"
 msgstr "Magenta"

@@ -2438,10 +2438,6 @@ msgstr "由 macOS 负责渲染视频，耗电更少，并直接显示杜比视�
 msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
 msgstr ""
 
-#: src/features/share/share-links-card.tsx
-#~ msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
-#~ msgstr ""
-
 #: src/lib/i18n.ts
 msgid "Magenta"
 msgstr "洋红色"
