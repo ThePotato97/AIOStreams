@@ -51,13 +51,13 @@ build_ffmpeg() {
         $components \
         --cc=emcc --cxx=em++ --ar=emar --ranlib=emranlib --host-cc="$EMSDK_BIN/clang" --nm="$EMSDK_BIN/llvm-nm" \
         "--extra-cflags=-DNDEBUG -O3 -flto -msimd128" "--extra-ldflags=-O3 -flto" > configure.log 2>&1) \
-        || { tail -40 "$tree/configure.log" "$tree/ffbuild/config.log" >&2; exit 1; }
+        || { tail -n 40 "$tree/configure.log" "$tree/ffbuild/config.log" >&2; exit 1; }
     for marker in 'CONFIG_GPL 0' 'CONFIG_NONFREE 0' 'CONFIG_VERSION3 0'; do
         grep -q "^#define $marker\$" "$tree/config.h" || { echo "FFmpeg $name config.h lacks $marker" >&2; exit 1; }
     done
     enabled=$(sed -n 's/^#define CONFIG_\([A-Z0-9_]*\)_DECODER 1$/\1/p' "$tree/config_components.h" | tr 'A-Z' 'a-z' | sort | tr '\n' ' ')
     [ "$enabled" = "$expected" ] || { echo "FFmpeg $name enabled [$enabled], not [$expected]" >&2; exit 1; }
-    make -C "$tree" -j"$(nproc)" > "$tree/make.log" 2>&1 || { tail -40 "$tree/make.log" >&2; exit 1; }
+    make -C "$tree" -j"$(nproc)" > "$tree/make.log" 2>&1 || { tail -n 40 "$tree/make.log" >&2; exit 1; }
 }
 build_ffmpeg eac3 --enable-decoder=eac3 "ac3 eac3 "
 build_ffmpeg dts --enable-decoder=dca "dca "
