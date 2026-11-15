@@ -461,7 +461,7 @@ index f0ea172..e62a697 100644
          Title: name
      };
 diff --git a/src/embed/EmbeddedPlayer.ts b/src/embed/EmbeddedPlayer.ts
-index 4261f19..4f27919 100644
+index 4261f19..16e3a51 100644
 --- a/src/embed/EmbeddedPlayer.ts
 +++ b/src/embed/EmbeddedPlayer.ts
 @@ -6,12 +6,14 @@ import { selectCustomAudioOutputLayout, selectCustomAudioSpeakerLayout } from '.
@@ -561,7 +561,7 @@ index 4261f19..4f27919 100644
          })
      };
  }
-@@ -329,13 +361,38 @@ function audioTracksOf(source: DescribedSource): EmbeddedAudioTrack[] {
+@@ -329,13 +361,43 @@ function audioTracksOf(source: DescribedSource): EmbeddedAudioTrack[] {
          isDefault: stream.IsDefault,
          language: stream.Language,
          ordinal,
@@ -581,7 +581,12 @@ index 4261f19..4f27919 100644
 +    const native = eligibility.gpuVideoDecoder && eligibility.hdr ?
 +        ` (${describeNativeHDRProbes(presenter)}${rawDecode ? `, raw decode ${rawDecode.status} (${rawDecode.reason})` : ''})` :
 +        '';
-+    return `${eligibility.videoDecoderBackend} ${eligibility.videoOutputMode}${decoder}${native}, audio ${eligibility.audioOutputMode ?? 'none'}`;
++    // The device's own decoder on a native HDR route whose frames came as 8-bit RGB (Android), checked against an 8-bit reference
++    const eightBit = !eligibility.gpuVideoDecoder && eligibility.nativeHDRTransfer
++        && presenter.getExternalHDRAuthorizationTelemetry().eightBitImportRouteKeys.length > 0 ?
++        ` (HDR ${eligibility.nativeHDRTransfer}, 8-bit import)` :
++        '';
++    return `${eligibility.videoDecoderBackend} ${eligibility.videoOutputMode}${decoder}${native}${eightBit}, audio ${eligibility.audioOutputMode ?? 'none'}`;
 +}
 +
 +type ProbeTelemetry = Readonly<{
@@ -602,7 +607,7 @@ index 4261f19..4f27919 100644
  }
  
  type Route = {
-@@ -347,6 +404,8 @@ type Route = {
+@@ -347,6 +409,8 @@ type Route = {
      options: unknown
      /** Names what a fallback's reason only classifies. */
      lastError: string | null
@@ -611,7 +616,7 @@ index 4261f19..4f27919 100644
  };
  
  const withDetail = (route: Route, reason: string): string => (route.lastError ? `${reason}: ${route.lastError}` : reason);
-@@ -362,6 +421,24 @@ class RouteRefused extends Error {}
+@@ -362,6 +426,24 @@ class RouteRefused extends Error {}
  export function createEmbeddedPlayer(surface: PresentationSurface, events: EmbeddedPlayerEvents): EmbeddedPlayer {
      let generation = 0;
      let opened: Opened | null = null;
@@ -636,7 +641,7 @@ index 4261f19..4f27919 100644
      /** Settles once every stopped route's controller has closed. */
      let teardown: Promise<void> = Promise.resolve();
      let volume = 1;
-@@ -419,7 +496,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -419,7 +501,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              return;
          }
          const settings = getStaticHDRRenderSettings({
@@ -645,7 +650,7 @@ index 4261f19..4f27919 100644
              currentSettings: presenter.getRenderSettings(),
              eligibility: route.eligibility,
              input: route.input,
-@@ -512,6 +589,8 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -512,6 +594,8 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
      };
  
      const presenter = new WebGPUPresenter(handlePresentationFallback, handleDecodedRefresh);
@@ -654,7 +659,7 @@ index 4261f19..4f27919 100644
      const gpuVideoDecodeSessionFactory = createGPUVideoDecodeSessionFactory(presenter, { slicing: false });
      let pictureInPicture = false;
      let paintedWhileHidden = false;
-@@ -581,6 +660,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -581,6 +665,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              packagesFor(current.source),
              waitForStaticHDRRoutes(input)
          ]);
@@ -662,7 +667,7 @@ index 4261f19..4f27919 100644
          ensureLive();
          const presentationOptions = await getCustomPresentationEligibilityOptions(presenter, {
              input,
-@@ -637,7 +717,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -637,7 +722,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
      const playRoute = async (current: Opened, route: Route, routeGeneration: number, startMs: number): Promise<EligibleCustomPlayback> => {
          const audioContext = route.audioPrewarm?.audioContext;
          const target: CustomAudioRenderTarget = {
@@ -671,7 +676,7 @@ index 4261f19..4f27919 100644
              speakerLayout: selectCustomAudioSpeakerLayout('auto', audioContext?.destination.maxChannelCount ?? null)
          };
          const { eligibility, input } = await chooseRoute(current, route, routeGeneration, target);
-@@ -653,7 +733,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -653,7 +738,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          presenter.attach(surface, routeGeneration);
          const configured = await configurePresentationColorPipeline(presenter, {
              clearDetectedInputPeak: (): void => undefined,
@@ -680,7 +685,7 @@ index 4261f19..4f27919 100644
              dolbyVisionProfile: eligibility.dolbyVisionProfile,
              eligibility,
              generation: routeGeneration,
-@@ -680,7 +760,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -680,7 +765,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          route.frameLoop = frameLoop;
          frameLoop.synchronizePageVisibility(presentsAsVisible());
          events.onState('loading');
@@ -691,7 +696,7 @@ index 4261f19..4f27919 100644
          if (!isCurrent(route, controller)) {
              throw new RouteRefused('superseded');
          }
-@@ -694,8 +776,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -694,8 +781,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          return eligibility;
      };
  
@@ -714,7 +719,7 @@ index 4261f19..4f27919 100644
          current.route = route;
          try {
              // The last route's decoders, workers and audio output close first
-@@ -703,17 +798,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -703,17 +803,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              if (current.route !== route || opened !== current) {
                  throw new RouteRefused('superseded');
              }
@@ -733,7 +738,7 @@ index 4261f19..4f27919 100644
          } catch (error) {
              if (current.route === route) {
                  stopRoute(route);
-@@ -791,6 +876,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -791,6 +881,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              current.request = { ...current.request, audioOrdinal: ordinal, paused };
              return startRoute(current, atMs, audioPrewarm);
          },
@@ -768,7 +773,7 @@ index 4261f19..4f27919 100644
          setMuted: (next: boolean): void => {
              muted = next;
              opened?.route?.controller?.setMuted(next);
-@@ -838,7 +951,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -838,7 +956,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              pictureInPicture = open;
              onVisibility();
          },
@@ -788,7 +793,7 @@ index 4261f19..4f27919 100644
          setPasses: (sources: readonly string[]): Promise<PlanReport> => presenter.setPresentationPreset(
              sources.map((source: string): PresentationPresetFile => ({ parameters: {}, source }))
          ),
-@@ -883,8 +1007,10 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -883,8 +1012,10 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
                  framesPresented: presentation.presentedFrameCount,
                  passes: presenter.getPresentationPlanReport().activePasses,
                  presentedMs: presentation.lastPresentedMediaTimeMicroseconds === null ? null : toMilliseconds(presentation.lastPresentedMediaTimeMicroseconds),
@@ -1439,6 +1444,146 @@ index ae2613c..420c1ca 100644
      if (hdrOutput) {
          colorFunctions.push(HDR_OUTPUT_ENCODE_COLOR_FUNCTION);
          return colorFunctions;
+diff --git a/src/validation/ExternalHDRPresentationAuthorization.ts b/src/validation/ExternalHDRPresentationAuthorization.ts
+index 698c2e4..e488236 100644
+--- a/src/validation/ExternalHDRPresentationAuthorization.ts
++++ b/src/validation/ExternalHDRPresentationAuthorization.ts
+@@ -176,6 +176,8 @@ export type ExternalHDRRouteAuthorizationDecision = {
+     shaderSignature: string
+     status: 'authorized' | 'rejected'
+     targetFormat: GPUTextureFormat
++    /** Whether the decoder's frames were already 8-bit RGB (Android's hardware decoders), so the route's import is 8-bit */
++    eightBitImport: boolean
+ };
+ 
+ export type ExternalHDRAuthorizationTelemetry = {
+@@ -193,6 +195,8 @@ export type ExternalHDRAuthorizationTelemetry = {
+     rejectedRouteKeys: readonly ExternalHDRAuthorizationRouteKey[]
+     renderSettingsVersion: typeof RENDER_SETTINGS_VERSION
+     sampleCounts: Readonly<Partial<Record<ExternalHDRAuthorizationRouteKey, number>>>
++    /** Authorized routes whose import is 8-bit */
++    eightBitImportRouteKeys: readonly ExternalHDRAuthorizationRouteKey[]
+     status: 'authorized' | 'pending' | 'rejected' | 'unavailable'
+     targetFormat: GPUTextureFormat | null
+ };
+@@ -251,6 +255,7 @@ type TelemetryAccumulator = {
+     pendingRouteKeys: ExternalHDRAuthorizationRouteKey[]
+     rejectedRouteKeys: ExternalHDRAuthorizationRouteKey[]
+     sampleCounts: Partial<Record<ExternalHDRAuthorizationRouteKey, number>>
++    eightBitImportRouteKeys: ExternalHDRAuthorizationRouteKey[]
+ };
+ 
+ function clamp(value: number, minimum: number, maximum: number): number {
+@@ -367,9 +372,39 @@ export function createExternalHDRShaderSignature(
+     return `fnv1a32-${hash.toString(16).padStart(8, '0')}`;
+ }
+ 
++/**
++ * Android's hardware decoders give frames already converted to 8-bit RGB, through the frame's (relabelled BT.709) matrix,
++ * where other browsers give opaque YUV. The relabelled PQ or HLG signal survives that conversion at 8 bits, so such a frame
++ * is held to the same check against a reference that rounds and clamps the same intermediate.
++ */
++function isEightBitRGBFrameFormat(format: VideoPixelFormat): boolean {
++    return format === 'RGBA' || format === 'RGBX' || format === 'BGRA' || format === 'BGRX';
++}
++
++const BT709_KR = 0.2126;
++const BT709_KB = 0.0722;
++const BT709_KG = 1 - BT709_KR - BT709_KB;
++
++/** Rounds a 10-bit limited-range encoded YUV triplet through the 8-bit BT.709 RGB a decoder's own conversion gives. */
++function roundThroughEightBitRGB(encodedYUV: ColorTriplet): ColorTriplet {
++    const luma = (encodedYUV[0] * MAXIMUM_10_BIT_CODE - 64) / 876;
++    const blueDifference = (encodedYUV[1] * MAXIMUM_10_BIT_CODE - 512) / 896;
++    const redDifference = (encodedYUV[2] * MAXIMUM_10_BIT_CODE - 512) / 896;
++    const red = luma + 2 * (1 - BT709_KR) * redDifference;
++    const blue = luma + 2 * (1 - BT709_KB) * blueDifference;
++    const green = (luma - BT709_KR * red - BT709_KB * blue) / BT709_KG;
++    const [ r, g, b ] = [ red, green, blue ].map(value => Math.round(clamp(value, 0, 1) * 255) / 255);
++    const roundedLuma = BT709_KR * r + BT709_KG * g + BT709_KB * b;
++    return [
++        (roundedLuma * 876 + 64) / MAXIMUM_10_BIT_CODE,
++        ((b - roundedLuma) / (2 * (1 - BT709_KB)) * 896 + 512) / MAXIMUM_10_BIT_CODE,
++        ((r - roundedLuma) / (2 * (1 - BT709_KR)) * 896 + 512) / MAXIMUM_10_BIT_CODE
++    ];
++}
++
+ function frameMatchesAuthorizationContract(frame: VideoFrame, vector: ExternalHDRAuthorizationVector): boolean {
+     const visibleRectangle = frame.visibleRect;
+-    return frame.format === null
++    return (frame.format === null || isEightBitRGBFrameFormat(frame.format))
+         && frame.codedWidth === vector.codedWidth
+         && frame.codedHeight === vector.codedHeight
+         && frame.displayWidth === vector.displayWidth
+@@ -514,7 +549,8 @@ export async function createExternalHDRAuthorizationFrame(codec: ExternalHDRVide
+ /** Computes CPU-reference samples from the vector's exact decoded YUV codes. */
+ export function createExpectedExternalHDRAuthorizationObservations(
+     routeKey: ExternalHDRAuthorizationRouteKey,
+-    settings: HDRToSDRRenderSettings
++    settings: HDRToSDRRenderSettings,
++    eightBitImport = false
+ ): readonly RawHDRVectorObservation[] {
+     const metadata = createMetadata(routeKey);
+     return getRouteVector(routeKey).samples.map(sample => {
+@@ -523,7 +559,7 @@ export function createExpectedExternalHDRAuthorizationObservations(
+             sample.rawYUVCode[1] / MAXIMUM_10_BIT_CODE,
+             sample.rawYUVCode[2] / MAXIMUM_10_BIT_CODE
+         ];
+-        const referenceRGB = processEncodedYUV(encodedYUV, metadata, settings);
++        const referenceRGB = processEncodedYUV(eightBitImport ? roundThroughEightBitRGB(encodedYUV) : encodedYUV, metadata, settings);
+         const dither = calculateRawHDRAuthorizationOutputDither(sample.sampleX, sample.sampleY);
+         return {
+             linearRGB: [
+@@ -583,7 +619,8 @@ function createRejectedDecision(
+         sampleCount,
+         shaderSignature: probe.shaderSignature,
+         status: 'rejected',
+-        targetFormat: probe.targetFormat
++        targetFormat: probe.targetFormat,
++        eightBitImport: false
+     };
+ }
+ 
+@@ -655,7 +692,8 @@ async function renderRoute(
+             sampleX: sample.sampleX,
+             sampleY: sample.sampleY
+         }));
+-        const expectedObservations = createExpectedExternalHDRAuthorizationObservations(probe.routeKey, route.settings);
++        const eightBitImport = frame.format !== null;
++        const expectedObservations = createExpectedExternalHDRAuthorizationObservations(probe.routeKey, route.settings, eightBitImport);
+         const comparison = evaluateRawHDRVectorObservations(
+             expectedObservations,
+             actualObservations,
+@@ -682,7 +720,8 @@ async function renderRoute(
+             sampleCount: actualObservations.length,
+             shaderSignature: probe.shaderSignature,
+             status: 'authorized',
+-            targetFormat: probe.targetFormat
++            targetFormat: probe.targetFormat,
++            eightBitImport
+         };
+     } catch (error) {
+         return createRejectedDecision(probe, classifyFailure(error, step), describeAuthorizationError(step, error));
+@@ -935,6 +974,9 @@ function recordDecisionTelemetry(
+     accumulator.sampleCounts[routeKey] = decision.sampleCount;
+     if (decision.status === 'authorized') {
+         accumulator.authorizedRouteKeys.push(routeKey);
++        if (decision.eightBitImport) {
++            accumulator.eightBitImportRouteKeys.push(routeKey);
++        }
+         return;
+     }
+     accumulator.rejectedRouteKeys.push(routeKey);
+@@ -1106,7 +1148,8 @@ export class ExternalHDRPresentationAuthorizationRegistry {
+             maximumChannelErrors: {},
+             pendingRouteKeys: [],
+             rejectedRouteKeys: [],
+-            sampleCounts: {}
++            sampleCounts: {},
++            eightBitImportRouteKeys: []
+         };
+         if (!device || !targetFormat) {
+             return {
 diff --git a/test/decode/audio/SelfLimitedPackage.test.ts b/test/decode/audio/SelfLimitedPackage.test.ts
 new file mode 100644
 index 0000000..70dcc3b
@@ -1660,6 +1805,149 @@ index 2a49a92..0ae071b 100644
          });
  
          it('waits for the AV1 decoder key and the external Profile 8 key of an AV1 Profile 10 stream that reconstructs as Profile 8', async () => {
+diff --git a/test/sandbox/diagnostics/telemetryTestState.ts b/test/sandbox/diagnostics/telemetryTestState.ts
+index af00459..68695bd 100644
+--- a/test/sandbox/diagnostics/telemetryTestState.ts
++++ b/test/sandbox/diagnostics/telemetryTestState.ts
+@@ -246,6 +246,7 @@ export function createExternalHDRAuthorization(overrides: Partial<ExternalHDRAut
+         rejectedRouteKeys: [],
+         renderSettingsVersion: RENDER_SETTINGS_VERSION,
+         sampleCounts: {},
++        eightBitImportRouteKeys: [],
+         status: 'unavailable',
+         targetFormat: null,
+         ...overrides
+diff --git a/test/validation/ExternalHDRPresentationAuthorization.test.ts b/test/validation/ExternalHDRPresentationAuthorization.test.ts
+index 58ea9f6..ac425a1 100644
+--- a/test/validation/ExternalHDRPresentationAuthorization.test.ts
++++ b/test/validation/ExternalHDRPresentationAuthorization.test.ts
+@@ -16,7 +16,7 @@ import {
+     RENDER_SETTINGS_UNIFORM_BYTE_LENGTH
+ } from 'webgpu-player/presentation/RenderSettings';
+ import { createHLGColorMetadata, createPQColorMetadata, createSDRColorMetadata } from 'webgpu-player/color/ColorMetadata';
+-import type { ColorTriplet } from 'webgpu-player/color/ColorPipeline';
++import { processEncodedYUV, type ColorTriplet } from 'webgpu-player/color/ColorPipeline';
+ import {
+     EXTERNAL_AV1_HDR_AUTHORIZATION_DISPLAY_HEIGHT,
+     EXTERNAL_AV1_HDR_AUTHORIZATION_DISPLAY_WIDTH,
+@@ -25,7 +25,8 @@ import {
+ } from 'webgpu-player/capability/vectors/ExternalAV1HDRAuthorizationVector';
+ import {
+     EXTERNAL_HDR_AUTHORIZATION_DISPLAY_HEIGHT,
+-    EXTERNAL_HDR_AUTHORIZATION_DISPLAY_WIDTH
++    EXTERNAL_HDR_AUTHORIZATION_DISPLAY_WIDTH,
++    EXTERNAL_HDR_AUTHORIZATION_VECTOR_SAMPLES
+ } from 'webgpu-player/capability/vectors/ExternalHDRAuthorizationVector';
+ import { findAV1SequenceHeader } from 'webgpu-player/demux/av1/AV1SequenceHeaderParser';
+ import { createBuiltinChain } from 'webgpu-player/presentation/passes/builtin/BuiltinChains';
+@@ -656,6 +657,107 @@ describe('External HDR presentation authorization', () => {
+         expect(close).toHaveBeenCalledOnce();
+     });
+ 
++    it.each([
++        [ 'RGBA', true ],
++        [ 'BGRX', true ],
++        [ 'I420P10', false ],
++        [ 'NV12', false ]
++    ] as const)('takes a frame of format %s from the decoder: %s', async (format, accepted) => {
++        let decoderInit: VideoDecoderInit | null = null;
++        const outputFrame = {
++            close: vi.fn(),
++            codedHeight: 1_088,
++            codedWidth: 1_920,
++            colorSpace: { fullRange: false, matrix: 'bt709', primaries: 'bt709', transfer: 'bt709' },
++            displayHeight: 1_080,
++            displayWidth: 1_920,
++            format,
++            timestamp: 0,
++            visibleRect: { height: 1_080, width: 1_920, x: 0, y: 0 }
++        } as unknown as VideoFrame;
++        class FakeEncodedVideoChunk {}
++        class FakeVideoDecoder {
++            public static readonly isConfigSupported = vi.fn(
++                async (config: VideoDecoderConfig): Promise<VideoDecoderSupport> => ({ config, supported: true })
++            );
++
++            public constructor(init: VideoDecoderInit) {
++                decoderInit = init;
++            }
++
++            public close(): void {
++                return undefined;
++            }
++
++            public configure(): void {
++                return undefined;
++            }
++
++            public decode(): void {
++                decoderInit?.output(outputFrame);
++            }
++
++            public async flush(): Promise<void> {
++                return undefined;
++            }
++        }
++        vi.stubGlobal('EncodedVideoChunk', FakeEncodedVideoChunk);
++        vi.stubGlobal('VideoDecoder', FakeVideoDecoder);
++
++        if (accepted) {
++            await expect(createExternalHDRAuthorizationFrame('hevc')).resolves.toBe(outputFrame);
++        } else {
++            await expect(createExternalHDRAuthorizationFrame('hevc')).rejects.toThrow('decoder-output-mismatch');
++        }
++    });
++
++    it('holds 8-bit RGB frames to an 8-bit reference that still tells a wrong conversion apart', () => {
++        // The decoder's BT.709 limited conversion of a 10-bit code, with the gain, offset and rounding a Galaxy Z Fold 7 measured
++        // (a 254-level ramp: k 0.99683, b -0.00288, residual within 0.74 of an 8-bit step), or with a wrong matrix or range
++        type Decode = (code: ColorTriplet) => ColorTriplet;
++        const decodeWith = (kr: number, kb: number, fullRange: boolean): Decode => ([ y, u, v ]: ColorTriplet): ColorTriplet => {
++            const luma = fullRange ? y / 1_023 : (y - 64) / 876;
++            const blue = fullRange ? u / 1_023 - 0.5 : (u - 512) / 896;
++            const red = fullRange ? v / 1_023 - 0.5 : (v - 512) / 896;
++            const r = luma + 2 * (1 - kr) * red;
++            const b = luma + 2 * (1 - kb) * blue;
++            return [ r, (luma - kr * r - kb * b) / (1 - kr - kb), b ];
++        };
++        const encodeBT709 = ([ r, g, b ]: ColorTriplet): ColorTriplet => {
++            const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
++            return [ (luma * 876 + 64) / 1_023, ((b - luma) / 1.8556 * 896 + 512) / 1_023, ((r - luma) / 1.5748 * 896 + 512) / 1_023 ];
++        };
++        const metadata = createPQColorMetadata();
++        const settings = createHDRToSDRRenderSettings({ toneMapping: { inputPeakNits: metadata.nominalPeakNits } });
++        const expected = createExpectedExternalHDRAuthorizationObservations('external-hevc-main10-bt709-limited:pq-v1', settings, true);
++        const worstError = (decode: Decode, gain: number, offset: number, residual: number): number => {
++            let worst = 0;
++            for (const [ index, sample ] of EXTERNAL_HDR_AUTHORIZATION_VECTOR_SAMPLES.entries()) {
++                const rgb = decode([ sample.rawYUVCode[0], sample.rawYUVCode[1], sample.rawYUVCode[2] ])
++                    .map(value => Math.round(Math.min(Math.max((gain * value + offset) * 255 + residual, 0), 255)) / 255) as unknown as ColorTriplet;
++                const actual = processEncodedYUV(encodeBT709(rgb), metadata, settings);
++                for (let channel = 0; channel < 3; channel += 1) {
++                    const reference = expected[index].linearRGB[channel];
++                    worst = Math.max(worst, Math.abs(Math.min(Math.max(actual[channel], 0), 1) - reference));
++                }
++            }
++            return worst * 255;
++        };
++        const bt709 = decodeWith(0.2126, 0.0722, false);
++        let honest = 0;
++        for (const gain of [ 0.99683, 1 ]) {
++            for (const offset of [ -0.00288, 0 ]) {
++                for (const residual of [ -0.74, 0, 0.74 ]) {
++                    honest = Math.max(honest, worstError(bt709, gain, offset, residual));
++                }
++            }
++        }
++        // Within the route's 10/255 with room for the shader's own error, where a BT.2020 matrix or full range is not
++        expect(honest).toBeLessThan(6.5);
++        expect(worstError(decodeWith(0.2627, 0.0593, false), 1, 0, 0)).toBeGreaterThan(10.5);
++        expect(worstError(decodeWith(0.2126, 0.0722, true), 1, 0, 0)).toBeGreaterThan(10.5);
++    });
++
+     it('rejects an unsupported decoder configuration before building an executor or opening a decoder', async () => {
+         isConfigSupported.mockImplementation(async (config: VideoDecoderConfig): Promise<VideoDecoderSupport> => ({ config, supported: false }));
+         const harness = createDeviceHarness(createExpectedObservations(PQ_ROUTE_KEY));
 diff --git a/wasm/libdovi/src/lib.rs b/wasm/libdovi/src/lib.rs
 index a3b4482..8ba83e8 100644
 --- a/wasm/libdovi/src/lib.rs
