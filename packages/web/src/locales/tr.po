@@ -192,10 +192,6 @@ msgstr "{name} etkinliğe katıldı"
 msgid "{name} left the party"
 msgstr "{name} etkinlikten ayrıldı"
 
-#: src/app/settings/playback.tsx
-msgid "{nits} nits"
-msgstr ""
-
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {İndirilecek sürümü seçin. Diğer bölüm için de bulunabiliyorsa aynı sürüm kullanılır.} other {İndirilecek sürümü seçin. Diğer # bölüm için de bulunabiliyorsa aynı sürüm kullanılır.}}"
@@ -1987,7 +1983,7 @@ msgid "HDR output"
 msgstr "Video çıkışı"
 
 #: src/app/settings/playback.tsx
-msgid "HDR peak brightness"
+msgid "HDR peak brightness (nits)"
 msgstr ""
 
 #: src/app/settings/audio.tsx
@@ -5137,6 +5133,11 @@ msgstr "oynatıcı bu sürümü oynatamadı"
 
 #: src/app/guest/page.tsx
 msgid "The server restarted; rejoin with the link"
+msgstr ""
+
+#. Follows "Playback failed:"
+#: src/lib/playback/use-player.ts
+msgid "the server stopped answering, as it does while it restarts. Resume once it is back."
 msgstr ""
 
 #: src/app/guest/link-page.tsx src/app/guest/page.tsx

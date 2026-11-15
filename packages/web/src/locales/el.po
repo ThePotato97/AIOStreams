@@ -192,10 +192,6 @@ msgstr "Συμμετέχει στην ομαδική προβολή: {name}"
 msgid "{name} left the party"
 msgstr "Αποχώρησε από την ομαδική προβολή: {name}"
 
-#: src/app/settings/playback.tsx
-msgid "{nits} nits"
-msgstr ""
-
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {Επίλεξε την έκδοση για λήψη. Για το άλλο επεισόδιο θα επιλεγεί η ίδια κυκλοφορία, εφόσον είναι διαθέσιμη.} other {Επίλεξε την έκδοση για λήψη. Για τα υπόλοιπα # επεισόδια θα επιλεγεί η ίδια κυκλοφορία, εφόσον είναι διαθέσιμη.}}"
@@ -1973,7 +1969,7 @@ msgid "HDR output"
 msgstr "Έξοδος HDR"
 
 #: src/app/settings/playback.tsx
-msgid "HDR peak brightness"
+msgid "HDR peak brightness (nits)"
 msgstr ""
 
 #: src/app/settings/audio.tsx
@@ -5100,6 +5096,11 @@ msgstr "το πρόγραμμα αναπαραγωγής δεν μπόρεσε �
 
 #: src/app/guest/page.tsx
 msgid "The server restarted; rejoin with the link"
+msgstr ""
+
+#. Follows "Playback failed:"
+#: src/lib/playback/use-player.ts
+msgid "the server stopped answering, as it does while it restarts. Resume once it is back."
 msgstr ""
 
 #: src/app/guest/link-page.tsx src/app/guest/page.tsx

@@ -13,6 +13,7 @@ import { appLog } from '@/lib/hosts/shell/bridge';
 import { useLatest } from '@/hooks/use-latest';
 import type { Chapter } from './chapters';
 import { useLiveRecovery } from './live-recovery';
+import { serverDown } from './server-down';
 import {
   initialState,
   storedVolume,
@@ -244,6 +245,34 @@ export function usePlayer(
     positionMs: () => playhead.positionMs,
   });
 
+  /**
+   * After the last engine fails: a server that stopped answering, as one restarting, says so and
+   * offers to resume where it stopped, from the first engine; anything else is `otherwise`.
+   */
+  const blameServer = async (atMs: number, otherwise: () => void) => {
+    const failed = active.current;
+    const down = await serverDown(url, opts.headers, client.base);
+    if (active.current !== failed) return;
+    if (!down) return otherwise();
+    patch({
+      waiting: false,
+      error: t({
+        comment: 'Follows "Playback failed:"',
+        message:
+          'the server stopped answering, as it does while it restarts. Resume once it is back.',
+      }),
+    });
+    const resumeAt = clock(atMs);
+    setRetry({
+      label: t`Resume from ${resumeAt}`,
+      run: () => {
+        restart();
+        active.current.close();
+        use(0).load(latestFile.current(atMs));
+      },
+    });
+  };
+
   handle.current = (event) => {
     switch (event.type) {
       case 'state':
@@ -303,6 +332,10 @@ export function usePlayer(
         // Another engine's offer comes first for a source that never played here.
         if (recovery && (!event.retry || recovery.played))
           return recovery.dropped(`failed: ${event.error}`);
+        if (!recovery && !event.retry)
+          return void blameServer(playhead.positionMs, () =>
+            patch({ error: event.error })
+          );
         patch({ error: event.error });
         const again = event.retry;
         return setRetry(
@@ -316,7 +349,10 @@ export function usePlayer(
         );
       }
       case 'unplayable': {
-        if (!chain[engineAt.current + 1]) return patch({ error: event.reason });
+        if (!chain[engineAt.current + 1])
+          return void blameServer(event.positionMs ?? playhead.positionMs, () =>
+            patch({ error: event.reason })
+          );
         appLog(
           'info',
           `player: the next engine plays this version: ${event.reason}`

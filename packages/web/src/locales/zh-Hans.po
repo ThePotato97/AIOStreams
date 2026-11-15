@@ -192,10 +192,6 @@ msgstr "{name} 加入了一起观看"
 msgid "{name} left the party"
 msgstr "{name} 离开了一起观看"
 
-#: src/app/settings/playback.tsx
-msgid "{nits} nits"
-msgstr ""
-
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {选择要下载的版本。另一集如有相同版本，也会下载该版本。} other {选择要下载的版本。其他 # 集如有相同版本，也会下载该版本。}}"
@@ -1988,7 +1984,7 @@ msgid "HDR output"
 msgstr "视频输出"
 
 #: src/app/settings/playback.tsx
-msgid "HDR peak brightness"
+msgid "HDR peak brightness (nits)"
 msgstr ""
 
 #: src/app/settings/audio.tsx
@@ -5144,6 +5140,11 @@ msgstr "播放器无法播放此版本"
 
 #: src/app/guest/page.tsx
 msgid "The server restarted; rejoin with the link"
+msgstr ""
+
+#. Follows "Playback failed:"
+#: src/lib/playback/use-player.ts
+msgid "the server stopped answering, as it does while it restarts. Resume once it is back."
 msgstr ""
 
 #: src/app/guest/link-page.tsx src/app/guest/page.tsx

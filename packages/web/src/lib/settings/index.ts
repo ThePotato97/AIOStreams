@@ -34,10 +34,8 @@ export type Featured = 'auto' | FeaturedSource[];
 
 export const MAX_FEATURED = 4;
 
-/** The display peaks HDR output can map to, in nits. */
-export const HDR_PEAK_NITS = [
-  400, 600, 800, 1000, 1500, 2000, 4000, 10000,
-] as const;
+/** The display peaks HDR output can map to, in nits: SDR white up to the most HDR10 encodes. */
+export const HDR_PEAK_NITS = { min: 100, max: 10000 } as const;
 
 /** How long a new share link can last, in days; 0 is until it's revoked. */
 export const SHARE_LINK_DAYS = [0, 1, 7, 30] as const;
@@ -672,7 +670,10 @@ export const settings = {
     hdrPeakNits: device<number>(
       'aiostreams-web-video-hdr-peak-nits',
       1000,
-      HDR_PEAK_NITS
+      (nits) =>
+        Number.isInteger(nits) &&
+        nits >= HDR_PEAK_NITS.min &&
+        nits <= HDR_PEAK_NITS.max
     ),
   },
   audio: {

@@ -2,6 +2,7 @@ import React from 'react';
 import { plural, t } from '@lingui/core/macro';
 import { Trans } from '@lingui/react/macro';
 import { Select } from '@aiostreams/ui/select';
+import { NumberInput } from '@aiostreams/ui/number-input';
 import { Switch } from '@aiostreams/ui/switch';
 import { TextInput } from '@aiostreams/ui/text-input';
 import { Button } from '@aiostreams/ui/button';
@@ -522,20 +523,33 @@ function HdrOutputSwitch() {
 }
 
 /** The display peak HDR output maps to, shown while HDR output is on. */
-function HdrPeakSelect() {
+function HdrPeakInput() {
   const [hdrOutput] = useSetting(settings.video.hdrOutput);
   const [peak, setPeak] = useSetting(settings.video.hdrPeakNits);
+  // What's typed, kept until the field is left: "1500" on its way would set 1, 15 and 150.
+  const [draft, setDraft] = React.useState<number | null>(null);
   if (!hdrOutput) return null;
+  const commit = () => {
+    if (draft === null) return;
+    setDraft(null);
+    setPeak(
+      Math.round(
+        Math.min(HDR_PEAK_NITS.max, Math.max(HDR_PEAK_NITS.min, draft))
+      )
+    );
+  };
   return (
-    <Select
-      label={t`HDR peak brightness`}
+    <NumberInput
+      label={t`HDR peak brightness (nits)`}
       help={t`The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights.`}
-      options={HDR_PEAK_NITS.map((nits) => ({
-        value: String(nits),
-        label: t`${nits} nits`,
-      }))}
-      value={String(peak)}
-      onValueChange={(v) => setPeak(Number(v))}
+      min={HDR_PEAK_NITS.min}
+      max={HDR_PEAK_NITS.max}
+      step={50}
+      formatOptions={{ maximumFractionDigits: 0, useGrouping: false }}
+      value={draft ?? peak}
+      onValueChange={(value) => setDraft(Number.isNaN(value) ? null : value)}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === 'Enter' && commit()}
     />
   );
 }
@@ -659,7 +673,7 @@ function PlayerCard() {
               <>
                 <UpscalingSwitch />
                 <HdrOutputSwitch />
-                <HdrPeakSelect />
+                <HdrPeakInput />
                 <ShaderFilesRow
                   help={t`Shader files (.wgsl) for the WebGPU engine, applied in name order to what plays. They stay in this browser. Heavy ones can make video stutter.`}
                   accept=".wgsl"

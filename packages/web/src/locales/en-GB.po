@@ -191,10 +191,6 @@ msgstr "{name} joined the party"
 msgid "{name} left the party"
 msgstr "{name} left the party"
 
-#: src/app/settings/playback.tsx
-msgid "{nits} nits"
-msgstr "{nits} nits"
-
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
@@ -2050,8 +2046,8 @@ msgid "HDR output"
 msgstr "HDR output"
 
 #: src/app/settings/playback.tsx
-msgid "HDR peak brightness"
-msgstr "HDR peak brightness"
+msgid "HDR peak brightness (nits)"
+msgstr "HDR peak brightness (nits)"
 
 #: src/app/settings/audio.tsx
 msgid "Headphones"
@@ -5283,6 +5279,11 @@ msgstr "the server could not convert this version"
 #: src/app/guest/page.tsx
 msgid "The server restarted; rejoin with the link"
 msgstr "The server restarted; rejoin with the link"
+
+#. Follows "Playback failed:"
+#: src/lib/playback/use-player.ts
+msgid "the server stopped answering, as it does while it restarts. Resume once it is back."
+msgstr "the server stopped answering, as it does while it restarts. Resume once it is back."
 
 #: src/app/guest/link-page.tsx
 #: src/app/guest/page.tsx

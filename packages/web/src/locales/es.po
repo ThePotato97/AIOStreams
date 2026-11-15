@@ -192,10 +192,6 @@ msgstr "{name} se unió al grupo"
 msgid "{name} left the party"
 msgstr "{name} dejó el grupo"
 
-#: src/app/settings/playback.tsx
-msgid "{nits} nits"
-msgstr ""
-
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {Elige la versión que deseas descargar. El otro episodio cuenta con la misma edición, allí donde esté disponible.} other {Elige la versión que deseas descargar. Los otros # episodios cuentan con la misma edición, allí donde estén disponibles.}}"
@@ -1970,7 +1966,7 @@ msgid "HDR output"
 msgstr "Salida HDR"
 
 #: src/app/settings/playback.tsx
-msgid "HDR peak brightness"
+msgid "HDR peak brightness (nits)"
 msgstr ""
 
 #: src/app/settings/audio.tsx
@@ -5092,6 +5088,11 @@ msgstr "el servidor no puede convertir esta versión"
 
 #: src/app/guest/page.tsx
 msgid "The server restarted; rejoin with the link"
+msgstr ""
+
+#. Follows "Playback failed:"
+#: src/lib/playback/use-player.ts
+msgid "the server stopped answering, as it does while it restarts. Resume once it is back."
 msgstr ""
 
 #: src/app/guest/link-page.tsx src/app/guest/page.tsx
