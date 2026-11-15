@@ -833,7 +833,7 @@ index f2d7275..41d9029 100644
          waitForDolbyVisionReconstructionAuthorization(presenter, reconstructionTarget)
      ]);
 diff --git a/src/presentation/WebGPUPresenter.ts b/src/presentation/WebGPUPresenter.ts
-index 18d2deb..cbadc99 100644
+index 18d2deb..04cb4b1 100644
 --- a/src/presentation/WebGPUPresenter.ts
 +++ b/src/presentation/WebGPUPresenter.ts
 @@ -28,7 +28,13 @@ import {
@@ -942,7 +942,7 @@ index 18d2deb..cbadc99 100644
 +                    executor.writeDolbyVisionGamut(state.gamut.texels);
 +                    state.gamutExecutor = executor;
 +                }
-+                executor.writeDolbyVisionDM(frame.tables);
++                executor.writeDolbyVisionDM(frame.tables, frame.constants);
 +                this.loadDolbyVisionGamut(dm, frame.wantedGamut);
 +            }
 +        }
@@ -1013,10 +1013,10 @@ index 18d2deb..cbadc99 100644
              this.activeDolbyVisionFELReconstruction,
 diff --git a/src/presentation/dolby-vision-dm/DolbyVisionDM.ts b/src/presentation/dolby-vision-dm/DolbyVisionDM.ts
 new file mode 100644
-index 0000000..cb6ec2e
+index 0000000..61fc83d
 --- /dev/null
 +++ b/src/presentation/dolby-vision-dm/DolbyVisionDM.ts
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,66 @@
 +// The hook for a Dolby Vision display management stage: a build may supply one (implementation.ts), which then takes the
 +// tone map's place on the Dolby Vision routes. This file only holds the hook; the stock implementation.ts supplies none,
 +// and the routes keep the engine's own tone map.
@@ -1025,6 +1025,9 @@ index 0000000..cb6ec2e
 +
 +/** The 'dolby-vision-dm' binding's size in floats, which an implementation's tables fit in. */
 +export const DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY = 4_096;
++
++/** The 'dolby-vision-dm-constants' uniform's size in vec4s: what every pixel reads alike, which a uniform serves far cheaper than storage. */
++export const DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY = 32;
 +
 +/** The 'dolby-vision-gamut' binding's size in words: a 65-node cube of RGBA uint16, the largest gamut LUT. */
 +export const DOLBY_VISION_DM_GAMUT_WORD_CAPACITY = 65 * 65 * 65 * 2;
@@ -1037,9 +1040,11 @@ index 0000000..cb6ec2e
 +    peakNits: number
 +}>;
 +
-+/** What the stage writes for a frame: the 'dolby-vision-dm' binding's floats, and the gamut LUT those were made for. */
++/** What the stage writes for a frame: the 'dolby-vision-dm' binding's tables, the constants uniform's floats, and the gamut LUT those were made for. */
 +export type DolbyVisionDMFrame = Readonly<{
 +    tables: Float32Array<ArrayBuffer>
++    /** At most DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY * 4 floats */
++    constants: Float32Array<ArrayBuffer>
 +    /** The gamut LUT the tables read, null for none; DolbyVisionDMImplementation.loadGamut gives its texels. */
 +    gamut: string | null
 +    /** The LUT the stage would rather read, when it differs from `gamut` because that one isn't loaded */
@@ -1051,7 +1056,7 @@ index 0000000..cb6ec2e
 +export type DolbyVisionDMImplementation = Readonly<{
 +    /**
 +     * WGSL defining `fn applyDolbyVisionDM(linearNits: vec3f) -> vec3f`: linear BT.2020 nits of the reconstructed signal to linear BT.2020, relative to SDR white, for
-+     * the target, read through the 'dolby-vision-dm' resource (dolbyVisionDM, dolbyVisionGamut).
++     * the target, read through the 'dolby-vision-dm' resource (dolbyVisionDM, dolbyVisionDMConstants, dolbyVisionGamut).
 +     */
 +    wgsl: string
 +    /** The 'dolby-vision-dm' binding's length in floats. */
@@ -1089,10 +1094,18 @@ index 0000000..5eeb52e
 +
 +export const loadImplementation: ((fetchAsset: DolbyVisionDMFetch) => Promise<DolbyVisionDMImplementation>) | null = null;
 diff --git a/src/presentation/passes/PassResources.ts b/src/presentation/passes/PassResources.ts
-index e99b1a7..687173c 100644
+index e99b1a7..6fa5ae7 100644
 --- a/src/presentation/passes/PassResources.ts
 +++ b/src/presentation/passes/PassResources.ts
-@@ -96,6 +96,18 @@ const UNSIGNED_PLANE_LAYOUT: Omit<GPUBindGroupLayoutEntry, 'binding' | 'visibili
+@@ -1,6 +1,7 @@
+ // The engine-owned bindings of every pass: their WGSL declarations, their bind group layout entries, and the byte layouts of the uniforms the engine writes.
+ // Built-in code reads these bindings by the variable names declared here, and the planner assigns their binding numbers.
+ import { DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH } from '../../demux/dolby-vision/DolbyVisionRPUParser';
++import { DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY } from '../dolby-vision-dm/DolbyVisionDM';
+ import { BYTES_PER_WORD, UNIFORM_BUFFER_OFFSET_ALIGNMENT } from '../WebGPUConstants';
+ import type { EngineBindingResource, EngineResource, PassParameter } from './PassTypes';
+ 
+@@ -96,6 +97,24 @@ const UNSIGNED_PLANE_LAYOUT: Omit<GPUBindGroupLayoutEntry, 'binding' | 'visibili
  };
  
  const ENGINE_BINDINGS: Readonly<Record<EngineBindingResource, EngineBindingDeclaration>> = {
@@ -1100,6 +1113,12 @@ index e99b1a7..687173c 100644
 +    'dolby-vision-dm': {
 +        declaration: 'var<storage, read> dolbyVisionDM: array<f32>;',
 +        layout: { buffer: { type: 'read-only-storage' } },
++        structs: []
++    },
++    // Its constants that every pixel reads alike (matrices, scales, the gamut LUT's range), DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY vec4s
++    'dolby-vision-dm-constants': {
++        declaration: `var<uniform> dolbyVisionDMConstants: array<vec4f, ${DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY}>;`,
++        layout: { buffer: { type: 'uniform' } },
 +        structs: []
 +    },
 +    // Its gamut LUT, IPT to display RGB: RGBA uint16 nodes, two to a word pair (R | G << 16, B | A << 16), I fastest
@@ -1111,16 +1130,16 @@ index e99b1a7..687173c 100644
      'dolby-vision-rpu': {
          declaration: 'var<storage, read> dolbyVisionRPU: DolbyVisionRPUData;',
          layout: { buffer: { type: 'read-only-storage' } },
-@@ -169,6 +181,7 @@ const ENGINE_BINDINGS: Readonly<Record<EngineBindingResource, EngineBindingDecla
+@@ -169,6 +188,7 @@ const ENGINE_BINDINGS: Readonly<Record<EngineBindingResource, EngineBindingDecla
  };
  
  const ENGINE_RESOURCE_BINDINGS: Readonly<Record<EngineResource, readonly EngineBindingResource[]>> = {
-+    'dolby-vision-dm': [ 'dolby-vision-dm', 'dolby-vision-gamut' ],
++    'dolby-vision-dm': [ 'dolby-vision-dm', 'dolby-vision-dm-constants', 'dolby-vision-gamut' ],
      'dolby-vision-enhancement': [ 'enhancement-luma', 'enhancement-chroma-u', 'enhancement-chroma-v', 'enhancement-uniform' ],
      'dolby-vision-rpu': [ 'dolby-vision-rpu' ],
      'external-texture': [ 'external-texture' ],
 diff --git a/src/presentation/passes/PassTypes.ts b/src/presentation/passes/PassTypes.ts
-index 52c63c0..67e16ec 100644
+index 52c63c0..6f48741 100644
 --- a/src/presentation/passes/PassTypes.ts
 +++ b/src/presentation/passes/PassTypes.ts
 @@ -165,6 +165,7 @@ export type PassManifest = {
@@ -1131,16 +1150,17 @@ index 52c63c0..67e16ec 100644
      | 'dolby-vision-enhancement'
      | 'dolby-vision-rpu'
      | 'external-texture'
-@@ -176,6 +177,8 @@ export type EngineResource =
+@@ -176,6 +177,9 @@ export type EngineResource =
  
  /** One engine-owned binding, with a fixed WGSL variable name in PassResources. */
  export type EngineBindingResource =
 +    | 'dolby-vision-dm'
++    | 'dolby-vision-dm-constants'
 +    | 'dolby-vision-gamut'
      | 'dolby-vision-rpu'
      | 'enhancement-chroma-u'
      | 'enhancement-chroma-v'
-@@ -307,6 +310,8 @@ export type BuiltinChainConfiguration =
+@@ -307,6 +311,8 @@ export type BuiltinChainConfiguration =
          format: RawDolbyVisionFrameFormat
          hdrOutput: boolean
          profile: DolbyVisionReconstructionProfile
@@ -1149,7 +1169,7 @@ index 52c63c0..67e16ec 100644
          route: 'raw-dolby-vision'
          settings: HDRToSDRRenderSettings
      }
-@@ -346,10 +351,12 @@ export type BuiltinChainConfiguration =
+@@ -346,10 +352,12 @@ export type BuiltinChainConfiguration =
          format: GPUDecoderOutputFormat
          hdrOutput: boolean
          profile: DolbyVisionReconstructionProfile
@@ -1164,36 +1184,42 @@ index 52c63c0..67e16ec 100644
          chromaLocation?: ChromaLocation | null
          /** The stream's chroma subsampling, at which the planes derived from the browser's RGB hold chroma; null for chroma at the image's size */
 diff --git a/src/presentation/passes/PresentationExecutor.ts b/src/presentation/passes/PresentationExecutor.ts
-index 2bf5a4b..5ea1270 100644
+index 2bf5a4b..bfaac9f 100644
 --- a/src/presentation/passes/PresentationExecutor.ts
 +++ b/src/presentation/passes/PresentationExecutor.ts
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,11 @@
  // Encodes frames from a presentation plan: it owns the plan's GPU resources, takes each frame's source, and records the passes in plan order.
  // The Presentation section of docs/src/architecture.md describes the design it implements.
  import { DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH } from '../../demux/dolby-vision/DolbyVisionRPUParser';
-+import { DOLBY_VISION_DM_GAMUT_WORD_CAPACITY, DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY } from '../dolby-vision-dm/DolbyVisionDM';
++import {
++    DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY,
++    DOLBY_VISION_DM_GAMUT_WORD_CAPACITY,
++    DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY
++} from '../dolby-vision-dm/DolbyVisionDM';
  import {
      RAW_VIDEO_DOLBY_VISION_ENHANCEMENT_FRAME_FORMAT,
      type RawVideoPlaneKind,
-@@ -92,6 +93,8 @@ const PRESENTATION_UNIFORMS_LABEL = 'Presentation uniforms';
+@@ -92,6 +97,9 @@ const PRESENTATION_UNIFORMS_LABEL = 'Presentation uniforms';
  const PARAMETERS_LABEL = 'Presentation parameters';
  const RENDER_SETTINGS_LABEL = 'Presentation render settings';
  const DOLBY_VISION_RPU_LABEL = 'Presentation Dolby Vision RPU';
 +const DOLBY_VISION_DM_LABEL = 'Presentation Dolby Vision DM';
++const DOLBY_VISION_DM_CONSTANTS_LABEL = 'Presentation Dolby Vision DM constants';
 +const DOLBY_VISION_GAMUT_LABEL = 'Presentation Dolby Vision gamut LUT';
  const ENHANCEMENT_UNIFORM_LABEL = 'Presentation Dolby Vision enhancement uniforms';
  const SAMPLER_LABEL = 'Presentation linear sampler';
  const PASS_SAMPLER_LABEL = 'Presentation texture block sampler';
-@@ -694,6 +697,8 @@ export class PresentationExecutor {
+@@ -694,6 +702,9 @@ export class PresentationExecutor {
      private readonly blackBarAnalysis: PlannedBlackBarAnalysis | null;
      private readonly device: GPUDevice;
      private readonly dolbyVisionRPUBuffer: GPUBuffer | null;
 +    private readonly dolbyVisionDMBuffer: GPUBuffer | null;
++    private readonly dolbyVisionDMConstantsBuffer: GPUBuffer | null;
 +    private readonly dolbyVisionGamutBuffer: GPUBuffer | null;
      private readonly enhancementBuffer: GPUBuffer | null;
      private readonly enhancementView: DataView<ArrayBuffer> = new DataView(new ArrayBuffer(ENHANCEMENT_UNIFORM_BYTE_LENGTH));
      // Frame pool bind groups per layout uniform, so a pool that names each slot with its own layout buffer never creates them per frame
-@@ -805,6 +810,18 @@ export class PresentationExecutor {
+@@ -805,6 +816,24 @@ export class PresentationExecutor {
                  DOLBY_VISION_RPU_SCHEMA_BYTE_LENGTH,
                  GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
              );
@@ -1202,6 +1228,12 @@ index 2bf5a4b..5ea1270 100644
 +                DOLBY_VISION_DM_LABEL,
 +                DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY * Float32Array.BYTES_PER_ELEMENT,
 +                GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
++            );
++            this.dolbyVisionDMConstantsBuffer = this.createOptionalBuffer(
++                engineResources.has('dolby-vision-dm-constants'),
++                DOLBY_VISION_DM_CONSTANTS_LABEL,
++                DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY * 16,
++                uniformUsage
 +            );
 +            this.dolbyVisionGamutBuffer = this.createOptionalBuffer(
 +                engineResources.has('dolby-vision-gamut'),
@@ -1212,7 +1244,7 @@ index 2bf5a4b..5ea1270 100644
              this.sampler = engineResources.has('sampler-linear') ?
                  device.createSampler({ label: SAMPLER_LABEL, magFilter: 'linear', minFilter: 'linear' }) :
                  null;
-@@ -884,6 +901,33 @@ export class PresentationExecutor {
+@@ -884,6 +913,39 @@ export class PresentationExecutor {
          }
      }
  
@@ -1222,13 +1254,19 @@ index 2bf5a4b..5ea1270 100644
 +    }
 +
 +    /** Writes the Dolby Vision display management's tables and constants; it does nothing when no pass binds them. */
-+    writeDolbyVisionDM(tables: Float32Array<ArrayBuffer>): void {
++    writeDolbyVisionDM(tables: Float32Array<ArrayBuffer>, constants: Float32Array<ArrayBuffer>): void {
 +        this.requireUsable();
 +        if (tables.length > DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY) {
 +            throw new RangeError(`Dolby Vision DM tables: ${tables.length} floats, above ${DOLBY_VISION_DM_TABLE_FLOAT_CAPACITY}`);
 +        }
++        if (constants.length > DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY * 4) {
++            throw new RangeError(`Dolby Vision DM constants: ${constants.length} floats, above ${DOLBY_VISION_DM_CONSTANT_VEC4_CAPACITY * 4}`);
++        }
 +        if (this.dolbyVisionDMBuffer) {
 +            this.device.queue.writeBuffer(this.dolbyVisionDMBuffer, 0, tables);
++        }
++        if (this.dolbyVisionDMConstantsBuffer) {
++            this.device.queue.writeBuffer(this.dolbyVisionDMConstantsBuffer, 0, constants);
 +        }
 +    }
 +
@@ -1246,12 +1284,14 @@ index 2bf5a4b..5ea1270 100644
      /** Writes the packed Dolby Vision RPU; it does nothing when no pass binds the RPU. */
      writeDolbyVisionRPU(data: ArrayBuffer): void {
          this.requireUsable();
-@@ -1271,6 +1315,10 @@ export class PresentationExecutor {
+@@ -1271,6 +1333,12 @@ export class PresentationExecutor {
          switch (resource) {
              case 'dolby-vision-rpu':
                  return this.dolbyVisionRPUBuffer && { buffer: this.dolbyVisionRPUBuffer };
 +            case 'dolby-vision-dm':
 +                return this.dolbyVisionDMBuffer && { buffer: this.dolbyVisionDMBuffer };
++            case 'dolby-vision-dm-constants':
++                return this.dolbyVisionDMConstantsBuffer && { buffer: this.dolbyVisionDMConstantsBuffer };
 +            case 'dolby-vision-gamut':
 +                return this.dolbyVisionGamutBuffer && { buffer: this.dolbyVisionGamutBuffer };
              case 'enhancement-uniform':
