@@ -53,6 +53,8 @@ interface GpuAudioTrack {
   ordinal: number;
   codec: string | null;
   channels: number | null;
+  /** The stream's profile: "Atmos" where the engine found Atmos in the track. */
+  profile?: string | null;
   language: string | null;
   title: string | null;
   isDefault: boolean;
@@ -351,6 +353,8 @@ export function webGpuEngine(
           lang: t.language ?? undefined,
           title: t.title ?? undefined,
           codec: t.codec ?? undefined,
+          profile: t.profile ?? undefined,
+          channels: t.channels ?? undefined,
           default: t.isDefault,
         })),
         ...ownTracks.map(ownSubtitleTrack),

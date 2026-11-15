@@ -67,6 +67,10 @@ msgstr "{count, plural, one {Transferência adicionada} other {# transferências
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr "{count, plural, one {Trailer} other {Trailers}}"
 
+#: src/lib/playback/controller.ts
+msgid "{count} channels"
+msgstr ""
+
 #: src/features/player/scene-overlay.tsx
 msgid "{count} switched off, rendered again from here"
 msgstr ""
@@ -1380,6 +1384,7 @@ msgstr "Roxo escuro"
 #. No colour of its own
 #: src/app/settings/_components/version-settings.tsx
 #: src/app/settings/subtitles.tsx src/app/settings/theme.tsx src/lib/i18n.ts
+#: src/lib/playback/controller.ts
 msgid "Default"
 msgstr "Predefinição"
 
@@ -2547,6 +2552,10 @@ msgstr "Em falta"
 
 #: src/features/player/scene-overlay.tsx
 msgid "Mode"
+msgstr ""
+
+#: src/lib/playback/controller.ts
+msgid "Mono"
 msgstr ""
 
 #: src/app/settings/subtitles.tsx
@@ -4667,7 +4676,7 @@ msgstr "Estado"
 msgid "Stays as it is"
 msgstr ""
 
-#: src/app/settings/audio.tsx
+#: src/app/settings/audio.tsx src/lib/playback/controller.ts
 msgid "Stereo"
 msgstr "Estéreo"
 

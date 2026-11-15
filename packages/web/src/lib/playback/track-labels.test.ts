@@ -8,8 +8,10 @@ vi.mock('@lingui/core/macro', () => ({
       ''
     ),
 }));
-vi.mock('../storage', () => ({ storage: { get: () => null, set: () => {} } }));
-vi.mock('../session', () => ({ useSession: () => ({}) }));
+vi.mock('@/lib/storage', () => ({
+  storage: { get: () => null, set: () => {} },
+}));
+vi.mock('@/lib/jellyfin/session', () => ({ useSession: () => ({}) }));
 
 // no DOM here: the module reads which media features the browser has as it loads
 vi.stubGlobal('HTMLMediaElement', class {});

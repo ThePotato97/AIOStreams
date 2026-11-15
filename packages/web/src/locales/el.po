@@ -67,6 +67,10 @@ msgstr "{count, plural, one {Η λήψη προστέθηκε} other {Προστ
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr "{count, plural, one {Τρέιλερ} other {Τρέιλερ}}"
 
+#: src/lib/playback/controller.ts
+msgid "{count} channels"
+msgstr ""
+
 #: src/features/player/scene-overlay.tsx
 msgid "{count} switched off, rendered again from here"
 msgstr ""
@@ -1372,6 +1376,7 @@ msgstr "Βαθύ μοβ"
 #. No colour of its own
 #: src/app/settings/_components/version-settings.tsx
 #: src/app/settings/subtitles.tsx src/app/settings/theme.tsx src/lib/i18n.ts
+#: src/lib/playback/controller.ts
 msgid "Default"
 msgstr "Προεπιλογή"
 
@@ -2529,6 +2534,10 @@ msgstr "Λείπει"
 
 #: src/features/player/scene-overlay.tsx
 msgid "Mode"
+msgstr ""
+
+#: src/lib/playback/controller.ts
+msgid "Mono"
 msgstr ""
 
 #: src/app/settings/subtitles.tsx
@@ -4629,7 +4638,7 @@ msgstr "Κατάσταση"
 msgid "Stays as it is"
 msgstr "Μένει ως έχει"
 
-#: src/app/settings/audio.tsx
+#: src/app/settings/audio.tsx src/lib/playback/controller.ts
 msgid "Stereo"
 msgstr "Στερεοφωνικός ήχος"
 

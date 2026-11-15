@@ -62,6 +62,10 @@ msgstr ""
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr ""
 
+#: src/lib/playback/controller.ts
+msgid "{count} channels"
+msgstr ""
+
 #: src/features/player/scene-overlay.tsx
 msgid "{count} switched off, rendered again from here"
 msgstr ""
@@ -1423,6 +1427,7 @@ msgstr ""
 #: src/app/settings/subtitles.tsx
 #: src/app/settings/theme.tsx
 #: src/lib/i18n.ts
+#: src/lib/playback/controller.ts
 msgid "Default"
 msgstr ""
 
@@ -2619,6 +2624,10 @@ msgstr ""
 
 #: src/features/player/scene-overlay.tsx
 msgid "Mode"
+msgstr ""
+
+#: src/lib/playback/controller.ts
+msgid "Mono"
 msgstr ""
 
 #: src/app/settings/subtitles.tsx
@@ -4804,6 +4813,7 @@ msgid "Stays as it is"
 msgstr ""
 
 #: src/app/settings/audio.tsx
+#: src/lib/playback/controller.ts
 msgid "Stereo"
 msgstr ""
 

@@ -63,6 +63,10 @@ msgstr "{count, plural, one {Download added} other {# downloads added}}"
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr "{count, plural, one {Trailer} other {Trailers}}"
 
+#: src/lib/playback/controller.ts
+msgid "{count} channels"
+msgstr "{count} channels"
+
 #: src/features/player/scene-overlay.tsx
 msgid "{count} switched off, rendered again from here"
 msgstr "{count} switched off, rendered again from here"
@@ -1424,6 +1428,7 @@ msgstr "Deep purple"
 #: src/app/settings/subtitles.tsx
 #: src/app/settings/theme.tsx
 #: src/lib/i18n.ts
+#: src/lib/playback/controller.ts
 msgid "Default"
 msgstr "Default"
 
@@ -2621,6 +2626,10 @@ msgstr "Missing"
 #: src/features/player/scene-overlay.tsx
 msgid "Mode"
 msgstr "Mode"
+
+#: src/lib/playback/controller.ts
+msgid "Mono"
+msgstr "Mono"
 
 #: src/app/settings/subtitles.tsx
 msgid "Monospace"
@@ -4805,6 +4814,7 @@ msgid "Stays as it is"
 msgstr "Stays as it is"
 
 #: src/app/settings/audio.tsx
+#: src/lib/playback/controller.ts
 msgid "Stereo"
 msgstr "Stereo"
 

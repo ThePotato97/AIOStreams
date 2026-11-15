@@ -333,7 +333,7 @@ index f0ea172..e62a697 100644
          Title: name
      };
 diff --git a/src/embed/EmbeddedPlayer.ts b/src/embed/EmbeddedPlayer.ts
-index 4261f19..1c0f1f2 100644
+index 4261f19..6d7f3d4 100644
 --- a/src/embed/EmbeddedPlayer.ts
 +++ b/src/embed/EmbeddedPlayer.ts
 @@ -6,6 +6,7 @@ import { selectCustomAudioOutputLayout, selectCustomAudioSpeakerLayout } from '.
@@ -344,7 +344,7 @@ index 4261f19..1c0f1f2 100644
  import { createDefaultAudioDownmixSettings } from '../audio/processing/CustomAudioDownmix';
  import { DEFAULT_CUSTOM_AUDIO_DOWNMIX_ALGORITHM } from '../audio/processing/CustomAudioDownmixAlgorithm';
  import {
-@@ -95,6 +96,8 @@ export type EmbeddedOpenRequest = Readonly<{
+@@ -95,12 +96,16 @@ export type EmbeddedOpenRequest = Readonly<{
      volume: number
      muted: boolean
      rate: number
@@ -353,7 +353,15 @@ index 4261f19..1c0f1f2 100644
  }>;
  
  export type EmbeddedAudioTrack = Readonly<{
-@@ -123,7 +126,10 @@ export type EmbeddedStats = Readonly<{
+     ordinal: number
+     codec: string | null
+     channels: number | null
++    /** FFmpeg's profile name, such as "Dolby TrueHD + Dolby Atmos", or null */
++    profile: string | null
+     language: string | null
+     title: string | null
+     isDefault: boolean
+@@ -123,7 +128,10 @@ export type EmbeddedStats = Readonly<{
      video: DescribedStream | null
      audio: DescribedStream | null
      dolbyVisionProfile: number | null
@@ -364,7 +372,7 @@ index 4261f19..1c0f1f2 100644
      audioOutputLayout: string | null
      audioObjects: number | null
      audioUnderflows: number
-@@ -155,12 +161,16 @@ export type EmbeddedPlayer = Readonly<{
+@@ -155,12 +163,16 @@ export type EmbeddedPlayer = Readonly<{
      setPasses(sources: readonly string[]): Promise<PlanReport>
      /** Presents HDR video as HDR on a screen that shows it, rather than tone-mapped; it outlives routes. */
      setHDROutput(enabled: boolean): Promise<void>
@@ -381,7 +389,7 @@ index 4261f19..1c0f1f2 100644
      /** Null before a frame shows. */
      presentedMs(): number | null
      /** Null while nothing plays. */
-@@ -266,14 +276,31 @@ async function packagesFor(source: DescribedSource): Promise<DecoderPackages> {
+@@ -266,14 +278,31 @@ async function packagesFor(source: DescribedSource): Promise<DecoderPackages> {
      };
  }
  
@@ -415,7 +423,15 @@ index 4261f19..1c0f1f2 100644
          })
      };
  }
-@@ -347,6 +374,8 @@ type Route = {
+@@ -329,6 +358,7 @@ function audioTracksOf(source: DescribedSource): EmbeddedAudioTrack[] {
+         isDefault: stream.IsDefault,
+         language: stream.Language,
+         ordinal,
++        profile: stream.Profile,
+         title: stream.Title
+     }));
+ }
+@@ -347,6 +377,8 @@ type Route = {
      options: unknown
      /** Names what a fallback's reason only classifies. */
      lastError: string | null
@@ -424,7 +440,7 @@ index 4261f19..1c0f1f2 100644
  };
  
  const withDetail = (route: Route, reason: string): string => (route.lastError ? `${reason}: ${route.lastError}` : reason);
-@@ -362,6 +391,24 @@ class RouteRefused extends Error {}
+@@ -362,6 +394,24 @@ class RouteRefused extends Error {}
  export function createEmbeddedPlayer(surface: PresentationSurface, events: EmbeddedPlayerEvents): EmbeddedPlayer {
      let generation = 0;
      let opened: Opened | null = null;
@@ -449,7 +465,7 @@ index 4261f19..1c0f1f2 100644
      /** Settles once every stopped route's controller has closed. */
      let teardown: Promise<void> = Promise.resolve();
      let volume = 1;
-@@ -419,7 +466,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -419,7 +469,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              return;
          }
          const settings = getStaticHDRRenderSettings({
@@ -458,7 +474,7 @@ index 4261f19..1c0f1f2 100644
              currentSettings: presenter.getRenderSettings(),
              eligibility: route.eligibility,
              input: route.input,
-@@ -637,7 +684,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -637,7 +687,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
      const playRoute = async (current: Opened, route: Route, routeGeneration: number, startMs: number): Promise<EligibleCustomPlayback> => {
          const audioContext = route.audioPrewarm?.audioContext;
          const target: CustomAudioRenderTarget = {
@@ -467,7 +483,7 @@ index 4261f19..1c0f1f2 100644
              speakerLayout: selectCustomAudioSpeakerLayout('auto', audioContext?.destination.maxChannelCount ?? null)
          };
          const { eligibility, input } = await chooseRoute(current, route, routeGeneration, target);
-@@ -653,7 +700,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -653,7 +703,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          presenter.attach(surface, routeGeneration);
          const configured = await configurePresentationColorPipeline(presenter, {
              clearDetectedInputPeak: (): void => undefined,
@@ -476,7 +492,7 @@ index 4261f19..1c0f1f2 100644
              dolbyVisionProfile: eligibility.dolbyVisionProfile,
              eligibility,
              generation: routeGeneration,
-@@ -680,7 +727,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -680,7 +730,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          route.frameLoop = frameLoop;
          frameLoop.synchronizePageVisibility(presentsAsVisible());
          events.onState('loading');
@@ -487,7 +503,7 @@ index 4261f19..1c0f1f2 100644
          if (!isCurrent(route, controller)) {
              throw new RouteRefused('superseded');
          }
-@@ -694,8 +743,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -694,8 +746,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          return eligibility;
      };
  
@@ -510,7 +526,7 @@ index 4261f19..1c0f1f2 100644
          current.route = route;
          try {
              // The last route's decoders, workers and audio output close first
-@@ -703,17 +765,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -703,17 +768,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              if (current.route !== route || opened !== current) {
                  throw new RouteRefused('superseded');
              }
@@ -529,7 +545,7 @@ index 4261f19..1c0f1f2 100644
          } catch (error) {
              if (current.route === route) {
                  stopRoute(route);
-@@ -791,6 +843,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -791,6 +846,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              current.request = { ...current.request, audioOrdinal: ordinal, paused };
              return startRoute(current, atMs, audioPrewarm);
          },
@@ -564,7 +580,7 @@ index 4261f19..1c0f1f2 100644
          setMuted: (next: boolean): void => {
              muted = next;
              opened?.route?.controller?.setMuted(next);
-@@ -838,7 +918,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -838,7 +921,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              pictureInPicture = open;
              onVisibility();
          },
@@ -584,7 +600,7 @@ index 4261f19..1c0f1f2 100644
          setPasses: (sources: readonly string[]): Promise<PlanReport> => presenter.setPresentationPreset(
              sources.map((source: string): PresentationPresetFile => ({ parameters: {}, source }))
          ),
-@@ -884,7 +975,8 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -884,7 +978,8 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
                  passes: presenter.getPresentationPlanReport().activePasses,
                  presentedMs: presentation.lastPresentedMediaTimeMicroseconds === null ? null : toMilliseconds(presentation.lastPresentedMediaTimeMicroseconds),
                  route: describeRoute(eligibility),

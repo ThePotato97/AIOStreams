@@ -67,6 +67,10 @@ msgstr "{count, plural, one {Unduhan ditambahkan} other {# unduhan ditambahkan}}
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr "{count, plural, one {Cuplikan} other {Cuplikan}}"
 
+#: src/lib/playback/controller.ts
+msgid "{count} channels"
+msgstr ""
+
 #: src/features/player/scene-overlay.tsx
 msgid "{count} switched off, rendered again from here"
 msgstr ""
@@ -1373,6 +1377,7 @@ msgstr "Ungu tua"
 #. No colour of its own
 #: src/app/settings/_components/version-settings.tsx
 #: src/app/settings/subtitles.tsx src/app/settings/theme.tsx src/lib/i18n.ts
+#: src/lib/playback/controller.ts
 msgid "Default"
 msgstr "Bawaan"
 
@@ -2532,6 +2537,10 @@ msgstr "Tidak tersedia"
 
 #: src/features/player/scene-overlay.tsx
 msgid "Mode"
+msgstr ""
+
+#: src/lib/playback/controller.ts
+msgid "Mono"
 msgstr ""
 
 #: src/app/settings/subtitles.tsx
@@ -4636,7 +4645,7 @@ msgstr "Status"
 msgid "Stays as it is"
 msgstr ""
 
-#: src/app/settings/audio.tsx
+#: src/app/settings/audio.tsx src/lib/playback/controller.ts
 msgid "Stereo"
 msgstr "Stereo"
 

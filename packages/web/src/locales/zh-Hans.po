@@ -67,6 +67,10 @@ msgstr "{count, plural, one {已添加下载任务} other {已添加 # 个下载
 msgid "{count, plural, one {Trailer} other {Trailers}}"
 msgstr "{count, plural, one {预告片} other {预告片}}"
 
+#: src/lib/playback/controller.ts
+msgid "{count} channels"
+msgstr ""
+
 #: src/features/player/scene-overlay.tsx
 msgid "{count} switched off, rendered again from here"
 msgstr ""
@@ -1380,6 +1384,7 @@ msgstr "深紫色"
 #. No colour of its own
 #: src/app/settings/_components/version-settings.tsx
 #: src/app/settings/subtitles.tsx src/app/settings/theme.tsx src/lib/i18n.ts
+#: src/lib/playback/controller.ts
 msgid "Default"
 msgstr "默认"
 
@@ -2547,6 +2552,10 @@ msgstr "缺失"
 
 #: src/features/player/scene-overlay.tsx
 msgid "Mode"
+msgstr ""
+
+#: src/lib/playback/controller.ts
+msgid "Mono"
 msgstr ""
 
 #: src/app/settings/subtitles.tsx
@@ -4670,7 +4679,7 @@ msgstr "状态"
 msgid "Stays as it is"
 msgstr ""
 
-#: src/app/settings/audio.tsx
+#: src/app/settings/audio.tsx src/lib/playback/controller.ts
 msgid "Stereo"
 msgstr "立体声"
 
