@@ -1,0 +1,2 @@
+# Built by build.mjs; the web build serves dist/ when it exists.
+dist/

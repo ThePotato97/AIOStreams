@@ -42,6 +42,8 @@ pub struct TrueHd {
     speakers: Vec<f32>,
     /// FFmpeg's channel mask of `speakers` (its `thd_layout`), 0 until a presentation is decoded.
     pub speaker_mask: u64,
+    /// The speaker presentation's sample rate, the stream's: 48 kHz until a presentation is decoded.
+    pub speaker_rate: u32,
     /// For each output channel, its index in the decoded presentation.
     speaker_order: Vec<usize>,
 }
@@ -129,6 +131,7 @@ impl TrueHd {
             lead: 0,
             speakers: Vec::new(),
             speaker_mask: 0,
+            speaker_rate: 48_000,
             speaker_order: Vec::new(),
         }
     }
@@ -144,6 +147,7 @@ impl TrueHd {
 
     /// The speaker presentation's channels, in FFmpeg's order (by channel bit).
     fn speaker_layout(&mut self, d: &DecodedAccessUnit) {
+        self.speaker_rate = d.sampling_frequency;
         let bits: Vec<u64> = d.channel_labels.iter().map(|&l| ffmpeg_bit(l)).collect();
         let mask = bits.iter().fold(0, |m, b| m | b);
         if mask != self.speaker_mask || self.speaker_order.len() != bits.len() {
@@ -202,7 +206,7 @@ impl TrueHd {
     }
 
     fn silence(&mut self, out: &mut dyn FnMut(Block)) {
-        let ch = if self.atmos == Some(true) { self.scene.inputs.len() } else { self.channel_beds.len() };
+        let ch = if self.atmos == Some(true) { self.scene.pushed().len() } else { self.channel_beds.len() };
         if ch == 0 {
             return;
         }

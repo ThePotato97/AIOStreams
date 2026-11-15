@@ -1,0 +1,650 @@
+diff --git a/src/decode/audio/AudioDecoderManifest.ts b/src/decode/audio/AudioDecoderManifest.ts
+index b1a93b3..d118d88 100644
+--- a/src/decode/audio/AudioDecoderManifest.ts
++++ b/src/decode/audio/AudioDecoderManifest.ts
+@@ -27,6 +27,11 @@ export const AUDIO_DECODER_RENDER_CHANNEL_MASK_OPTION = 'renderChannelMask';
+ export const AUDIO_DECODER_RENDER_BINAURAL_OPTION = 'renderBinaural';
+ /** The attribute an object audio package reports per block: how many dynamic objects it rendered, 0 for a stock decode */
+ export const AUDIO_DECODER_OBJECT_COUNT_ATTRIBUTE = 'objectCount';
++/**
++ * The attribute a package that limits its own render reports per block: 1 where the block already passed the package's own
++ * peak limiter, so the output stage's limiter leaves it as rendered.
++ */
++export const AUDIO_DECODER_LIMITED_ATTRIBUTE = 'limited';
+ 
+ /** The most dynamic objects a block may report rendering; a larger `objectCount` is corrupt */
+ export const AUDIO_DECODER_MAXIMUM_OBJECT_COUNT = 1_024;
+diff --git a/src/decode/audio/PackageSoftwareAudioDecoder.ts b/src/decode/audio/PackageSoftwareAudioDecoder.ts
+index d4696eb..818bc2c 100644
+--- a/src/decode/audio/PackageSoftwareAudioDecoder.ts
++++ b/src/decode/audio/PackageSoftwareAudioDecoder.ts
+@@ -9,6 +9,7 @@ import { isSupportedCustomAudioSampleRate } from '../../audio/CustomAudioSampleR
+ import type { CustomAudioChannelLayout } from '../../audio/processing/CustomAudioChannelLayout';
+ import { getQualifiedCustomWaveChannelLayout } from '../../audio/processing/CustomWaveChannelLayout';
+ import {
++    AUDIO_DECODER_LIMITED_ATTRIBUTE,
+     AUDIO_DECODER_OBJECT_COUNT_ATTRIBUTE,
+     AUDIO_DECODER_RENDER_BINAURAL_OPTION,
+     AUDIO_DECODER_RENDER_CHANNEL_MASK_OPTION,
+@@ -40,6 +41,8 @@ export type PackageDecodedAudioOutput = Readonly<{
+     mediaTimeMicroseconds: Microseconds
+     /** How many dynamic objects the package rendered into the block, or null for a package that reports no `objectCount` */
+     objectCount: number | null
++    /** The package limited the block itself (`limited` 1), so its render needs no limiter of the engine's */
++    limited: boolean
+     sampleRate: number
+ }>;
+ 
+@@ -84,11 +87,17 @@ export function createPackageAudioOutput(
+         channelMask,
+         frameCount,
+         mediaTimeMicroseconds,
++        limited: block.attributes.get(AUDIO_DECODER_LIMITED_ATTRIBUTE) === 1,
+         objectCount: objectCount ?? null,
+         sampleRate
+     };
+ }
+ 
++/** Whether a package's block needs the output stage's peak limiter: a render of dynamic objects the package didn't limit itself. */
++export function needsEngineLimiter(output: Pick<PackageDecodedAudioOutput, 'limited' | 'objectCount'>): boolean {
++    return (output.objectCount ?? 0) > 0 && !output.limited;
++}
++
+ /** Owns one decoder of an audio decoder package in the audio decode worker. */
+ export default class PackageSoftwareAudioDecoder {
+     private readonly decoder: AudioDecoderPackageInstance;
+diff --git a/src/embed/AtmosDetection.ts b/src/embed/AtmosDetection.ts
+new file mode 100644
+index 0000000..875d4d9
+--- /dev/null
++++ b/src/embed/AtmosDetection.ts
+@@ -0,0 +1,219 @@
++// Dolby Atmos found in a stream's own packets, for a host that has no server-side probe to name it.
++// The eligibility reads Atmos from a MediaStream's Profile as FFmpeg names it, so this names it the
++// same way, from the same bits FFmpeg reads: TrueHD's major sync (libavcodec/mlpdec.c) and E-AC-3's
++// additional bitstream info (libavcodec/ac3_parser.c, `eac3_extension_type_a`).
++
++export const TRUEHD_ATMOS_PROFILE = 'Dolby TrueHD + Dolby Atmos';
++export const EAC3_ATMOS_PROFILE = 'Dolby Digital Plus + Dolby Atmos';
++
++const TRUEHD_MAJOR_SYNC = 0xF8726FBA;
++/** A TrueHD access unit's own header precedes its major sync */
++const TRUEHD_ACCESS_UNIT_HEADER_BYTES = 4;
++const TRUEHD_SUBSTREAMS_OFFSET = TRUEHD_ACCESS_UNIT_HEADER_BYTES + 16;
++const TRUEHD_SUBSTREAM_INFO_OFFSET = TRUEHD_ACCESS_UNIT_HEADER_BYTES + 17;
++const TRUEHD_ATMOS_SUBSTREAMS = 4;
++
++/**
++ * Reports whether a TrueHD access unit's major sync carries the 16-channel presentation (Atmos), as FFmpeg does: a fourth
++ * substream with the top bit of substream_info set. Null when the access unit has no major sync.
++ */
++export function readTrueHDAtmos(accessUnit: Uint8Array): boolean | null {
++    if (accessUnit.length <= TRUEHD_SUBSTREAM_INFO_OFFSET) {
++        return null;
++    }
++    const view = new DataView(accessUnit.buffer, accessUnit.byteOffset, accessUnit.byteLength);
++    if (view.getUint32(TRUEHD_ACCESS_UNIT_HEADER_BYTES) !== TRUEHD_MAJOR_SYNC) {
++        return null;
++    }
++    return (accessUnit[TRUEHD_SUBSTREAMS_OFFSET]! >> 4) === TRUEHD_ATMOS_SUBSTREAMS
++        && (accessUnit[TRUEHD_SUBSTREAM_INFO_OFFSET]! >> 7) === 1;
++}
++
++/** Reads big-endian bits, as FFmpeg's GetBitContext does; reads past the end throw. */
++class BitReader {
++    private position = 0;
++
++    constructor(private readonly bytes: Uint8Array) {}
++
++    read(count: number): number {
++        if (this.position + count > this.bytes.length * 8) {
++            throw new RangeError('past the end of the header');
++        }
++        let value = 0;
++        for (let i = 0; i < count; i += 1) {
++            value = value * 2 + ((this.bytes[this.position >> 3]! >> (7 - (this.position & 7))) & 1);
++            this.position += 1;
++        }
++        return value;
++    }
++
++    skip(count: number): void {
++        this.position += count;
++    }
++
++    /** Skips `count` bits where the flag before them is set. */
++    skipIf(count: number): void {
++        if (this.read(1)) {
++            this.skip(count);
++        }
++    }
++}
++
++const EAC3_SYNC_WORD = 0x0B77;
++const EAC3_MIN_BSID = 11;
++const EAC3_MAX_BSID = 16;
++const EAC3_FRAME_TYPE_INDEPENDENT = 0;
++const EAC3_FRAME_TYPE_DEPENDENT = 1;
++const EAC3_FRAME_TYPE_AC3_CONVERT = 2;
++const EAC3_FRAME_TYPE_RESERVED = 3;
++const EAC3_REDUCED_RATE_CODE = 3;
++const EAC3_BLOCKS = [ 1, 2, 3, 6 ];
++const CHANNEL_MODE_STEREO = 2;
++const CHANNEL_MODE_2F2R = 6;
++const MIX_DATA_5 = 1;
++const MIX_DATA_12 = 2;
++const MIX_DATA_SIZED = 3;
++
++type EAC3Header = {
++    blocks: number
++    channelMode: number
++    frameType: number
++    lfe: boolean
++    programs: number
++    rateCode: number
++};
++
++/** The frame's header up to its mixing metadata, or null where FFmpeg would read no Atmos flag from it. */
++function readHeaderStart(bits: BitReader, frame: Uint8Array): EAC3Header | null {
++    if (bits.read(16) !== EAC3_SYNC_WORD) {
++        return null;
++    }
++    const bsid = ((frame[5] ?? 0) >> 3) & 0x1F;
++    if (bsid < EAC3_MIN_BSID || bsid > EAC3_MAX_BSID) {
++        return null;
++    }
++    const frameType = bits.read(2);
++    const substream = bits.read(3);
++    if (frameType === EAC3_FRAME_TYPE_RESERVED || substream !== 0) {
++        return null;
++    }
++    bits.skip(11); // frame size
++    const rateCode = bits.read(2);
++    let blocks = 6;
++    if (rateCode === EAC3_REDUCED_RATE_CODE) {
++        bits.skip(2); // the reduced sample rate's code
++    } else {
++        blocks = EAC3_BLOCKS[bits.read(2)]!;
++    }
++    const channelMode = bits.read(3);
++    const lfe = bits.read(1) === 1;
++    bits.skip(5); // bitstream id
++    const programs = channelMode === 0 ? 2 : 1;
++    for (let i = 0; i < programs; i += 1) {
++        bits.skip(5); // dialogue normalization
++        bits.skipIf(8); // heavy compression
++    }
++    if (frameType === EAC3_FRAME_TYPE_DEPENDENT) {
++        bits.skipIf(16); // channel map
++    }
++    return { blocks, channelMode, frameType, lfe, programs, rateCode };
++}
++
++/** The mixing information an independent frame carries for other streams. */
++function skipStreamMixing(bits: BitReader, header: EAC3Header): void {
++    for (let i = 0; i < header.programs; i += 1) {
++        bits.skipIf(6); // program scale factor
++    }
++    bits.skipIf(6); // external program scale factor
++    const mixData = bits.read(2);
++    if (mixData === MIX_DATA_5) {
++        bits.skip(5);
++    } else if (mixData === MIX_DATA_12) {
++        bits.skip(12);
++    } else if (mixData === MIX_DATA_SIZED) {
++        bits.skip((bits.read(5) + 2) * 8);
++    }
++    if (header.channelMode < CHANNEL_MODE_STEREO) {
++        for (let i = 0; i < header.programs; i += 1) {
++            bits.skipIf(14); // pan information
++        }
++    }
++    if (bits.read(1)) {
++        for (let i = 0; i < header.blocks; i += 1) {
++            if (header.blocks === 1 || bits.read(1)) {
++                bits.skip(5); // block mixing configuration
++            }
++        }
++    }
++}
++
++function skipMixingMetadata(bits: BitReader, header: EAC3Header): void {
++    if (!bits.read(1)) {
++        return;
++    }
++    if (header.channelMode > CHANNEL_MODE_STEREO) {
++        bits.skip(2);
++        if (header.channelMode & 1) {
++            bits.skip(6);
++        }
++        if (header.channelMode & 4) {
++            bits.skip(6);
++        }
++    }
++    if (header.lfe) {
++        bits.skipIf(5);
++    }
++    if (header.frameType === EAC3_FRAME_TYPE_INDEPENDENT) {
++        skipStreamMixing(bits, header);
++    }
++}
++
++function skipInformationalMetadata(bits: BitReader, header: EAC3Header): void {
++    if (!bits.read(1)) {
++        return;
++    }
++    bits.skip(5);
++    if (header.channelMode === CHANNEL_MODE_STEREO) {
++        bits.skip(4);
++    }
++    if (header.channelMode >= CHANNEL_MODE_2F2R) {
++        bits.skip(2);
++    }
++    for (let i = 0; i < header.programs; i += 1) {
++        bits.skipIf(8);
++    }
++    if (header.rateCode !== EAC3_REDUCED_RATE_CODE) {
++        bits.skip(1);
++    }
++}
++
++/**
++ * Reports whether an E-AC-3 frame's additional bitstream info sets flag_ec3_extension_type_a (Atmos), walking its header
++ * as FFmpeg's eac3_parse_header does. Null when the packet doesn't start with an independent E-AC-3 frame FFmpeg would read
++ * the flag from (AC-3, a dependent or other substream, or a header that ends early).
++ */
++export function readEAC3Atmos(frame: Uint8Array): boolean | null {
++    try {
++        const bits = new BitReader(frame);
++        const header = readHeaderStart(bits, frame);
++        if (!header) {
++            return null;
++        }
++        skipMixingMetadata(bits, header);
++        skipInformationalMetadata(bits, header);
++        if (header.frameType === EAC3_FRAME_TYPE_INDEPENDENT && header.blocks !== 6) {
++            bits.skip(1); // converter synchronization
++        }
++        if (header.frameType === EAC3_FRAME_TYPE_AC3_CONVERT && (header.blocks === 6 || bits.read(1))) {
++            bits.skip(6); // original frame size code
++        }
++        // Additional bitstream info: the first byte's least significant bit is flag_ec3_extension_type_a
++        if (!bits.read(1)) {
++            return false;
++        }
++        bits.skip(6 + 7);
++        return bits.read(1) === 1;
++    } catch {
++        return null;
++    }
++}
+diff --git a/src/embed/DescribeSource.ts b/src/embed/DescribeSource.ts
+index f0ea172..e62a697 100644
+--- a/src/embed/DescribeSource.ts
++++ b/src/embed/DescribeSource.ts
+@@ -1,6 +1,8 @@
+ // A URL described as a media server's media source, for a host that has no server-side probe of the file.
+ // A Dolby Vision stream is described by its base layer.
+-import { ALL_FORMATS, Input, UrlSource, type InputAudioTrack, type InputVideoTrack } from 'mediabunny';
++import { ALL_FORMATS, Input, PacketReader, UrlSource, type InputAudioTrack, type InputVideoTrack } from 'mediabunny';
++
++import { EAC3_ATMOS_PROFILE, readEAC3Atmos, readTrueHDAtmos, TRUEHD_ATMOS_PROFILE } from './AtmosDetection';
+ 
+ /** The Jellyfin MediaStream fields the eligibility and the presentation input read. */
+ export type DescribedStream = {
+@@ -327,6 +329,31 @@ async function describeVideo(track: InputVideoTrack, index: number): Promise<Des
+     };
+ }
+ 
++/** Packets read for one that names its stream: TrueHD repeats a major sync at least every 128 access units. */
++const ATMOS_SEARCH_PACKETS = 160;
++const ATMOS_READERS: Readonly<Record<string, { profile: string, read: (packet: Uint8Array) => boolean | null }>> = {
++    eac3: { profile: EAC3_ATMOS_PROFILE, read: readEAC3Atmos },
++    truehd: { profile: TRUEHD_ATMOS_PROFILE, read: readTrueHDAtmos }
++};
++
++/** Names a TrueHD or E-AC-3 track Atmos as FFmpeg would, from the first of its packets that says (AtmosDetection.ts). */
++async function readAtmosProfile(track: InputAudioTrack, codec: string | null): Promise<string | null> {
++    const atmos = codec ? ATMOS_READERS[codec] : undefined;
++    if (!atmos) {
++        return null;
++    }
++    const reader = new PacketReader(track);
++    let packet = await reader.getFirst();
++    for (let read = 0; packet && read < ATMOS_SEARCH_PACKETS; read += 1) {
++        const found = atmos.read(packet.data);
++        if (found !== null) {
++            return found ? atmos.profile : null;
++        }
++        packet = await reader.getNext(packet);
++    }
++    return null;
++}
++
+ async function describeAudio(track: InputAudioTrack, index: number): Promise<DescribedStream> {
+     const [ codec, channels, sampleRate, disposition, language, name ] = await Promise.all([
+         track.getCodec(),
+@@ -342,6 +369,7 @@ async function describeAudio(track: InputAudioTrack, index: number): Promise<Des
+         Codec: codec ? AUDIO_CODECS[codec] ?? codec : null,
+         IsDefault: disposition.default,
+         Language: language === UNDETERMINED_LANGUAGE ? null : language,
++        Profile: await readAtmosProfile(track, codec).catch((): null => null),
+         SampleRate: sampleRate,
+         Title: name
+     };
+diff --git a/src/embed/EmbeddedPlayer.ts b/src/embed/EmbeddedPlayer.ts
+index 4261f19..d71dfce 100644
+--- a/src/embed/EmbeddedPlayer.ts
++++ b/src/embed/EmbeddedPlayer.ts
+@@ -6,6 +6,7 @@ import { selectCustomAudioOutputLayout, selectCustomAudioSpeakerLayout } from '.
+ import { prewarmBrowserAudioContext, type BrowserAudioContextPrewarmLease } from '../audio/output/BrowserAudioContextPrewarm';
+ import { createBrowserCustomAudioOutputFactory } from '../audio/output/BrowserCustomAudioOutput';
+ import { getWebGPUAudioOutputManager } from '../audio/output/WebGPUAudioOutputManager';
++import type { CustomAudioOutputLayout } from '../audio/processing/CustomAudioChannelLayout';
+ import { createDefaultAudioDownmixSettings } from '../audio/processing/CustomAudioDownmix';
+ import { DEFAULT_CUSTOM_AUDIO_DOWNMIX_ALGORITHM } from '../audio/processing/CustomAudioDownmixAlgorithm';
+ import {
+@@ -95,6 +96,8 @@ export type EmbeddedOpenRequest = Readonly<{
+     volume: number
+     muted: boolean
+     rate: number
++    /** Renders Dolby Atmos binaurally for headphones on a stereo output; false when omitted. */
++    binaural?: boolean
+ }>;
+ 
+ export type EmbeddedAudioTrack = Readonly<{
+@@ -161,6 +164,8 @@ export type EmbeddedPlayer = Readonly<{
+     setPictureInPicture(open: boolean): void
+     /** Restarts the route at the clock. */
+     setAudio(ordinal: number): Promise<EmbeddedOpenResult>
++    /** Binaural rendering on or off: live where a package already renders the track's objects, else the route restarts at the clock. */
++    setBinaural(enabled: boolean): Promise<EmbeddedOpenResult>
+     /** Null before a frame shows. */
+     presentedMs(): number | null
+     /** Null while nothing plays. */
+@@ -347,6 +352,8 @@ type Route = {
+     options: unknown
+     /** Names what a fallback's reason only classifies. */
+     lastError: string | null
++    /** The layout decoded audio plays to, once it plays */
++    outputLayout: CustomAudioOutputLayout | null
+ };
+ 
+ const withDetail = (route: Route, reason: string): string => (route.lastError ? `${reason}: ${route.lastError}` : reason);
+@@ -637,7 +644,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+     const playRoute = async (current: Opened, route: Route, routeGeneration: number, startMs: number): Promise<EligibleCustomPlayback> => {
+         const audioContext = route.audioPrewarm?.audioContext;
+         const target: CustomAudioRenderTarget = {
+-            binauralHeadphones: false,
++            binauralHeadphones: current.request.binaural === true,
+             speakerLayout: selectCustomAudioSpeakerLayout('auto', audioContext?.destination.maxChannelCount ?? null)
+         };
+         const { eligibility, input } = await chooseRoute(current, route, routeGeneration, target);
+@@ -680,7 +687,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+         route.frameLoop = frameLoop;
+         frameLoop.synchronizePageVisibility(presentsAsVisible());
+         events.onState('loading');
+-        const result = await controller.play(createPlayOptions(eligibility, toMicroseconds(startMs), decodedAudio, target));
++        const playOptions = createPlayOptions(eligibility, toMicroseconds(startMs), decodedAudio, target);
++        route.outputLayout = playOptions.decodedAudioOutputLayout ?? null;
++        const result = await controller.play(playOptions);
+         if (!isCurrent(route, controller)) {
+             throw new RouteRefused('superseded');
+         }
+@@ -694,8 +703,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+         return eligibility;
+     };
+ 
++    const routeResult = (current: Opened, eligibility: EligibleCustomPlayback): EmbeddedOpenResult => {
++        const video = current.source.MediaStreams.find((stream: DescribedStream): boolean => stream.Type === 'Video');
++        return {
++            audio: audioTracksOf(current.source),
++            audioOrdinal: eligibility.audioTrackIndex,
++            durationMs: eligibility.durationMicroseconds === null ? null : toMilliseconds(eligibility.durationMicroseconds),
++            eligible: true,
++            height: video?.Height ?? null,
++            route: describeRoute(eligibility),
++            width: video?.Width ?? null
++        };
++    };
++
+     const startRoute = async (current: Opened, startMs: number, audioPrewarm: BrowserAudioContextPrewarmLease): Promise<EmbeddedOpenResult> => {
+-        const route: Route = { audioPrewarm, controller: null, eligibility: null, frameLoop: null, input: null, lastError: null, options: null };
++        const route: Route = { audioPrewarm, controller: null, eligibility: null, frameLoop: null, input: null, lastError: null, options: null, outputLayout: null };
+         current.route = route;
+         try {
+             // The last route's decoders, workers and audio output close first
+@@ -703,17 +725,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+             if (current.route !== route || opened !== current) {
+                 throw new RouteRefused('superseded');
+             }
+-            const eligibility = await playRoute(current, route, advance(), startMs);
+-            const video = current.source.MediaStreams.find((stream: DescribedStream): boolean => stream.Type === 'Video');
+-            return {
+-                audio: audioTracksOf(current.source),
+-                audioOrdinal: eligibility.audioTrackIndex,
+-                durationMs: eligibility.durationMicroseconds === null ? null : toMilliseconds(eligibility.durationMicroseconds),
+-                eligible: true,
+-                height: video?.Height ?? null,
+-                route: describeRoute(eligibility),
+-                width: video?.Width ?? null
+-            };
++            return routeResult(current, await playRoute(current, route, advance(), startMs));
+         } catch (error) {
+             if (current.route === route) {
+                 stopRoute(route);
+@@ -791,6 +803,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+             current.request = { ...current.request, audioOrdinal: ordinal, paused };
+             return startRoute(current, atMs, audioPrewarm);
+         },
++        setBinaural: async (enabled: boolean): Promise<EmbeddedOpenResult> => {
++            const current = opened;
++            if (!current) {
++                return { eligible: false, reason: 'nothing-open' };
++            }
++            const route = current.route;
++            const eligibility = route?.eligibility;
++            if (eligibility && (current.request.binaural === true) === enabled) {
++                return routeResult(current, eligibility);
++            }
++            current.request = { ...current.request, binaural: enabled };
++            // A package rendering the track's objects to stereo takes the switch between packets
++            if (route?.controller && eligibility?.audioRendersObjects === true && route.outputLayout === 'stereo') {
++                const live = await route.controller.reconfigureAudioOutput({
++                    binauralHeadphones: enabled,
++                    decodedAudioOutputLayout: route.outputLayout
++                }).catch((): boolean => false);
++                if (live && current.route === route) {
++                    return routeResult(current, eligibility);
++                }
++            }
++            // Anything else may want another route: the browser's own decoder or a package
++            const audioPrewarm = prewarmBrowserAudioContext(CUSTOM_AUDIO_OUTPUT_SAMPLE_RATE);
++            const paused = current.route?.controller?.playbackState === 'paused';
++            const atMs = current.route ? stopRoute(current.route) : current.request.startMs;
++            current.request = { ...current.request, binaural: enabled, paused };
++            return startRoute(current, atMs, audioPrewarm);
++        },
+         setMuted: (next: boolean): void => {
+             muted = next;
+             opened?.route?.controller?.setMuted(next);
+diff --git a/src/pipeline/AudioDecodeWorkerRuntime.ts b/src/pipeline/AudioDecodeWorkerRuntime.ts
+index 35dc39f..0068309 100644
+--- a/src/pipeline/AudioDecodeWorkerRuntime.ts
++++ b/src/pipeline/AudioDecodeWorkerRuntime.ts
+@@ -8,7 +8,7 @@ import {
+     CUSTOM_AUDIO_OUTPUT_SAMPLE_RATE
+ } from '../audio/CustomAudioOutputPolicy';
+ import { getAudioTimestampToleranceMicroseconds } from '../demux/CustomAudioTrackMetadata';
+-import PackageSoftwareAudioDecoder, { type PackageDecodedAudioOutput } from '../decode/audio/PackageSoftwareAudioDecoder';
++import PackageSoftwareAudioDecoder, { needsEngineLimiter, type PackageDecodedAudioOutput } from '../decode/audio/PackageSoftwareAudioDecoder';
+ import WorkletPCMProducer, { WorkletPCMProducerError } from '../audio/output/WorkletPCMProducer';
+ import {
+     loadPlaybackAudioOutputStageModule,
+@@ -663,8 +663,8 @@ class AudioDecodeWorkerRuntime {
+         const boundInput = outputStage.bind({
+             channelCount: output.channelData.length,
+             layout: output.channelLayout,
+-            // A block with dynamic objects is the package's render, which sums them into the speakers
+-            rendered: (output.objectCount ?? 0) > 0,
++            // A block with dynamic objects is the package's render, which sums them into the speakers, unless it limited them itself
++            rendered: needsEngineLimiter(output),
+             sampleRate: output.sampleRate
+         }, attempt.streamingDownmixSettings);
+         const sampleWindow = getAudioSampleWindow(
+diff --git a/test/decode/audio/SelfLimitedPackage.test.ts b/test/decode/audio/SelfLimitedPackage.test.ts
+new file mode 100644
+index 0000000..70dcc3b
+--- /dev/null
++++ b/test/decode/audio/SelfLimitedPackage.test.ts
+@@ -0,0 +1,88 @@
++// A package that limits its own render: its blocks pass the output stage as rendered, peaks above the engine's ceiling kept.
++import { describe, expect, it } from 'vitest';
++
++import { CUSTOM_STEREO_CHANNEL_LAYOUT } from 'webgpu-player/audio/processing/CustomAudioChannelLayout';
++import DecodedAudioOutputStage from 'webgpu-player/audio/processing/DecodedAudioOutputStage';
++import { CUSTOM_AUDIO_LIMITER_CEILING_GAIN } from 'webgpu-player/audio/processing/StreamingAudioLookaheadLimiter';
++import type { StreamingAudioResamplerOutput } from 'webgpu-player/audio/processing/StreamingAudioOutputPipeline';
++import { createPackageAudioOutput, needsEngineLimiter } from 'webgpu-player/decode/audio/PackageSoftwareAudioDecoder';
++import { requireMicroseconds } from 'webgpu-player/TimeMath';
++
++const RATE = 48_000;
++const STEREO_MASK = 0x3;
++const FRAMES = 9_600;
++// A render that reaches 0.99 (about -0.09 dBFS), past the engine's -1 dBFS ceiling
++const PEAK = 0.99;
++
++const render = (): Float32Array[] => [ 0, 1 ].map((channel: number): Float32Array => Float32Array.from(
++    { length: FRAMES },
++    (_: unknown, i: number): number => PEAK * Math.sin((2 * Math.PI * 440 * i) / RATE + channel)
++));
++
++function block(attributes: Record<string, number>) {
++    return createPackageAudioOutput({
++        attributes: new Map(Object.entries(attributes)),
++        channelData: render(),
++        channelMask: STEREO_MASK,
++        frameCount: FRAMES,
++        sampleRate: RATE,
++        timestampMicroseconds: 1_000_000
++    }, requireMicroseconds(1_000_000), 0, 'test package');
++}
++
++/** The block through an output stage bound as the audio decode worker binds it, and the stage's samples. */
++function throughOutputStage(output: ReturnType<typeof block>): Float32Array[] {
++    const stage = new DecodedAudioOutputStage({
++        maximumOutputFrameCount: 1_920,
++        minimumOutputFrameCount: 1,
++        outputLayout: 'stereo',
++        routeCodec: 'truehd',
++        timestampToleranceMicroseconds: 1_000
++    });
++    const binding = stage.bind({
++        channelCount: 2,
++        layout: CUSTOM_STEREO_CHANNEL_LAYOUT,
++        rendered: needsEngineLimiter(output),
++        sampleRate: RATE
++    }, null);
++    const outputs: StreamingAudioResamplerOutput[] = [
++        ...binding.outputs,
++        ...binding.pipeline.push({ channelData: output.channelData.map((c: Float32Array): Float32Array => c.slice()), mediaTimeMicroseconds: output.mediaTimeMicroseconds }),
++        ...stage.finalize()
++    ];
++    return [ 0, 1 ].map((channel: number): Float32Array => {
++        const joined = new Float32Array(outputs.reduce((sum, o) => sum + o.frameCount, 0));
++        let at = 0;
++        for (const o of outputs) {
++            joined.set(o.channelData[channel]!.subarray(0, o.frameCount), at);
++            at += o.frameCount;
++        }
++        return joined;
++    });
++}
++
++const peak = (channels: Float32Array[]): number => Math.max(...channels.map((c: Float32Array): number => Math.max(...c.map(Math.abs))));
++
++describe('a package that limits its own render', () => {
++    it('reports it per block, with `limited` 1', () => {
++        expect(block({ limited: 1, objectCount: 15 }).limited).toBe(true);
++        expect(block({ objectCount: 15 }).limited).toBe(false);
++        expect(needsEngineLimiter(block({ limited: 1, objectCount: 15 }))).toBe(false);
++        expect(needsEngineLimiter(block({ objectCount: 15 }))).toBe(true);
++        // A stock decode never needs it, limited or not
++        expect(needsEngineLimiter(block({ objectCount: 0 }))).toBe(false);
++    });
++    it('comes out of the output stage sample for sample, peaks above the ceiling included', () => {
++        const input = render();
++        const output = throughOutputStage(block({ limited: 1, objectCount: 15 }));
++        expect(output[0]!.length).toBe(FRAMES);
++        expect(peak(output)).toBeGreaterThan(CUSTOM_AUDIO_LIMITER_CEILING_GAIN);
++        for (let channel = 0; channel < 2; channel += 1) {
++            expect(Array.from(output[channel]!)).toEqual(Array.from(input[channel]!));
++        }
++    });
++    it('while an object render it didn\'t limit is still limited to the ceiling', () => {
++        const output = throughOutputStage(block({ objectCount: 15 }));
++        expect(peak(output)).toBeLessThanOrEqual(CUSTOM_AUDIO_LIMITER_CEILING_GAIN + 1e-6);
++    });
++});
+diff --git a/test/embed/AtmosDetection.test.ts b/test/embed/AtmosDetection.test.ts
+new file mode 100644
+index 0000000..2c6a84e
+--- /dev/null
++++ b/test/embed/AtmosDetection.test.ts
+@@ -0,0 +1,56 @@
++// Atmos named from a stream's own packets, against real streams' first frames and FFmpeg's names for them.
++import { describe, expect, it } from 'vitest';
++
++import { readEAC3Atmos, readTrueHDAtmos } from 'webgpu-player/embed/AtmosDetection';
++
++const hex = (value: string): Uint8Array => Uint8Array.from(value.match(/../gu)!.map((byte: string): number => parseInt(byte, 16)));
++
++// First bytes of streams FFmpeg names "Dolby Digital Plus + Dolby Atmos" (JOC, 5.1 core)
++const EAC3_ATMOS = [
++    '0b7705ff3f86ff7a4b408d2080880050001880080031000af3eec30c30c175dc7ea6baaacfdf425685f534b49f56acfa13ead006a26911cd54375fb857375cdb',
++    '0b7702ff3f86a03e49008e20808620d40200000040000000fe18404fb512524232546c7070612621242a40c0c0c0d05040505c7afd2b9acedf3a9caa1aa7cf95'
++];
++// ... and of E-AC-3 streams without Atmos: 5.1 and stereo
++const EAC3_PLAIN = [
++    '0b77037f3f87c000200000000200000004281fcc04010040100418f9f3e7cf9f3e7cf9f3e7dff3abe7cf9f3e7cf9f3e7cf9f3e7cf9f3e7cf9f3e7cf9f3e7cf9f',
++    '0b77067f3f87c00000000000400000004ec61861860e9a9d7a84696ab6f9f3e7ead242af461c1aefa1434b5d53f4e82ba6835dfa64cf9f427d3abce4cf9ebf85',
++    '0b7701ff3487c000208401004300cc041f804577d0e9bfb870dfbe7d0df3e7d5df3e7c7fceaf9f3e7cf9f3e7cf9f3e7cf9f3e7cf9f3e7cf9f3e7cf9f3e7cf9f3'
++];
++const AC3 = '0b7778421e40ebf8403eff99c3c87313';
++// TrueHD access units with a major sync: 7.1 with the Atmos presentation, and 5.1 without
++const TRUEHD_ATMOS = '628b4fadf8726fba0017804fb7521000000087ef43fc0039';
++const TRUEHD_PLAIN = '9111ffd8f8726fba0007800fb752000000008c7f203c0000';
++
++describe('E-AC-3 Atmos, as FFmpeg reads it', () => {
++    it('finds flag_ec3_extension_type_a in JOC streams', () => {
++        for (const frame of EAC3_ATMOS) {
++            expect(readEAC3Atmos(hex(frame))).toBe(true);
++        }
++    });
++    it('finds none in streams without objects', () => {
++        for (const frame of EAC3_PLAIN) {
++            expect(readEAC3Atmos(hex(frame))).toBe(false);
++        }
++    });
++    it('reads nothing from AC-3, other substreams, or a header that ends early', () => {
++        expect(readEAC3Atmos(hex(AC3))).toBeNull();
++        const otherSubstream = hex(EAC3_ATMOS[0]!);
++        otherSubstream[2] |= 0x08;
++        expect(readEAC3Atmos(otherSubstream)).toBeNull();
++        expect(readEAC3Atmos(hex(EAC3_ATMOS[0]!).subarray(0, 8))).toBeNull();
++        expect(readEAC3Atmos(hex('00112233'))).toBeNull();
++    });
++});
++
++describe('TrueHD Atmos, as FFmpeg reads it', () => {
++    it('finds the fourth substream with the 16-channel presentation', () => {
++        expect(readTrueHDAtmos(hex(TRUEHD_ATMOS))).toBe(true);
++    });
++    it('finds none in a stream without it', () => {
++        expect(readTrueHDAtmos(hex(TRUEHD_PLAIN))).toBe(false);
++    });
++    it('reads nothing from an access unit without a major sync', () => {
++        expect(readTrueHDAtmos(hex('628b4fad00112233445566778899aabbccddeeff00112233'))).toBeNull();
++        expect(readTrueHDAtmos(hex('628b4fadf8726fba'))).toBeNull();
++    });
++});

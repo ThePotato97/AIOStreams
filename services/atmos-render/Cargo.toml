@@ -10,6 +10,14 @@ publish = false
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[features]
+# Builds the WebGPU-Player audio decoder package exports (src/package.rs) in place of src/wasm.rs.
+package = []
+# The E-AC-3 and AC-3 package (src/package.rs with ffcore.c, linked by Emscripten), in place of TrueHD.
+package-eac3 = ["package"]
+# The DTS package (src/package.rs with ffcore.c, FFmpeg's dca decoder), in place of TrueHD.
+package-dts = ["package"]
+
 [dependencies]
 anyhow = "1"
 libm = "0.2"

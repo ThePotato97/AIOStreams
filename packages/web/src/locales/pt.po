@@ -1965,6 +1965,10 @@ msgstr "Tem PIN"
 msgid "HDR output"
 msgstr "Saída de vídeo"
 
+#: src/app/settings/audio.tsx
+msgid "Headphones"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Heard"
 msgstr "Ouvi"
@@ -3856,6 +3860,10 @@ msgstr ""
 
 #: src/features/player/scene-overlay.tsx
 msgid "Render only {label}"
+msgstr ""
+
+#: src/app/settings/audio.tsx
+msgid "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
 msgstr ""
 
 #: src/features/playlists/playlists.tsx

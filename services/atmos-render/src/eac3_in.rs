@@ -345,9 +345,9 @@ impl Eac3 {
                     }
                 }
                 // OAMD order: beds (the LFE) and objects; JOC objects fill the non-LFE inputs
-                let mut channels_out = Vec::with_capacity(self.scene.inputs.len());
+                let mut channels_out = Vec::with_capacity(self.scene.pushed().len());
                 let mut next = 0;
-                for input in &self.scene.inputs {
+                for input in self.scene.pushed() {
                     if input.kind == Kind::Lfe {
                         channels_out.push(lfe.clone());
                     } else {

@@ -227,6 +227,7 @@ function AudioDeviceSelect() {
 function SoundCard() {
   const [boost, setBoost] = useSetting(settings.audio.dialogueBoost);
   const [nightMode, setNightMode] = useSetting(settings.audio.nightMode);
+  const [headphones, setHeadphones] = useSetting(settings.audio.headphones);
   const [delay, setDelay] = useSetting(settings.audio.delayMs);
   const delayLabel = audioDelayLabel(delay);
   return (
@@ -247,6 +248,13 @@ function SoundCard() {
         help={t`Evens out loud and quiet scenes, for listening at a low volume. Not for sound passed through.`}
         value={nightMode}
         onValueChange={setNightMode}
+      />
+      <Switch
+        side="right"
+        label={t`Headphones`}
+        help={t`Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through.`}
+        value={headphones}
+        onValueChange={setHeadphones}
       />
       <Slider
         label={t`Delay: ${delayLabel}`}

@@ -26,5 +26,8 @@ pub mod spkvirt;
 pub mod spkvirt_tables;
 pub mod truehd_in;
 pub mod tuning;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "package")))]
 pub mod wasm;
+/// The WebGPU-Player audio decoder package build (`--features package`).
+#[cfg(feature = "package")]
+pub mod package;

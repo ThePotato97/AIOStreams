@@ -186,6 +186,14 @@ fn db_to_gain(db: i8) -> f32 {
     if db == oamd::GAIN_MINUS_INFINITY { 0.0 } else { libm::powf(10.0, db as f32 / 20.0) }
 }
 
+/// The inputs an OAMD payload declares, from its access unit's start.
+struct Layout {
+    at: u64,
+    inputs: Vec<Input>,
+    slots: Vec<Option<u16>>,
+    lfe2: Vec<bool>,
+}
+
 #[derive(Default)]
 pub struct Scene {
     pub modes: Modes,
@@ -194,8 +202,13 @@ pub struct Scene {
     /// section 10), and a 5.1 bed's surrounds aren't retyped (only the headphone renderer
     /// retypes; the speaker renderer maps a bed channel it has directly, renderer.md 9.1).
     pub speakers: bool,
+    /// The inputs as rendered: the layout in effect at the last `advance`.
     pub inputs: Vec<Input>,
     pending: Vec<Update>,
+    /// Layouts pushed but not yet in effect, in stream order: each takes effect at its access
+    /// unit's start, as its updates do, so how far input has been pushed ahead of the render
+    /// doesn't change what's rendered.
+    layouts: Vec<Layout>,
     /// Each input's slot in Windows' renderer (`windows_slots`).
     slots: Vec<Option<u16>>,
     /// Which inputs are the LFE2 bed channel (the debug view's name).
@@ -219,12 +232,12 @@ impl Scene {
         // the bed always has 7/8 (the encoder's 7.1.4 bed), so it never happens there.
         let retype = !self.speakers && self.modes.retypes() && has(5) && has(6) && !has(7) && !has(8);
         let isf = bed_bits.len()..bed_bits.len() + prog.num_isf_objects;
-        if self.inputs.len() != count {
-            self.slots = windows_slots(&bed_bits, isf.clone(), count);
-            self.lfe2 = (0..count)
+        if self.pushed().len() != count {
+            let slots = windows_slots(&bed_bits, isf.clone(), count);
+            let lfe2 = (0..count)
                 .map(|i| bed_bits.get(i).is_some_and(|&b| SpeakerLabels::from_u8(b as u8) == Some(SpeakerLabels::LFE2)))
                 .collect();
-            self.inputs = (0..count)
+            let inputs = (0..count)
                 .map(|i| {
                     let (kind, pos) = if let Some(id) = ids.get(i) {
                         match *id {
@@ -255,8 +268,11 @@ impl Scene {
                     }
                 })
                 .collect();
-            self.pending.clear();
+            // the previous layout's updates stamped from here on never take effect
+            self.pending.retain(|u| u.at < au_start);
+            self.layouts.push(Layout { at: au_start, inputs, slots, lfe2 });
         }
+        let pushed: Vec<(Kind, [f32; 3])> = self.pushed().iter().map(|i| (i.kind, i.target.pos)).collect();
         let Some(element) = &oamd.object_element else { return };
         let info = &element.md_update_info;
         let hp = oamd.headphone_element.as_ref();
@@ -269,9 +285,9 @@ impl Scene {
             let ramp = update.ramp_duration as u64;
             for i in 0..count {
                 let Some(data) = element.object_data.get(i).and_then(|d| d.get(block)) else { continue };
-                let input = &self.inputs[i];
+                let (kind, layout_pos) = pushed[i];
                 let render = &data.object_render_info;
-                let pos = match input.kind {
+                let pos = match kind {
                     Kind::Object => {
                         // x, y: 6-bit codes over 62 (clamped by the parser); z: sign and a
                         // 4-bit magnitude in steps of 2185 (Q15). Elevation off: z = 0.
@@ -285,7 +301,7 @@ impl Scene {
                         let z = if render.b_enable_elevation { p[2].clamp(-1.0, 1.0) } else { 0.0 };
                         [p[0].clamp(0.0, 1.0) as f32, p[1].clamp(0.0, 1.0) as f32, z as f32]
                     }
-                    _ => input.target.pos,
+                    _ => layout_pos,
                 };
                 let not_active = data.b_object_not_active;
                 // Not active sets the gain to 0 (Q7).
@@ -301,11 +317,17 @@ impl Scene {
                         .map(|b| Mode::from_code(b.hp_render_mode))
                         .unwrap_or(Mode::Mid),
                 };
-                let zone = if input.kind == Kind::Object { render.zone_constraints_idx } else { 0 };
+                let zone = if kind == Kind::Object { render.zone_constraints_idx } else { 0 };
                 self.pending.push(Update { at, index: i, target: Target { pos, gain }, ramp, active: !not_active, mode, zone });
             }
         }
         self.pending.sort_by_key(|u| u.at);
+    }
+
+    /// The inputs as of the last payload pushed, which the feed shapes the access unit it's
+    /// pushing to (they take effect for the render at the unit's start, in `advance`).
+    pub fn pushed(&self) -> &[Input] {
+        self.layouts.last().map_or(&self.inputs[..], |l| &l.inputs[..])
     }
 
     /// What each input is, in `sources` order.
@@ -356,12 +378,22 @@ impl Scene {
     /// for Headphones' per-block coefficient (bed channels and the LFE step).
     pub fn advance(&mut self, start: u64) {
         let end = start + BLOCK as u64;
-        while let Some(&u) = self.pending.first() {
-            if u.at >= end {
+        loop {
+            // Layouts and updates in stream order; a layout before its own updates.
+            let layout = self.layouts.first().map(|l| l.at).filter(|&at| at < end);
+            let update = self.pending.first().map(|u| u.at).filter(|&at| at < end);
+            if layout.filter(|&l| update.is_none_or(|u| l <= u)).is_some() {
+                let l = self.layouts.remove(0);
+                self.inputs = l.inputs;
+                self.slots = l.slots;
+                self.lfe2 = l.lfe2;
+                continue;
+            }
+            if update.is_none() {
                 break;
             }
-            self.pending.remove(0);
-            let input = &mut self.inputs[u.index];
+            let u = self.pending.remove(0);
+            let Some(input) = self.inputs.get_mut(u.index) else { continue };
             input.target = u.target;
             input.update_at = u.at;
             input.ramp = u.ramp;

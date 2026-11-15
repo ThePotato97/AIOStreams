@@ -79,6 +79,8 @@ interface GpuPlayer {
     volume: number;
     muted: boolean;
     rate: number;
+    /** This fork's engine patch: render for headphones. */
+    binaural?: boolean;
   }): Promise<GpuOpened>;
   play(): void;
   pause(): void;
@@ -87,6 +89,8 @@ interface GpuPlayer {
   setMuted(muted: boolean): void;
   setRate(rate: number): void;
   setAudio(ordinal: number): Promise<GpuOpened>;
+  /** This fork's engine patch; absent from the published engine. */
+  setBinaural?(enabled: boolean): Promise<GpuOpened>;
   presentedMs(): number | null;
   stats(): GpuStats | null;
   setPasses(sources: readonly string[]): Promise<{
@@ -539,6 +543,7 @@ export function webGpuEngine(
         volume,
         muted,
         rate,
+        binaural: settings.audio.headphones.read(),
       });
       if (load !== opening) return;
       if (!result.eligible) return unplayable(result.reason);
@@ -585,6 +590,8 @@ export function webGpuEngine(
           (next.headers && Object.keys(next.headers).length)
         )
           return unplayable('source-unsupported');
+        // What the player was opened with (`open` reads the setting): changes switch it live.
+        let binaural = settings.audio.headphones.read();
         const onFullscreen = () => set({ fullscreen: isFullscreen() });
         detach.push(onFullscreenChange(onFullscreen));
         onFullscreen();
@@ -596,6 +603,15 @@ export function webGpuEngine(
             void player
               ?.setHDROutput(settings.video.hdrOutput.read())
               .catch(() => {});
+            const headphones = settings.audio.headphones.read();
+            if (headphones !== binaural) {
+              binaural = headphones;
+              void player
+                ?.setBinaural?.(headphones)
+                .catch((error: unknown) =>
+                  appLog('warn', `webgpu: headphones not set: ${String(error)}`)
+                );
+            }
           }),
           () => clearInterval(drops)
         );

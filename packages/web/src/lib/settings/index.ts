@@ -691,6 +691,8 @@ export const settings = {
       undefined,
       ['aiostreams-app-night-mode']
     ),
+    /** Dolby Atmos (and other surround) rendered for headphones by the WebGPU player's audio packages. */
+    headphones: device<boolean>('aiostreams-web-audio-headphones', false),
     /** Positive plays the sound later than the picture. */
     delayMs: device<number>(
       'aiostreams-web-audio-delay',

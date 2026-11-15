@@ -1,0 +1,16 @@
+truehd.wasm, eac3.wasm and dts.wasm are AIOStreams' audio decoder packages for the WebGPU player:
+atmos-render, AIOStreams' Dolby Atmos renderer (MIT), which renders TrueHD Atmos, E-AC-3 JOC, AC-3
+and DTS binaurally for headphones as Dolby Atmos for Headphones does.
+
+eac3.wasm and dts.wasm also contain FFmpeg's AC-3, E-AC-3 and DTS decoders (libavcodec and
+libavutil), which are licensed under the GNU Lesser General Public License version 2.1 or later;
+its text is in FFmpeg-COPYING.LGPLv2.1 beside this file. FFmpeg is linked statically.
+
+The corresponding source is atmos-render-source.tar.xz, beside this file:
+- ffmpeg/: FFmpeg (https://github.com/FFmpeg/FFmpeg) at commit @FFMPEG_COMMIT@, unmodified. It is
+  configured with only the decoders above (--enable-decoder=eac3, or --enable-decoder=dca), as the
+  WebGPU player configures it; the configure line is in atmos-render/package/build.sh.
+- atmos-render/: atmos-render, including the C file that calls FFmpeg (package/ffcore.c) and the
+  build that configures FFmpeg and links them (package/build.sh).
+- Built with Emscripten @EMSCRIPTEN_VERSION@. To relink with another FFmpeg, build FFmpeg the same way
+  and run package/build.sh with it in place of the pinned one.

@@ -2025,6 +2025,10 @@ msgstr "Has a PIN"
 msgid "HDR output"
 msgstr "HDR output"
 
+#: src/app/settings/audio.tsx
+msgid "Headphones"
+msgstr "Headphones"
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Heard"
 msgstr "Heard"
@@ -3970,6 +3974,10 @@ msgstr "Render {label}"
 #: src/features/player/scene-overlay.tsx
 msgid "Render only {label}"
 msgstr "Render only {label}"
+
+#: src/app/settings/audio.tsx
+msgid "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
+msgstr "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
 
 #: src/features/playlists/playlists.tsx
 msgid "Repeat"

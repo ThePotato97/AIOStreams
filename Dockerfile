@@ -4,6 +4,32 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
+# atmos-render's audio decoder packages for the WebGPU player, and the corresponding source FFmpeg's
+# LGPL asks for (services/atmos-render/package/build.sh). WebAssembly, the same on every platform, so
+# built once, on the build machine's.
+FROM --platform=$BUILDPLATFORM emscripten/emsdk:4.0.13@sha256:520088b81877b610389dfd4cf7fb8c69f3ae41a611b0f80e222f57dafd930973 AS atmos-packages
+ENV RUSTUP_HOME=/rustup CARGO_HOME=/cargo PATH=/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+    --default-toolchain 1.97.0 --target wasm32-unknown-unknown --target wasm32-unknown-emscripten
+COPY services/atmos-render /atmos-render
+RUN sh /atmos-render/package/build.sh /packages
+
+# The WebGPU player the web app serves: its engine rebuilt from the pinned source with this fork's
+# patch, with the packages above (packages/web/webgpu-player/build.mjs). Also built once.
+FROM --platform=$BUILDPLATFORM node:24.18.1-slim AS webgpu-player
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY pnpm-lock.yaml ./
+COPY packages/web/webgpu-player ./packages/web/webgpu-player
+COPY --from=atmos-packages /packages /atmos-packages
+# The published package at the pinned version, which build.mjs checks against pnpm-lock.yaml.
+RUN npm pack --silent --pack-destination /tmp \
+    "@aiostreams/webgpu-player@$(node -p "require('./packages/web/webgpu-player/engine.json').tag.slice(1)")" \
+  && node packages/web/webgpu-player/build.mjs --packages /atmos-packages \
+    --published /tmp/aiostreams-webgpu-player-*.tgz
+
 FROM base AS builder
 
 WORKDIR /build
@@ -46,6 +72,7 @@ COPY packages/web ./packages/web
 COPY packages/crypto ./packages/crypto
 COPY scripts ./scripts
 COPY resources ./resources
+COPY --from=webgpu-player /build/packages/web/webgpu-player/dist ./packages/web/webgpu-player/dist
 
 
 # Build the project.

@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { formatter } from '@lingui/format-po';
 import { defineConfig, loadEnv, type RsbuildConfig } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
@@ -103,14 +104,30 @@ function webGpuPlayer() {
   const manifest = createRequire(import.meta.url).resolve(
     '@aiostreams/webgpu-player/package.json'
   );
-  const { version } = JSON.parse(readFileSync(manifest, 'utf8')) as {
+  let { version } = JSON.parse(readFileSync(manifest, 'utf8')) as {
     version: string;
   };
+  let from = join(dirname(manifest), 'libraries');
+  // The fork's build of it, with our audio packages, where webgpu-player/build.mjs made one.
+  const built = new URL('./webgpu-player/dist/', import.meta.url);
+  if (existsSync(new URL('version.json', built))) {
+    const { assetKey } = JSON.parse(
+      readFileSync(new URL('version.json', built), 'utf8')
+    ) as { assetKey: string };
+    version = `${version}-${assetKey}`;
+    from = fileURLToPath(new URL('libraries', built));
+  } else {
+    console.warn(
+      'webgpu-player: serving the published engine, without the AIOStreams audio packages or engine patch. ' +
+        'Build them first: services/atmos-render/package/build.sh <dir>, then ' +
+        'node packages/web/webgpu-player/build.mjs --packages <dir> (the Docker build does both).'
+    );
+  }
   const libraries = `static/webgpu-player/${version}/libraries`;
   return {
     // Served as built: the engine's own build minified it.
     copy: {
-      from: join(dirname(manifest), 'libraries'),
+      from,
       to: libraries,
       info: { minimized: true },
     },

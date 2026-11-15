@@ -143,7 +143,9 @@ impl Engine {
 }
 
 /// Buffers decoded audio into 64-sample slots and renders them; gains change once per
-/// 256-sample block (counted from the first sample). The output is the input's length and
+/// 256-sample block (counted from the first sample). A block is rendered once all of it is
+/// buffered, so every access unit that starts in it has been pushed and the feed's state for it
+/// (`sources`) is the same however the input was pushed. The output is the input's length and
 /// lines up with it: the filterbank latency is dropped at the start and flushed at the end.
 /// Both outputs have the same latency (`Renderer::latency`).
 pub struct Pipeline {
@@ -220,7 +222,9 @@ impl Pipeline {
         let latency = Renderer::latency() as u64;
         let (mut l, mut r) = ([0f32; SLOT], [0f32; SLOT]);
         let mut offset = 0;
-        while have - offset >= SLOT {
+        // whole blocks only (`at` is always a block's first sample)
+        let whole = have - have % BLOCK;
+        while offset < whole {
             let sample = self.at + offset as u64;
             if (sample - origin) % BLOCK as u64 == 0 {
                 let sources = feed.sources(sample);
@@ -268,12 +272,13 @@ impl Pipeline {
         self.at += offset as u64;
     }
 
-    /// At the end: pad with silence so the last input samples come out of the filterbank.
+    /// At the end: pad with silence so the last input samples come out of the filterbank, in
+    /// whole blocks.
     pub fn finish(&mut self, feed: &mut dyn Feed, emit: &mut dyn FnMut(&[f32], &[f32])) {
         if self.pending.is_empty() {
             return;
         }
-        let pad = Renderer::latency() + 2 * SLOT;
+        let pad = Renderer::latency() + 2 * SLOT + BLOCK;
         for p in self.pending.iter_mut() {
             p.extend(std::iter::repeat_n(0.0, pad));
         }
@@ -379,5 +384,111 @@ mod snapshot_tests {
         // everything off: nothing out
         let (none, _) = run(&[0, 1], -0.25);
         assert!(none.iter().all(|v| *v == 0.0));
+    }
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+    use crate::objects::{Modes, Scene};
+    use oamd::{BlockUpdateInfo, MDUpdateInfo, ObjectAudioMetadataPayload, ObjectBasicInfo, ObjectElement, ObjectInfoBlock, ObjectRenderInfo};
+
+    /// Dynamic objects through a `Scene`, as the TrueHD and E-AC-3 feeds drive theirs.
+    struct Objects(Scene);
+    impl Feed for Objects {
+        fn push(&mut self, _: &[u8], _: &mut dyn FnMut(Block)) {}
+        fn sources(&mut self, sample: u64) -> Vec<Source> {
+            self.0.advance(sample);
+            self.0.sources()
+        }
+        fn elements(&self) -> Vec<Element> {
+            self.0.elements()
+        }
+    }
+
+    /// An update moving `count` objects to `x` (front, at full level), stamped `offset` samples into its access unit.
+    fn moved_to(x: f64, offset: usize, count: usize) -> ObjectAudioMetadataPayload {
+        let block = ObjectInfoBlock {
+            object_basic_info: ObjectBasicInfo { object_gain: 0, ..Default::default() },
+            object_render_info: ObjectRenderInfo { pos3d: [x, 0.0, 0.0], ..Default::default() },
+            ..Default::default()
+        };
+        ObjectAudioMetadataPayload {
+            object_count: count,
+            object_element: Some(ObjectElement {
+                md_update_info: MDUpdateInfo {
+                    sample_offset: offset,
+                    num_obj_info_blocks: 1,
+                    block_update_info: vec![BlockUpdateInfo { ramp_duration: 256, ..Default::default() }],
+                },
+                object_data: vec![vec![block]; count],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    const UNIT: usize = 40;
+
+    /// Renders 120 access units of noise, each with the payload `metadata` gives it and as many channels as
+    /// the last payload pushed declares (as the feeds shape their blocks), pushing `ahead` units before
+    /// rendering any (as a feed handed many at once does).
+    fn render(metadata: &dyn Fn(u64) -> Option<ObjectAudioMetadataPayload>, ahead: usize) -> Vec<f32> {
+        let mut feed = Objects(Scene::new(Modes::Stream));
+        let mut pipeline = Pipeline::new().unwrap();
+        let mut out = Vec::new();
+        let mut noise = 1u32;
+        let mut channels = 1;
+        let units: Vec<Block> = (0..120u64)
+            .map(|u| {
+                if let Some(p) = metadata(u * UNIT as u64) {
+                    channels = p.object_count;
+                }
+                let samples = (0..channels)
+                    .map(|_| {
+                        (0..UNIT)
+                            .map(|_| {
+                                noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                                (noise >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+                            })
+                            .collect()
+                    })
+                    .collect();
+                Block { start: u * UNIT as u64, samples }
+            })
+            .collect();
+        let mut pushed = 0;
+        for (u, block) in units.into_iter().enumerate() {
+            while pushed < (u + ahead).min(120) || pushed == u {
+                let start = (pushed * UNIT) as u64;
+                if let Some(p) = metadata(start) {
+                    feed.0.update(&p, start);
+                }
+                pushed += 1;
+            }
+            pipeline.take(&mut feed, block, &mut |l, r| out.extend_from_slice(&[l[0], r[0]]));
+        }
+        pipeline.finish(&mut feed, &mut |l, r| out.extend_from_slice(&[l[0], r[0]]));
+        out
+    }
+
+    #[test]
+    fn output_does_not_depend_on_how_far_input_is_pushed_ahead() {
+        // The first payload (the layout) in the unit at 840, stamped at 875: in the block from 768, past its
+        // first slot. A move in the unit at 2000, stamped at 2010: in the block from 1792, also past its first
+        // slot. A second object from the unit at 3480 (a new layout), in the block from 3328.
+        let metadata = |start: u64| match start {
+            840 => Some(moved_to(0.0, 35, 1)),
+            2000 => Some(moved_to(1.0, 10, 1)),
+            3480 => Some(moved_to(0.5, 20, 2)),
+            s if s % 400 == 0 && s > 840 => Some(moved_to(if s < 2000 { 0.0 } else { 1.0 }, 0, if s < 3480 { 1 } else { 2 })),
+            _ => None,
+        };
+        let per_unit = render(&metadata, 0);
+        assert_eq!(per_unit.len(), 120 * UNIT * 2);
+        assert!(per_unit.iter().any(|v| *v != 0.0));
+        for ahead in [1, 3, 7, 50, 120] {
+            assert_eq!(render(&metadata, ahead), per_unit, "pushed {ahead} units ahead");
+        }
     }
 }
