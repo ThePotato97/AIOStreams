@@ -49,7 +49,7 @@ build_ffmpeg() {
         --disable-pthreads --disable-runtime-cpudetect --disable-gpl --disable-iconv \
         --disable-version3 --disable-nonfree --enable-avcodec \
         $components \
-        --cc=emcc --cxx=em++ --ar=emar --ranlib=emranlib --host-cc="$EMSDK_BIN/clang" --nm="$EMSDK_BIN/llvm-nm" \
+        --cc=emcc --cxx=em++ --ar=emar --ranlib=emranlib --host-cc="${HOST_CC:-cc}" --nm="$EMSDK_BIN/llvm-nm" \
         "--extra-cflags=-DNDEBUG -O3 -flto -msimd128" "--extra-ldflags=-O3 -flto" > configure.log 2>&1) \
         || { tail -n 40 "$tree/configure.log" "$tree/ffbuild/config.log" >&2; exit 1; }
     for marker in 'CONFIG_GPL 0' 'CONFIG_NONFREE 0' 'CONFIG_VERSION3 0'; do
