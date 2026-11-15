@@ -526,31 +526,43 @@ function HdrOutputSwitch() {
 function HdrPeakInput() {
   const [hdrOutput] = useSetting(settings.video.hdrOutput);
   const [peak, setPeak] = useSetting(settings.video.hdrPeakNits);
-  // What's typed, kept until the field is left: "1500" on its way would set 1, 15 and 150.
-  const [draft, setDraft] = React.useState<number | null>(null);
+  // What's typed, saved once the field is left or Enter pressed: "1500" on its way would set 1, 15 and 150.
+  // The field keeps its own text; a value passed back in while typing would be clamped to the minimum.
+  const typed = React.useRef<number | null>(null);
   if (!hdrOutput) return null;
   const commit = () => {
-    if (draft === null) return;
-    setDraft(null);
+    const value = typed.current;
+    typed.current = null;
+    if (value === null || Number.isNaN(value)) return;
     setPeak(
       Math.round(
-        Math.min(HDR_PEAK_NITS.max, Math.max(HDR_PEAK_NITS.min, draft))
+        Math.min(HDR_PEAK_NITS.max, Math.max(HDR_PEAK_NITS.min, value))
       )
     );
   };
   return (
-    <NumberInput
-      label={t`HDR peak brightness (nits)`}
-      help={t`The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights.`}
-      min={HDR_PEAK_NITS.min}
-      max={HDR_PEAK_NITS.max}
-      step={50}
-      formatOptions={{ maximumFractionDigits: 0, useGrouping: false }}
-      value={draft ?? peak}
-      onValueChange={(value) => setDraft(Number.isNaN(value) ? null : value)}
+    <div
       onBlur={commit}
-      onKeyDown={(e) => e.key === 'Enter' && commit()}
-    />
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+      }}
+    >
+      <NumberInput
+        // A new saved value starts the field over from it
+        key={peak}
+        label={t`HDR peak brightness (nits)`}
+        help={t`The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights.`}
+        min={HDR_PEAK_NITS.min}
+        max={HDR_PEAK_NITS.max}
+        step={50}
+        hideControls
+        formatOptions={{ maximumFractionDigits: 0, useGrouping: false }}
+        defaultValue={peak}
+        onValueChange={(value) => {
+          typed.current = value;
+        }}
+      />
+    </div>
   );
 }
 
