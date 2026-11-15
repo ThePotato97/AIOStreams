@@ -2416,8 +2416,12 @@ msgid "macOS draws the video, using less power, and shows Dolby Vision itself. S
 msgstr "macOS procesa el video consumiendo menos energía y muestra Dolby Vision de forma nativa. Los shaders y las opciones de imagen de mpv no se aplican."
 
 #: src/features/share/share-links-card.tsx
-msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
 msgstr ""
+
+#: src/features/share/share-links-card.tsx
+#~ msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
+#~ msgstr ""
 
 #: src/lib/i18n.ts
 msgid "Magenta"
@@ -4200,11 +4204,11 @@ msgstr "Sombreadores"
 msgid "Shadow"
 msgstr "Sombra"
 
-#: src/features/player/options.tsx src/features/versions/version-list.tsx
+#: src/features/versions/version-list.tsx
 msgid "Share link"
 msgstr ""
 
-#: src/features/player/options.tsx src/features/share/share-links-card.tsx
+#: src/features/share/share-links-card.tsx
 #: src/features/versions/version-list.tsx
 msgid "Share link copied"
 msgstr ""

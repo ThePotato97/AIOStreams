@@ -2435,8 +2435,12 @@ msgid "macOS draws the video, using less power, and shows Dolby Vision itself. S
 msgstr "由 macOS 负责渲染视频，耗电更少，并直接显示杜比视界效果。着色器和 mpv 的画面选项不会生效。"
 
 #: src/features/share/share-links-card.tsx
-msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
 msgstr ""
+
+#: src/features/share/share-links-card.tsx
+#~ msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
+#~ msgstr ""
 
 #: src/lib/i18n.ts
 msgid "Magenta"
@@ -4242,11 +4246,11 @@ msgstr "阴影"
 msgid "Shadow"
 msgstr "阴影"
 
-#: src/features/player/options.tsx src/features/versions/version-list.tsx
+#: src/features/versions/version-list.tsx
 msgid "Share link"
 msgstr ""
 
-#: src/features/player/options.tsx src/features/share/share-links-card.tsx
+#: src/features/share/share-links-card.tsx
 #: src/features/versions/version-list.tsx
 msgid "Share link copied"
 msgstr ""

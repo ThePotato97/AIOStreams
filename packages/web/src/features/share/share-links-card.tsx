@@ -11,7 +11,7 @@ import { useSession } from '@/lib/jellyfin/session';
 import { relayBase } from '@/lib/party/invite';
 
 /**
- * The user's share links (made with the player's Share link button): each one copied again, or
+ * The user's share links (made with Copy share link in a title's versions list): each one copied again, or
  * revoked, which stops it playing for everyone who has it.
  */
 export function ShareLinksCard() {
@@ -37,7 +37,7 @@ export function ShareLinksCard() {
     <SettingsCard
       name="share-links"
       title={t`Share links`}
-      description={t`Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it.`}
+      description={t`Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it.`}
     >
       {links.data?.length ? (
         <ul className="space-y-2">
