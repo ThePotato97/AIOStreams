@@ -45,6 +45,7 @@ import {
 } from '@/lib/settings';
 import { useFeature } from '@/lib/jellyfin/server-info';
 import { useSession } from '@/lib/jellyfin/session';
+import { ShareLinksCard } from '@/features/share/share-links-card';
 import { mayConvert, qualityOptions } from '@/lib/playback/quality';
 import { canMinimise } from '@/lib/playback/session';
 import { SettingsCard, SettingsRow } from './_components/settings-card';
@@ -445,6 +446,7 @@ export function PlaybackSection() {
         </SettingsCard>
       )}
       {!currentHost().play && <PlayerCard />}
+      <ShareLinksCard />
     </>
   );
 }

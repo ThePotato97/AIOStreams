@@ -25,6 +25,7 @@ import {
   LuPlus,
   LuRatio,
   LuSettings,
+  LuShare2,
   LuSignalHigh,
   LuSlidersHorizontal,
   LuStretchHorizontal,
@@ -72,6 +73,13 @@ import {
 } from '@/lib/jellyfin/user-config';
 import { ControlButton } from './buttons';
 import { PlayerSettingsDialog } from './settings-dialog';
+import { toast } from 'sonner';
+import { copyToClipboard } from '@aiostreams/ui/utils/clipboard';
+import { GUEST_USER_ID } from '@/lib/guest/guest-client';
+import { createLink, linkUrl } from '@/lib/guest/links';
+import { useSession } from '@/lib/jellyfin/session';
+import { relayBase } from '@/lib/party/invite';
+import { playbackNow } from '@/lib/playback/session';
 import { useParty } from '@/lib/party/party';
 import { RATES, rateLabel } from './keys';
 import { useLatest } from '@/hooks/use-latest';
@@ -308,6 +316,46 @@ function FitButton({ notice }: { notice: (text: string) => void }) {
       }}
     >
       {FIT_ICONS[fit]}
+    </ControlButton>
+  );
+}
+
+/**
+ * Makes a share link to what plays, in this version, and copies it: whoever has it plays it on
+ * their own, without an account, until it's revoked in Settings.
+ */
+function ShareButton() {
+  const { client, user } = useSession();
+  const [busy, setBusy] = React.useState(false);
+  if (user.Id === GUEST_USER_ID || !client.token) return null;
+  const share = async () => {
+    const now = playbackNow();
+    if (!now || busy) return;
+    const root = relayBase(client.base) ?? client.base;
+    setBusy(true);
+    try {
+      const link = await createLink(
+        root,
+        client.token!,
+        now.itemId,
+        now.sourceId
+      );
+      const url = linkUrl(root, link);
+      await copyToClipboard(url);
+      toast.success(t`Share link copied`, { description: url });
+    } catch (error) {
+      toast.error((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <ControlButton
+      name="share"
+      label={t`Share link`}
+      onClick={() => void share()}
+    >
+      <LuShare2 />
     </ControlButton>
   );
 }
@@ -812,6 +860,7 @@ export function OptionButtons({
           <LuPictureInPicture />
         </ControlButton>
       )}
+      <ShareButton />
       <ControlButton
         name="settings"
         label={t`Settings`}

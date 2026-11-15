@@ -1101,6 +1101,7 @@ msgid "Copied as JSON"
 msgstr "JSON olarak kopyalandı"
 
 #: src/app/settings/apps.tsx src/components/shell/crash-report.tsx
+#: src/features/share/share-links-card.tsx
 msgid "Copy"
 msgstr "Kopyala"
 
@@ -1939,7 +1940,7 @@ msgstr "Güne göre grupla"
 msgid "Groups"
 msgstr "Grup"
 
-#: src/app/guest/page.tsx
+#: src/app/guest/link-page.tsx src/app/guest/page.tsx
 msgid "Guest"
 msgstr ""
 
@@ -2396,6 +2397,7 @@ msgid "Loading"
 msgstr "Yükleniyor"
 
 #: src/app/settings/_components/version-settings.tsx
+#: src/features/share/share-links-card.tsx
 msgid "Loading…"
 msgstr "Yükleniyor…"
 
@@ -2426,6 +2428,10 @@ msgstr "Altyazıları aşağı taşı"
 #: src/app/settings/apps.tsx
 msgid "macOS draws the video, using less power, and shows Dolby Vision itself. Shaders and mpv's picture options do not apply."
 msgstr "Videoyu macOS çizerek daha az güç tüketir ve Dolby Vision görüntüsünü kendisi gösterir. Shader'lar ve mpv görüntü ayarları uygulanmaz."
+
+#: src/features/share/share-links-card.tsx
+msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgstr ""
 
 #: src/lib/i18n.ts
 msgid "Magenta"
@@ -2779,6 +2785,10 @@ msgstr "Henüz oynatma listesi yok. Buradan oluştur veya bir içeriği menüsü
 msgid "No server answered at that address."
 msgstr "Bu adreste yanıt veren sunucu bulunamadı."
 
+#: src/features/share/share-links-card.tsx
+msgid "No share links yet."
+msgstr ""
+
 #: src/lib/subtitles/files.ts
 msgid "No subtitles were found in that file"
 msgstr "Bu dosyada altyazı bulunamadı"
@@ -3078,6 +3088,14 @@ msgstr "Oynatma listesini aç"
 msgid "Open the app's downloads"
 msgstr "Uygulamanın indirmelerini aç"
 
+#: src/app/guest/link-page.tsx
+msgid "Opening the link…"
+msgstr ""
+
+#: src/app/guest/link-page.tsx
+msgid "Opening the video…"
+msgstr ""
+
 #: src/app/guest/page.tsx
 msgid "Opening what the host is playing…"
 msgstr ""
@@ -3354,7 +3372,8 @@ msgstr "PIN veya parola"
 msgid "Pink"
 msgstr "Pembe"
 
-#: src/app/item/_components/header.tsx src/app/item/_components/no-details.tsx
+#: src/app/guest/link-page.tsx src/app/item/_components/header.tsx
+#: src/app/item/_components/no-details.tsx
 #: src/app/live-tv/_components/channel-details.tsx
 #: src/components/media/hero.tsx src/components/media/item-menu.tsx
 #: src/components/media/random-pick.tsx src/features/player/controls.tsx
@@ -3959,6 +3978,10 @@ msgstr "Zamanlaması düzeltildi ve otomatik eşitlendi"
 msgid "Retry"
 msgstr "Yeniden dene"
 
+#: src/features/share/share-links-card.tsx
+msgid "Revoke"
+msgstr ""
+
 #: src/features/remote/remote-sheet.tsx src/lib/input/keys.ts
 msgid "Rewind"
 msgstr "Geri sar"
@@ -4210,6 +4233,18 @@ msgstr "Gölge"
 #: src/app/settings/subtitles.tsx
 msgid "Shadow"
 msgstr "Gölge"
+
+#: src/features/player/options.tsx
+msgid "Share link"
+msgstr ""
+
+#: src/features/player/options.tsx src/features/share/share-links-card.tsx
+msgid "Share link copied"
+msgstr ""
+
+#: src/features/share/share-links-card.tsx
+msgid "Share links"
+msgstr ""
 
 #: src/features/party/in-party.tsx
 msgid "Share the invite"
@@ -5044,7 +5079,7 @@ msgstr "oynatıcı bu sürümü oynatamadı"
 msgid "The server restarted; rejoin with the link"
 msgstr ""
 
-#: src/app/guest/page.tsx
+#: src/app/guest/link-page.tsx src/app/guest/page.tsx
 msgid "The source couldn't be opened"
 msgstr ""
 
@@ -5184,6 +5219,14 @@ msgstr ""
 #: src/lib/jellyfin/queries.ts
 msgid "This item was not found"
 msgstr "Bu öğe bulunamadı"
+
+#: src/app/guest/link-page.tsx
+msgid "This link has been revoked"
+msgstr ""
+
+#: src/app/guest/link-page.tsx
+msgid "This link is incomplete"
+msgstr ""
 
 #: src/features/downloads/download-button.tsx
 msgid "This season"

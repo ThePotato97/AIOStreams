@@ -1062,6 +1062,79 @@ describe("the host's artwork and segments", () => {
     expect((await api('/segments', token)).status).toBe(403);
   });
 });
+describe('share links', () => {
+  const ITEM = 'c'.repeat(32);
+  const owner = (path: string, init: RequestInit = {}) =>
+    originalFetch(`${base}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer host-token',
+      },
+    });
+  async function makeLink() {
+    const made = await owner('/links', {
+      method: 'POST',
+      body: JSON.stringify({ itemId: ITEM, sourceId: 'source' }),
+    });
+    expect(made.status).toBe(200);
+    return (await made.json()) as { id: string; secret: string; title: string };
+  }
+  it('plays the title to whoever has the link, with no party and no account', async () => {
+    fixture.sourcePath = '/ranged/file';
+    const link = await makeLink();
+    const exchanged = await api('/links/exchange', '', {
+      link: link.id,
+      secret: link.secret,
+    });
+    expect(exchanged.status).toBe(200);
+    const { token } = (await exchanged.json()) as { token: string };
+    const current = await api('/current', token);
+    expect(current.status).toBe(200);
+    const { revision, file } = (await current.json()) as {
+      revision: string;
+      file: unknown;
+    };
+    expect(file).toEqual({ container: 'mkv', durationMs: 1_320_000 });
+    expect(await (await media(token, revision)).text()).toBe(RANGED);
+  });
+  it('is made and listed only by a signed-in user, and opened only with its secret', async () => {
+    const anonymous = await api('/links', '', { itemId: ITEM });
+    expect(anonymous.status).toBe(401);
+    const link = await makeLink();
+    const listed = (await (await owner('/links')).json()) as {
+      links: { id: string; secret: string }[];
+    };
+    expect(listed.links).toContainEqual(
+      expect.objectContaining({ id: link.id, secret: link.secret })
+    );
+    const wrong = await api('/links/exchange', '', {
+      link: link.id,
+      secret: 'x'.repeat(43),
+    });
+    expect(wrong.status).toBe(410);
+  });
+  it('ends, with its viewers, when the user revokes it', async () => {
+    const link = await makeLink();
+    const { token } = (await (
+      await api('/links/exchange', '', { link: link.id, secret: link.secret })
+    ).json()) as { token: string };
+    expect((await api('/current', token)).status).toBe(200);
+    expect(
+      (await owner(`/links/${link.id}`, { method: 'DELETE' })).status
+    ).toBe(200);
+    expect((await api('/current', token)).status).toBe(401);
+    const again = await api('/links/exchange', '', {
+      link: link.id,
+      secret: link.secret,
+    });
+    expect(again.status).toBe(410);
+    const listed = (await (await owner('/links')).json()) as {
+      links: { id: string }[];
+    };
+    expect(listed.links.map((l) => l.id)).not.toContain(link.id);
+  });
+});
 describe('through a restart', () => {
   const servers: Server[] = [];
   // The process before a restart is gone (its store stopped): later tests use the one running.

@@ -31,6 +31,7 @@ import {
   usePartyEvent,
 } from '@/lib/party/party';
 import { setNavigator } from '@/lib/paths';
+import { LinkPage, openedFromLink } from './link-page';
 
 /**
  * The invitation in the page's address: its party code and secret. Read as the page opens: the
@@ -84,6 +85,10 @@ function forgetSeat() {
  * the party and plays its title on the app's own player, reading the host's file directly.
  */
 export function GuestPage() {
+  return openedFromLink() ? <LinkPage /> : <PartyGuestPage />;
+}
+
+function PartyGuestPage() {
   const [name, setName] = React.useState('');
   const [joining, setJoining] = React.useState(false);
   const [joined, setJoined] = React.useState<{

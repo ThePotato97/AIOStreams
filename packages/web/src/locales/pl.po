@@ -1093,6 +1093,7 @@ msgid "Copied as JSON"
 msgstr "Skopiowano jako JSON"
 
 #: src/app/settings/apps.tsx src/components/shell/crash-report.tsx
+#: src/features/share/share-links-card.tsx
 msgid "Copy"
 msgstr "Kopiuj"
 
@@ -1922,7 +1923,7 @@ msgstr "Grupuj według dni"
 msgid "Groups"
 msgstr "Grupy"
 
-#: src/app/guest/page.tsx
+#: src/app/guest/link-page.tsx src/app/guest/page.tsx
 msgid "Guest"
 msgstr ""
 
@@ -2377,6 +2378,7 @@ msgid "Loading"
 msgstr "Wczytywanie"
 
 #: src/app/settings/_components/version-settings.tsx
+#: src/features/share/share-links-card.tsx
 msgid "Loading…"
 msgstr "Wczytywanie…"
 
@@ -2407,6 +2409,10 @@ msgstr "Obniż napisy"
 #: src/app/settings/apps.tsx
 msgid "macOS draws the video, using less power, and shows Dolby Vision itself. Shaders and mpv's picture options do not apply."
 msgstr "macOS renderuje wideo, zużywając mniej energii, i samodzielnie wyświetla Dolby Vision. Shadery i opcje obrazu mpv nie mają zastosowania."
+
+#: src/features/share/share-links-card.tsx
+msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgstr ""
 
 #: src/lib/i18n.ts
 msgid "Magenta"
@@ -2756,6 +2762,10 @@ msgstr "Brak playlist. Utwórz ją tutaj lub dodaj tytuł do playlisty z poziomu
 msgid "No server answered at that address."
 msgstr "Żaden serwer nie odpowiedział pod tym adresem."
 
+#: src/features/share/share-links-card.tsx
+msgid "No share links yet."
+msgstr ""
+
 #: src/lib/subtitles/files.ts
 msgid "No subtitles were found in that file"
 msgstr "W tym pliku nie znaleziono napisów"
@@ -3052,6 +3062,14 @@ msgstr "Otwórz playlistę"
 msgid "Open the app's downloads"
 msgstr "Otwórz pobrane w aplikacji"
 
+#: src/app/guest/link-page.tsx
+msgid "Opening the link…"
+msgstr ""
+
+#: src/app/guest/link-page.tsx
+msgid "Opening the video…"
+msgstr ""
+
 #: src/app/guest/page.tsx
 msgid "Opening what the host is playing…"
 msgstr ""
@@ -3326,7 +3344,8 @@ msgstr "PIN lub hasło"
 msgid "Pink"
 msgstr "Różowy"
 
-#: src/app/item/_components/header.tsx src/app/item/_components/no-details.tsx
+#: src/app/guest/link-page.tsx src/app/item/_components/header.tsx
+#: src/app/item/_components/no-details.tsx
 #: src/app/live-tv/_components/channel-details.tsx
 #: src/components/media/hero.tsx src/components/media/item-menu.tsx
 #: src/components/media/random-pick.tsx src/features/player/controls.tsx
@@ -3919,6 +3938,10 @@ msgstr "Automatycznie dopasowano tempo i zsynchronizowano"
 msgid "Retry"
 msgstr "Ponów"
 
+#: src/features/share/share-links-card.tsx
+msgid "Revoke"
+msgstr ""
+
 #: src/features/remote/remote-sheet.tsx src/lib/input/keys.ts
 msgid "Rewind"
 msgstr "Przewiń do tyłu"
@@ -4168,6 +4191,18 @@ msgstr "Shadery"
 #: src/app/settings/subtitles.tsx
 msgid "Shadow"
 msgstr "Cień"
+
+#: src/features/player/options.tsx
+msgid "Share link"
+msgstr ""
+
+#: src/features/player/options.tsx src/features/share/share-links-card.tsx
+msgid "Share link copied"
+msgstr ""
+
+#: src/features/share/share-links-card.tsx
+msgid "Share links"
+msgstr ""
 
 #: src/features/party/in-party.tsx
 msgid "Share the invite"
@@ -4995,7 +5030,7 @@ msgstr "serwer nie mógł przekonwertować tej wersji"
 msgid "The server restarted; rejoin with the link"
 msgstr ""
 
-#: src/app/guest/page.tsx
+#: src/app/guest/link-page.tsx src/app/guest/page.tsx
 msgid "The source couldn't be opened"
 msgstr ""
 
@@ -5133,6 +5168,14 @@ msgstr "To nie jest prawidłowy plik .wgsl."
 #: src/lib/jellyfin/queries.ts
 msgid "This item was not found"
 msgstr "Nie znaleziono tego elementu"
+
+#: src/app/guest/link-page.tsx
+msgid "This link has been revoked"
+msgstr ""
+
+#: src/app/guest/link-page.tsx
+msgid "This link is incomplete"
+msgstr ""
 
 #: src/features/downloads/download-button.tsx
 msgid "This season"

@@ -1095,6 +1095,7 @@ msgid "Copied as JSON"
 msgstr "Αντιγράφηκε ως JSON"
 
 #: src/app/settings/apps.tsx src/components/shell/crash-report.tsx
+#: src/features/share/share-links-card.tsx
 msgid "Copy"
 msgstr "Αντιγραφή"
 
@@ -1926,7 +1927,7 @@ msgstr "Ομαδοποίηση ανά ημέρα"
 msgid "Groups"
 msgstr "Ομάδες"
 
-#: src/app/guest/page.tsx
+#: src/app/guest/link-page.tsx src/app/guest/page.tsx
 msgid "Guest"
 msgstr ""
 
@@ -2381,6 +2382,7 @@ msgid "Loading"
 msgstr "Φόρτωση"
 
 #: src/app/settings/_components/version-settings.tsx
+#: src/features/share/share-links-card.tsx
 msgid "Loading…"
 msgstr "Γίνεται φόρτωση…"
 
@@ -2411,6 +2413,10 @@ msgstr "Χαμήλωμα υποτίτλων"
 #: src/app/settings/apps.tsx
 msgid "macOS draws the video, using less power, and shows Dolby Vision itself. Shaders and mpv's picture options do not apply."
 msgstr "Το macOS αποδίδει το βίντεο με χαμηλότερη κατανάλωση ενέργειας και εμφανίζει το Dolby Vision απευθείας. Τα shaders και οι επιλογές εικόνας του mpv δεν εφαρμόζονται."
+
+#: src/features/share/share-links-card.tsx
+msgid "Made with Share link in the player. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgstr ""
 
 #: src/lib/i18n.ts
 msgid "Magenta"
@@ -2760,6 +2766,10 @@ msgstr "Δεν υπάρχουν ακόμη λίστες αναπαραγωγής
 msgid "No server answered at that address."
 msgstr "Δεν αποκρίθηκε κανένας διακομιστής σε αυτή τη διεύθυνση."
 
+#: src/features/share/share-links-card.tsx
+msgid "No share links yet."
+msgstr ""
+
 #: src/lib/subtitles/files.ts
 msgid "No subtitles were found in that file"
 msgstr "Δεν βρέθηκαν υπότιτλοι σε αυτό το αρχείο"
@@ -3057,6 +3067,14 @@ msgstr "Άνοιγμα λίστας αναπαραγωγής"
 msgid "Open the app's downloads"
 msgstr "Άνοιγμα των λήψεων της εφαρμογής"
 
+#: src/app/guest/link-page.tsx
+msgid "Opening the link…"
+msgstr ""
+
+#: src/app/guest/link-page.tsx
+msgid "Opening the video…"
+msgstr ""
+
 #: src/app/guest/page.tsx
 msgid "Opening what the host is playing…"
 msgstr ""
@@ -3332,7 +3350,8 @@ msgstr "PIN ή κωδικός πρόσβασης"
 msgid "Pink"
 msgstr "Ροζ"
 
-#: src/app/item/_components/header.tsx src/app/item/_components/no-details.tsx
+#: src/app/guest/link-page.tsx src/app/item/_components/header.tsx
+#: src/app/item/_components/no-details.tsx
 #: src/app/live-tv/_components/channel-details.tsx
 #: src/components/media/hero.tsx src/components/media/item-menu.tsx
 #: src/components/media/random-pick.tsx src/features/player/controls.tsx
@@ -3928,6 +3947,10 @@ msgstr "Προσαρμόστηκε ο χρονισμός και έγινε αυ�
 msgid "Retry"
 msgstr "Νέα προσπάθεια"
 
+#: src/features/share/share-links-card.tsx
+msgid "Revoke"
+msgstr ""
+
 #: src/features/remote/remote-sheet.tsx src/lib/input/keys.ts
 msgid "Rewind"
 msgstr "Γρήγορη επιστροφή"
@@ -4177,6 +4200,18 @@ msgstr "Shader"
 #: src/app/settings/subtitles.tsx
 msgid "Shadow"
 msgstr "Σκιά"
+
+#: src/features/player/options.tsx
+msgid "Share link"
+msgstr ""
+
+#: src/features/player/options.tsx src/features/share/share-links-card.tsx
+msgid "Share link copied"
+msgstr ""
+
+#: src/features/share/share-links-card.tsx
+msgid "Share links"
+msgstr ""
 
 #: src/features/party/in-party.tsx
 msgid "Share the invite"
@@ -5007,7 +5042,7 @@ msgstr "το πρόγραμμα αναπαραγωγής δεν μπόρεσε �
 msgid "The server restarted; rejoin with the link"
 msgstr ""
 
-#: src/app/guest/page.tsx
+#: src/app/guest/link-page.tsx src/app/guest/page.tsx
 msgid "The source couldn't be opened"
 msgstr ""
 
@@ -5146,6 +5181,14 @@ msgstr "Αυτό δεν είναι αρχείο σταδίου .wgsl."
 #: src/lib/jellyfin/queries.ts
 msgid "This item was not found"
 msgstr "Αυτό το στοιχείο δεν βρέθηκε"
+
+#: src/app/guest/link-page.tsx
+msgid "This link has been revoked"
+msgstr ""
+
+#: src/app/guest/link-page.tsx
+msgid "This link is incomplete"
+msgstr ""
 
 #: src/features/downloads/download-button.tsx
 msgid "This season"

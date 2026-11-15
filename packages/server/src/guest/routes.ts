@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { Router, type Request, type Response } from 'express';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Agent, request, type Dispatcher } from 'undici';
 import { lookup, type LookupAddress } from 'node:dns';
@@ -90,6 +90,12 @@ interface SavedShare {
   secret: string;
   ownerToken: string;
   revisions: Record<string, SavedRevision>;
+  /**
+   * A share link: one title, which whoever has the link plays on their own, with no party. Its
+   * owner is the user who made it, and it lasts until they revoke it.
+   */
+  link?: boolean;
+  createdAt?: number;
 }
 /** A share as this process holds it: unsealed, with what it resolved and opened here. */
 interface Binding {
@@ -108,6 +114,7 @@ interface Binding {
   revisions: Record<string, SavedRevision>;
   /** When this process last read it from the store. */
   readAt: number;
+  link?: boolean;
 }
 interface Source {
   handle: string;
@@ -178,7 +185,7 @@ const shareStore = sharedBackend().records<SavedShare>({
   save: (s) => s,
   load: (s) => s,
   due: (s) => s.expiresAt,
-  tags: () => [],
+  tags: (s) => (s.link ? [`link-owner:${s.owner}`] : []),
   refs: (s) => Object.values(s.revisions).map((r) => `src:${r.ref}`),
   receive: () => {},
   lapse: (party) => endShare(party),
@@ -222,6 +229,7 @@ async function loadBinding(party: string): Promise<Binding | undefined> {
     ownerCheckedAt: Math.max(binding.ownerCheckedAt, saved.ownerCheckedAt),
     revisions: saved.revisions,
     readAt: Date.now(),
+    link: saved.link,
   });
   bindings.set(party, binding);
   return binding;
@@ -341,7 +349,9 @@ async function active(req: Request, requireMember = true) {
     fail(401, 'This guest session has expired');
   }
   const binding = await loadBinding(session.party);
-  const party = await guestPartyState(session.party);
+  const party = binding?.link
+    ? linkParty(binding)
+    : await guestPartyState(session.party);
   if (
     !binding ||
     !party ||
@@ -351,11 +361,22 @@ async function active(req: Request, requireMember = true) {
     fail(410, 'This guest invitation has ended');
   if (
     requireMember &&
+    !binding.link &&
     (!session.member || !party.members.some((m) => m.id === session.member))
   )
     fail(403, 'Join the party before playing');
   return { session, binding, party };
 }
+/** A share link's title, as the party state a guest's routes read: playing, with no members. */
+function linkParty(binding: Binding) {
+  const entry = [...binding.entries.values()][0];
+  return {
+    playing: entry ? { playlistItemId: LINK_ITEM, ref: entry.ref } : null,
+    members: [] as { id: string; key: string }[],
+  };
+}
+/** The one title a share link plays, as a party's playlist item. */
+const LINK_ITEM = 'link';
 /**
  * The source a configuration plays for an item: the selected one by id or
  * filename, else one of the same release group, else the first playable.
@@ -656,7 +677,7 @@ router.use((_req, res, next) => {
 // Apps that load the web app from elsewhere (TVs, the standalone build) call
 // these from another origin; the guest page itself is same-origin.
 router.use(
-  ['/available', '/host', '/publish', '/disable', '/media'],
+  ['/available', '/host', '/publish', '/disable', '/media', '/links'],
   jellyfinCors
 );
 router.get('/available', (_req, res) => res.json({ enabled: enabled() }));
@@ -737,6 +758,138 @@ router.post('/exchange', async (req, res) => {
     fail(403, 'This party is closed or full');
   // Revoked by a kick or the share ending, which ends its reads (`onRevoke`).
   const session = await guestSessions.create(body.party, binding.expiresAt);
+  res.json({ token: session.token, expiresAt: session.expiresAt });
+});
+/** How long a share link is kept: until its owner revokes it, in practice. */
+const LINK_LIFETIME_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+/** How long a link's viewer session lasts; the page exchanges the link again after. */
+const LINK_SESSION_MS = 24 * 60 * 60 * 1000;
+/** The most share links one user keeps. */
+const MAX_LINKS = 100;
+const linkSchema = z.object({
+  itemId: z.string().regex(/^[0-9a-f]{32}$/),
+  sourceId: z.string().max(100).optional(),
+});
+/** The signed-in user a share link request comes from. */
+async function linkOwner(req: Request) {
+  if (!enabled()) fail(503, 'Guest streaming is not enabled on this server');
+  const token = bearer(req);
+  const user = await userForToken(token);
+  if (!user) fail(401, 'Sign in to share a link');
+  return { user, token };
+}
+/** A title as a link names it: an episode with its show and number. */
+async function titleOf(loc: Located | undefined): Promise<string | undefined> {
+  if (!loc) return undefined;
+  try {
+    const item = (await itemFromDescriptor(loc.ctx, loc.descriptor)) as {
+      Name?: string;
+      SeriesName?: string;
+      ParentIndexNumber?: number;
+      IndexNumber?: number;
+    } | null;
+    if (!item?.Name) return undefined;
+    if (!item.SeriesName) return item.Name;
+    const number =
+      item.ParentIndexNumber != null && item.IndexNumber != null
+        ? ` S${String(item.ParentIndexNumber).padStart(2, '0')}E${String(item.IndexNumber).padStart(2, '0')}`
+        : '';
+    return `${item.SeriesName}${number} · ${item.Name}`;
+  } catch {
+    return undefined;
+  }
+}
+/**
+ * Makes a share link to a title, in the version the user plays: whoever has the link plays it on
+ * their own, without an account, until the user revokes it. The version is kept by its file, so
+ * the link still finds it when the user's list of versions is run again.
+ */
+router.post('/links', async (req, res) => {
+  const { user, token } = await linkOwner(req);
+  const body = linkSchema.parse(req.body);
+  if ((await shareStore.tagged(`link-owner:${user.uuid}`)).length >= MAX_LINKS)
+    fail(409, `You have ${MAX_LINKS} share links; revoke one first`);
+  let loc: Located | undefined;
+  const record = await lookupRecord(
+    req,
+    user,
+    body,
+    undefined,
+    'guest',
+    (found) => (loc = found)
+  );
+  const id = randomBytes(16).toString('base64url');
+  const secret = randomSecret();
+  const title = (await titleOf(loc)) ?? record.filename ?? 'Video';
+  const now = Date.now();
+  const saved: SavedShare = {
+    owner: user.uuid,
+    link: true,
+    createdAt: now,
+    expiresAt: now + LINK_LIFETIME_MS,
+    entries: [
+      { ref: id, itemId: body.itemId, title, filename: record.filename },
+    ],
+    ownerCheckedAt: now,
+    keyId: keyId(),
+    secret: seal(secret),
+    ownerToken: seal(token),
+    revisions: {},
+  };
+  if ((await shareStore.create(id, () => saved, 0)) !== 'ok')
+    fail(503, 'The link could not be kept; try again');
+  res.json({ id, secret, title, createdAt: now });
+});
+/** The user's share links, newest first, with what rebuilds each address. */
+router.get('/links', async (req, res) => {
+  const { user } = await linkOwner(req);
+  const ids = await shareStore.tagged(`link-owner:${user.uuid}`);
+  const links = [];
+  for (const id of ids) {
+    const saved = await shareStore.get(id);
+    const secret = saved?.keyId === keyId() && unseal(saved.secret);
+    if (!saved?.link || saved.owner !== user.uuid || !secret) continue;
+    links.push({
+      id,
+      secret,
+      title: saved.entries[0]?.title ?? '',
+      createdAt: saved.createdAt ?? 0,
+    });
+  }
+  links.sort((a, b) => b.createdAt - a.createdAt);
+  res.json({ links });
+});
+/** Revokes a share link: its viewers' sessions and reads end with it. */
+router.delete('/links/:id', async (req, res) => {
+  const { user } = await linkOwner(req);
+  const id = key.parse(req.params.id);
+  const saved = await shareStore.get(id);
+  if (!saved?.link || saved.owner !== user.uuid)
+    fail(404, 'No such share link');
+  await endShare(id);
+  res.json({ ok: true });
+});
+/** A share link's viewer: a session for the link's title, as a guest's. */
+router.post('/links/exchange', async (req, res) => {
+  limit(req);
+  if (!enabled()) fail(410, 'Guest streaming is disabled');
+  const body = z
+    .object({ link: key, secret: z.string().length(43) })
+    .parse(req.body);
+  const binding = await loadBinding(body.link);
+  const a = Buffer.from(body.secret),
+    b = Buffer.from(binding?.secret ?? '');
+  if (
+    !binding?.link ||
+    a.length !== b.length ||
+    !timingSafeEqual(a, b) ||
+    binding.expiresAt <= Date.now()
+  )
+    fail(410, 'This link has been revoked');
+  const session = await guestSessions.create(
+    body.link,
+    Math.min(binding.expiresAt, Date.now() + LINK_SESSION_MS)
+  );
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });
 /**
