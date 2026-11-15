@@ -6,9 +6,17 @@ RUN corepack enable
 
 # atmos-render's audio decoder packages for the WebGPU player, and the corresponding source FFmpeg's
 # LGPL asks for (services/atmos-render/package/build.sh). WebAssembly, the same on every platform, so
-# built once, on the build machine's.
-FROM --platform=$BUILDPLATFORM emscripten/emsdk:4.0.13@sha256:520088b81877b610389dfd4cf7fb8c69f3ae41a611b0f80e222f57dafd930973 AS atmos-packages
-ENV RUSTUP_HOME=/rustup CARGO_HOME=/cargo PATH=/cargo/bin:$PATH
+# built once, on the build machine's. Emscripten 4.0.13 (the engine's) comes from emsdk at that
+# release's commit, which has native amd64 and arm64 toolchains (its Docker image is amd64 only).
+FROM --platform=$BUILDPLATFORM node:24.18.1-bookworm AS atmos-packages
+ARG EMSDK_COMMIT=404dc1ec13f64fce1af1eaf5c007e18212f63527
+ENV RUSTUP_HOME=/rustup CARGO_HOME=/cargo
+RUN git init -q /emsdk \
+  && git -C /emsdk fetch -q --depth 1 https://github.com/emscripten-core/emsdk.git "$EMSDK_COMMIT" \
+  && git -C /emsdk checkout -q FETCH_HEAD \
+  && /emsdk/emsdk install 4.0.13 \
+  && /emsdk/emsdk activate 4.0.13
+ENV EMSDK=/emsdk EM_CONFIG=/emsdk/.emscripten PATH=/cargo/bin:/emsdk:/emsdk/upstream/emscripten:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
     --default-toolchain 1.97.0 --target wasm32-unknown-unknown --target wasm32-unknown-emscripten
 COPY services/atmos-render /atmos-render
