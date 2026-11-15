@@ -461,10 +461,10 @@ index f0ea172..e62a697 100644
          Title: name
      };
 diff --git a/src/embed/EmbeddedPlayer.ts b/src/embed/EmbeddedPlayer.ts
-index 4261f19..866499d 100644
+index 4261f19..4f27919 100644
 --- a/src/embed/EmbeddedPlayer.ts
 +++ b/src/embed/EmbeddedPlayer.ts
-@@ -6,6 +6,7 @@ import { selectCustomAudioOutputLayout, selectCustomAudioSpeakerLayout } from '.
+@@ -6,12 +6,14 @@ import { selectCustomAudioOutputLayout, selectCustomAudioSpeakerLayout } from '.
  import { prewarmBrowserAudioContext, type BrowserAudioContextPrewarmLease } from '../audio/output/BrowserAudioContextPrewarm';
  import { createBrowserCustomAudioOutputFactory } from '../audio/output/BrowserCustomAudioOutput';
  import { getWebGPUAudioOutputManager } from '../audio/output/WebGPUAudioOutputManager';
@@ -472,7 +472,15 @@ index 4261f19..866499d 100644
  import { createDefaultAudioDownmixSettings } from '../audio/processing/CustomAudioDownmix';
  import { DEFAULT_CUSTOM_AUDIO_DOWNMIX_ALGORITHM } from '../audio/processing/CustomAudioDownmixAlgorithm';
  import {
-@@ -95,12 +96,16 @@ export type EmbeddedOpenRequest = Readonly<{
+     configureCustomDecodeCapabilityBackground,
+     probeCustomDecodeCapabilities,
+-    warmCustomDecodeCapabilities
++    warmCustomDecodeCapabilities,
++    type CustomDecodeCapabilities
+ } from '../capability/CustomDecodeCapabilities';
+ import {
+     getAudioMetadataLayout,
+@@ -95,12 +97,16 @@ export type EmbeddedOpenRequest = Readonly<{
      volume: number
      muted: boolean
      rate: number
@@ -489,7 +497,7 @@ index 4261f19..866499d 100644
      language: string | null
      title: string | null
      isDefault: boolean
-@@ -123,7 +128,12 @@ export type EmbeddedStats = Readonly<{
+@@ -123,7 +129,12 @@ export type EmbeddedStats = Readonly<{
      video: DescribedStream | null
      audio: DescribedStream | null
      dolbyVisionProfile: number | null
@@ -502,7 +510,7 @@ index 4261f19..866499d 100644
      audioOutputLayout: string | null
      audioObjects: number | null
      audioUnderflows: number
-@@ -155,12 +165,16 @@ export type EmbeddedPlayer = Readonly<{
+@@ -155,12 +166,16 @@ export type EmbeddedPlayer = Readonly<{
      setPasses(sources: readonly string[]): Promise<PlanReport>
      /** Presents HDR video as HDR on a screen that shows it, rather than tone-mapped; it outlives routes. */
      setHDROutput(enabled: boolean): Promise<void>
@@ -519,7 +527,7 @@ index 4261f19..866499d 100644
      /** Null before a frame shows. */
      presentedMs(): number | null
      /** Null while nothing plays. */
-@@ -266,14 +280,31 @@ async function packagesFor(source: DescribedSource): Promise<DecoderPackages> {
+@@ -266,14 +281,31 @@ async function packagesFor(source: DescribedSource): Promise<DecoderPackages> {
      };
  }
  
@@ -553,7 +561,7 @@ index 4261f19..866499d 100644
          })
      };
  }
-@@ -329,13 +360,33 @@ function audioTracksOf(source: DescribedSource): EmbeddedAudioTrack[] {
+@@ -329,13 +361,38 @@ function audioTracksOf(source: DescribedSource): EmbeddedAudioTrack[] {
          isDefault: stream.IsDefault,
          language: stream.Language,
          ordinal,
@@ -563,11 +571,16 @@ index 4261f19..866499d 100644
  }
  
 -function describeRoute(eligibility: EligibleCustomPlayback): string {
-+function describeRoute(eligibility: EligibleCustomPlayback, presenter: WebGPUPresenter): string {
++function describeRoute(eligibility: EligibleCustomPlayback, presenter: WebGPUPresenter, capabilities: CustomDecodeCapabilities | null): string {
      const decoder = eligibility.gpuVideoDecoder ? ' gpu-package' : '';
 -    return `${eligibility.videoDecoderBackend} ${eligibility.videoOutputMode}${decoder}, audio ${eligibility.audioOutputMode ?? 'none'}`;
 +    // An HDR stream on a GPU decoder package: why the device's own decoder wasn't taken, from its native Main10 routes' probes
-+    const native = eligibility.gpuVideoDecoder && eligibility.hdr ? ` (${describeNativeHDRProbes(presenter)})` : '';
++    // and the raw route's decode probe (whether the browser's decoder gives frames whose planes copy out as the route reads them)
++    const codec = eligibility.gpuVideoDecoder?.codec;
++    const rawDecode = capabilities && (codec === 'hevc' || codec === 'vp9' || codec === 'av1') ? capabilities.rawHDRVideo[codec] : null;
++    const native = eligibility.gpuVideoDecoder && eligibility.hdr ?
++        ` (${describeNativeHDRProbes(presenter)}${rawDecode ? `, raw decode ${rawDecode.status} (${rawDecode.reason})` : ''})` :
++        '';
 +    return `${eligibility.videoDecoderBackend} ${eligibility.videoOutputMode}${decoder}${native}, audio ${eligibility.audioOutputMode ?? 'none'}`;
 +}
 +
@@ -589,7 +602,7 @@ index 4261f19..866499d 100644
  }
  
  type Route = {
-@@ -347,6 +398,8 @@ type Route = {
+@@ -347,6 +404,8 @@ type Route = {
      options: unknown
      /** Names what a fallback's reason only classifies. */
      lastError: string | null
@@ -598,7 +611,7 @@ index 4261f19..866499d 100644
  };
  
  const withDetail = (route: Route, reason: string): string => (route.lastError ? `${reason}: ${route.lastError}` : reason);
-@@ -362,6 +415,24 @@ class RouteRefused extends Error {}
+@@ -362,6 +421,24 @@ class RouteRefused extends Error {}
  export function createEmbeddedPlayer(surface: PresentationSurface, events: EmbeddedPlayerEvents): EmbeddedPlayer {
      let generation = 0;
      let opened: Opened | null = null;
@@ -623,7 +636,7 @@ index 4261f19..866499d 100644
      /** Settles once every stopped route's controller has closed. */
      let teardown: Promise<void> = Promise.resolve();
      let volume = 1;
-@@ -419,7 +490,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -419,7 +496,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              return;
          }
          const settings = getStaticHDRRenderSettings({
@@ -632,7 +645,24 @@ index 4261f19..866499d 100644
              currentSettings: presenter.getRenderSettings(),
              eligibility: route.eligibility,
              input: route.input,
-@@ -637,7 +708,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -512,6 +589,8 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+     };
+ 
+     const presenter = new WebGPUPresenter(handlePresentationFallback, handleDecodedRefresh);
++    // The last route's decode capabilities, which the stats' route reads for why a native route was skipped
++    let lastCapabilities: CustomDecodeCapabilities | null = null;
+     const gpuVideoDecodeSessionFactory = createGPUVideoDecodeSessionFactory(presenter, { slicing: false });
+     let pictureInPicture = false;
+     let paintedWhileHidden = false;
+@@ -581,6 +660,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+             packagesFor(current.source),
+             waitForStaticHDRRoutes(input)
+         ]);
++        lastCapabilities = capabilities;
+         ensureLive();
+         const presentationOptions = await getCustomPresentationEligibilityOptions(presenter, {
+             input,
+@@ -637,7 +717,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
      const playRoute = async (current: Opened, route: Route, routeGeneration: number, startMs: number): Promise<EligibleCustomPlayback> => {
          const audioContext = route.audioPrewarm?.audioContext;
          const target: CustomAudioRenderTarget = {
@@ -641,7 +671,7 @@ index 4261f19..866499d 100644
              speakerLayout: selectCustomAudioSpeakerLayout('auto', audioContext?.destination.maxChannelCount ?? null)
          };
          const { eligibility, input } = await chooseRoute(current, route, routeGeneration, target);
-@@ -653,7 +724,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -653,7 +733,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          presenter.attach(surface, routeGeneration);
          const configured = await configurePresentationColorPipeline(presenter, {
              clearDetectedInputPeak: (): void => undefined,
@@ -650,7 +680,7 @@ index 4261f19..866499d 100644
              dolbyVisionProfile: eligibility.dolbyVisionProfile,
              eligibility,
              generation: routeGeneration,
-@@ -680,7 +751,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -680,7 +760,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          route.frameLoop = frameLoop;
          frameLoop.synchronizePageVisibility(presentsAsVisible());
          events.onState('loading');
@@ -661,7 +691,7 @@ index 4261f19..866499d 100644
          if (!isCurrent(route, controller)) {
              throw new RouteRefused('superseded');
          }
-@@ -694,8 +767,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -694,8 +776,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          return eligibility;
      };
  
@@ -673,7 +703,7 @@ index 4261f19..866499d 100644
 +            durationMs: eligibility.durationMicroseconds === null ? null : toMilliseconds(eligibility.durationMicroseconds),
 +            eligible: true,
 +            height: video?.Height ?? null,
-+            route: describeRoute(eligibility, presenter),
++            route: describeRoute(eligibility, presenter, lastCapabilities),
 +            width: video?.Width ?? null
 +        };
 +    };
@@ -684,7 +714,7 @@ index 4261f19..866499d 100644
          current.route = route;
          try {
              // The last route's decoders, workers and audio output close first
-@@ -703,17 +789,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -703,17 +798,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              if (current.route !== route || opened !== current) {
                  throw new RouteRefused('superseded');
              }
@@ -703,7 +733,7 @@ index 4261f19..866499d 100644
          } catch (error) {
              if (current.route === route) {
                  stopRoute(route);
-@@ -791,6 +867,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -791,6 +876,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              current.request = { ...current.request, audioOrdinal: ordinal, paused };
              return startRoute(current, atMs, audioPrewarm);
          },
@@ -738,7 +768,7 @@ index 4261f19..866499d 100644
          setMuted: (next: boolean): void => {
              muted = next;
              opened?.route?.controller?.setMuted(next);
-@@ -838,7 +942,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -838,7 +951,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              pictureInPicture = open;
              onVisibility();
          },
@@ -758,13 +788,13 @@ index 4261f19..866499d 100644
          setPasses: (sources: readonly string[]): Promise<PlanReport> => presenter.setPresentationPreset(
              sources.map((source: string): PresentationPresetFile => ({ parameters: {}, source }))
          ),
-@@ -883,8 +998,10 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -883,8 +1007,10 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
                  framesPresented: presentation.presentedFrameCount,
                  passes: presenter.getPresentationPlanReport().activePasses,
                  presentedMs: presentation.lastPresentedMediaTimeMicroseconds === null ? null : toMilliseconds(presentation.lastPresentedMediaTimeMicroseconds),
 -                route: describeRoute(eligibility),
 -                toneMapped: presentation.mode === 'hdr-to-sdr',
-+                route: describeRoute(eligibility, presenter),
++                route: describeRoute(eligibility, presenter, lastCapabilities),
 +                toneMapped: presentation.mode === 'hdr-to-sdr' && !hdrOutput,
 +                hdrOutputPeakNits: presentation.mode === 'hdr-to-sdr' && hdrOutput ? hdrPeakNits : null,
 +                dolbyVisionDM: presenter.getDolbyVisionDMDescription(),
