@@ -4323,6 +4323,8 @@ msgstr "Set by hand"
 
 #: src/app/settings/page.tsx
 #: src/components/shell/layout.tsx
+#: src/features/player/options.tsx
+#: src/features/player/settings-dialog.tsx
 msgid "Settings"
 msgstr "Settings"
 

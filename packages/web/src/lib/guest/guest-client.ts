@@ -21,7 +21,8 @@ import type {
   SourceInfo,
 } from '@/lib/jellyfin/types';
 import type { GuestCurrent } from './api';
-import { guestPrefs, keptPicks, keepPicks } from './track-memory';
+import type { PlaybackPrefs } from '@/lib/jellyfin/user-config';
+import { guestPrefs, keepSettings, keptPicks, keepPicks } from './track-memory';
 
 /** The user id the guest's session has, which keys its queries. */
 export const GUEST_USER_ID = 'guest';
@@ -127,6 +128,11 @@ export class GuestJellyfinClient extends JellyfinClient {
     }
     if (method === 'GET' && path === '/Users/Me')
       return { Id: GUEST_USER_ID, Configuration: guestPrefs() };
+    // The player's settings, kept in this browser: a guest has no account to keep them.
+    if (method === 'POST' && path === '/Users/Configuration') {
+      keepSettings(body as PlaybackPrefs);
+      return undefined;
+    }
     if (path.startsWith('/DisplayPreferences/')) {
       const id = path.slice('/DisplayPreferences/'.length);
       if (method === 'GET') return { CustomPrefs: keptPicks(id) };

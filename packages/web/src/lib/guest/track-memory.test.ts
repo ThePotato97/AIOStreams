@@ -8,7 +8,8 @@ vi.mock('@/lib/storage', () => ({
     set: (key: string, value: unknown) => saved.set(key, value),
   },
 }));
-const { guestPrefs, keepPicks, keptPicks } = await import('./track-memory');
+const { guestPrefs, keepPicks, keepSettings, keptPicks } =
+  await import('./track-memory');
 
 const ID = 'aiostreams-web-tracks';
 
@@ -50,5 +51,25 @@ describe("a guest's track languages", () => {
     keepPicks(ID, { a: '', b: 'fra|off' });
     expect(keptPicks(ID)).toEqual({ b: 'fra|off' });
     expect(guestPrefs()).toMatchObject({ AudioLanguagePreference: 'fra' });
+  });
+  it('keep what the guest sets in the player’s settings, until a pick changes the languages', () => {
+    keepSettings({
+      RememberAudioSelections: false,
+      AudioLanguagePreference: 'fra',
+      SubtitleMode: 'Smart',
+    });
+    expect(guestPrefs()).toMatchObject({
+      RememberAudioSelections: false,
+      AudioLanguagePreference: 'fra',
+      SubtitleMode: 'Smart',
+    });
+    keepPicks(ID, { show: 'jpn|eng' });
+    expect(guestPrefs()).toEqual({
+      PlayDefaultAudioTrack: false,
+      RememberAudioSelections: false,
+      AudioLanguagePreference: 'jpn',
+      SubtitleLanguagePreference: 'eng',
+      SubtitleMode: 'Always',
+    });
   });
 });

@@ -4198,6 +4198,7 @@ msgid "Set by hand"
 msgstr "手动设置"
 
 #: src/app/settings/page.tsx src/components/shell/layout.tsx
+#: src/features/player/options.tsx src/features/player/settings-dialog.tsx
 msgid "Settings"
 msgstr "设置"
 

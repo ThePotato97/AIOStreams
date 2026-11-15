@@ -18,12 +18,21 @@ interface Remembered {
   subtitle?: string | null;
   /** The display preferences the player keeps, by their id. */
   picks?: Record<string, Record<string, string>>;
+  /** What the guest set in the player's settings, as an account's configuration. */
+  settings?: PlaybackPrefs;
 }
+
+/** The settings a later pick of tracks replaces. */
+const PICKED: (keyof PlaybackPrefs)[] = [
+  'AudioLanguagePreference',
+  'SubtitleLanguagePreference',
+  'SubtitleMode',
+];
 
 const read = (): Remembered => storage.get<Remembered>(KEY) ?? {};
 
 export function guestPrefs(): PlaybackPrefs {
-  const { audio, subtitle } = read();
+  const { audio, subtitle, settings } = read();
   return {
     PlayDefaultAudioTrack: false,
     ...(audio ? { AudioLanguagePreference: audio } : {}),
@@ -35,7 +44,16 @@ export function guestPrefs(): PlaybackPrefs {
             SubtitleMode: 'Always' as const,
           }
         : {}),
+    ...settings,
   };
+}
+
+/**
+ * Keeps what the guest set in the player's settings: it stands until they pick other tracks, whose
+ * languages then take over from the ones set here.
+ */
+export function keepSettings(settings: PlaybackPrefs): void {
+  storage.set(KEY, { ...read(), settings });
 }
 
 /** The display preferences kept under `id`. */
@@ -49,9 +67,16 @@ export const keptPicks = (id: string): Record<string, string> =>
 export function keepPicks(id: string, prefs: Record<string, string>): void {
   const remembered = read();
   const before = remembered.picks?.[id] ?? {};
-  let { audio, subtitle } = remembered;
+  let { audio, subtitle, settings } = remembered;
   for (const [show, pick] of Object.entries(prefs)) {
     if (!pick || pick === before[show]) continue;
+    settings =
+      settings &&
+      Object.fromEntries(
+        Object.entries(settings).filter(
+          ([key]) => !PICKED.includes(key as keyof PlaybackPrefs)
+        )
+      );
     const [pickedAudio, pickedSubtitle] = pick.split('|');
     if (pickedAudio) audio = pickedAudio;
     if (pickedSubtitle === OFF) subtitle = null;
@@ -64,6 +89,7 @@ export function keepPicks(id: string, prefs: Record<string, string>): void {
     ...remembered,
     audio,
     subtitle,
+    settings,
     picks: { ...remembered.picks, [id]: kept },
   });
 }

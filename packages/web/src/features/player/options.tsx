@@ -24,6 +24,7 @@ import {
   LuPictureInPicture,
   LuPlus,
   LuRatio,
+  LuSettings,
   LuSignalHigh,
   LuSlidersHorizontal,
   LuStretchHorizontal,
@@ -70,6 +71,7 @@ import {
   usePlaybackPrefs,
 } from '@/lib/jellyfin/user-config';
 import { ControlButton } from './buttons';
+import { PlayerSettingsDialog } from './settings-dialog';
 import { useParty } from '@/lib/party/party';
 import { RATES, rateLabel } from './keys';
 import { useLatest } from '@/hooks/use-latest';
@@ -810,6 +812,17 @@ export function OptionButtons({
           <LuPictureInPicture />
         </ControlButton>
       )}
+      <ControlButton
+        name="settings"
+        label={t`Settings`}
+        onClick={() => setOpenMenu('settings')}
+      >
+        <LuSettings />
+      </ControlButton>
+      <PlayerSettingsDialog
+        open={openMenu === 'settings'}
+        onClose={() => setOpenMenu(null)}
+      />
       {player.toggleFullscreen && !tv && (
         <ControlButton
           name="fullscreen"
