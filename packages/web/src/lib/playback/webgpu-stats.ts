@@ -20,6 +20,8 @@ export interface GpuStats {
   toneMapped: boolean;
   /** This fork's engine patch: the display peak HDR output maps to, when it does. */
   hdrOutputPeakNits?: number | null;
+  /** The Dolby Vision display management in place of the tone map, such as "CM v4.0, 1000 nits"; null without it */
+  dolbyVisionDM?: string | null;
   audioOutputLayout: string | null;
   audioObjects: number | null;
   audioUnderflows: number;
@@ -91,8 +93,11 @@ export function gpuStatsRows(
           `Dolby Vision profile ${stats.dolbyVisionProfile}`,
         video.VideoRangeType ?? 'SDR',
         video.ColorPrimaries === 'bt2020' && 'BT.2020',
-        stats.toneMapped && 'tone-mapped to SDR',
-        stats.hdrOutputPeakNits &&
+        stats.dolbyVisionDM
+          ? `Dolby Vision DM: ${stats.dolbyVisionDM}`
+          : stats.toneMapped && 'tone-mapped to SDR',
+        !stats.dolbyVisionDM &&
+          stats.hdrOutputPeakNits &&
           `HDR output, ${stats.hdrOutputPeakNits} nits peak`,
       ]
         .filter(Boolean)

@@ -461,7 +461,7 @@ index f0ea172..e62a697 100644
          Title: name
      };
 diff --git a/src/embed/EmbeddedPlayer.ts b/src/embed/EmbeddedPlayer.ts
-index 4261f19..6d7f3d4 100644
+index 4261f19..0d19e1f 100644
 --- a/src/embed/EmbeddedPlayer.ts
 +++ b/src/embed/EmbeddedPlayer.ts
 @@ -6,6 +6,7 @@ import { selectCustomAudioOutputLayout, selectCustomAudioSpeakerLayout } from '.
@@ -489,7 +489,7 @@ index 4261f19..6d7f3d4 100644
      language: string | null
      title: string | null
      isDefault: boolean
-@@ -123,7 +128,10 @@ export type EmbeddedStats = Readonly<{
+@@ -123,7 +128,12 @@ export type EmbeddedStats = Readonly<{
      video: DescribedStream | null
      audio: DescribedStream | null
      dolbyVisionProfile: number | null
@@ -497,10 +497,12 @@ index 4261f19..6d7f3d4 100644
      toneMapped: boolean
 +    /** The display peak an HDR source maps to on the HDR canvas, in nits; null when it doesn't present as HDR. */
 +    hdrOutputPeakNits: number | null
++    /** The Dolby Vision display management in place of the tone map, as it renders now, such as "CM v4.0, 1000 nits"; null without it */
++    dolbyVisionDM: string | null
      audioOutputLayout: string | null
      audioObjects: number | null
      audioUnderflows: number
-@@ -155,12 +163,16 @@ export type EmbeddedPlayer = Readonly<{
+@@ -155,12 +165,16 @@ export type EmbeddedPlayer = Readonly<{
      setPasses(sources: readonly string[]): Promise<PlanReport>
      /** Presents HDR video as HDR on a screen that shows it, rather than tone-mapped; it outlives routes. */
      setHDROutput(enabled: boolean): Promise<void>
@@ -517,7 +519,7 @@ index 4261f19..6d7f3d4 100644
      /** Null before a frame shows. */
      presentedMs(): number | null
      /** Null while nothing plays. */
-@@ -266,14 +278,31 @@ async function packagesFor(source: DescribedSource): Promise<DecoderPackages> {
+@@ -266,14 +280,31 @@ async function packagesFor(source: DescribedSource): Promise<DecoderPackages> {
      };
  }
  
@@ -551,7 +553,7 @@ index 4261f19..6d7f3d4 100644
          })
      };
  }
-@@ -329,6 +358,7 @@ function audioTracksOf(source: DescribedSource): EmbeddedAudioTrack[] {
+@@ -329,6 +360,7 @@ function audioTracksOf(source: DescribedSource): EmbeddedAudioTrack[] {
          isDefault: stream.IsDefault,
          language: stream.Language,
          ordinal,
@@ -559,7 +561,7 @@ index 4261f19..6d7f3d4 100644
          title: stream.Title
      }));
  }
-@@ -347,6 +377,8 @@ type Route = {
+@@ -347,6 +379,8 @@ type Route = {
      options: unknown
      /** Names what a fallback's reason only classifies. */
      lastError: string | null
@@ -568,7 +570,7 @@ index 4261f19..6d7f3d4 100644
  };
  
  const withDetail = (route: Route, reason: string): string => (route.lastError ? `${reason}: ${route.lastError}` : reason);
-@@ -362,6 +394,24 @@ class RouteRefused extends Error {}
+@@ -362,6 +396,24 @@ class RouteRefused extends Error {}
  export function createEmbeddedPlayer(surface: PresentationSurface, events: EmbeddedPlayerEvents): EmbeddedPlayer {
      let generation = 0;
      let opened: Opened | null = null;
@@ -593,7 +595,7 @@ index 4261f19..6d7f3d4 100644
      /** Settles once every stopped route's controller has closed. */
      let teardown: Promise<void> = Promise.resolve();
      let volume = 1;
-@@ -419,7 +469,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -419,7 +471,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              return;
          }
          const settings = getStaticHDRRenderSettings({
@@ -602,7 +604,7 @@ index 4261f19..6d7f3d4 100644
              currentSettings: presenter.getRenderSettings(),
              eligibility: route.eligibility,
              input: route.input,
-@@ -637,7 +687,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -637,7 +689,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
      const playRoute = async (current: Opened, route: Route, routeGeneration: number, startMs: number): Promise<EligibleCustomPlayback> => {
          const audioContext = route.audioPrewarm?.audioContext;
          const target: CustomAudioRenderTarget = {
@@ -611,7 +613,7 @@ index 4261f19..6d7f3d4 100644
              speakerLayout: selectCustomAudioSpeakerLayout('auto', audioContext?.destination.maxChannelCount ?? null)
          };
          const { eligibility, input } = await chooseRoute(current, route, routeGeneration, target);
-@@ -653,7 +703,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -653,7 +705,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          presenter.attach(surface, routeGeneration);
          const configured = await configurePresentationColorPipeline(presenter, {
              clearDetectedInputPeak: (): void => undefined,
@@ -620,7 +622,7 @@ index 4261f19..6d7f3d4 100644
              dolbyVisionProfile: eligibility.dolbyVisionProfile,
              eligibility,
              generation: routeGeneration,
-@@ -680,7 +730,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -680,7 +732,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          route.frameLoop = frameLoop;
          frameLoop.synchronizePageVisibility(presentsAsVisible());
          events.onState('loading');
@@ -631,7 +633,7 @@ index 4261f19..6d7f3d4 100644
          if (!isCurrent(route, controller)) {
              throw new RouteRefused('superseded');
          }
-@@ -694,8 +746,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -694,8 +748,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          return eligibility;
      };
  
@@ -654,7 +656,7 @@ index 4261f19..6d7f3d4 100644
          current.route = route;
          try {
              // The last route's decoders, workers and audio output close first
-@@ -703,17 +768,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -703,17 +770,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              if (current.route !== route || opened !== current) {
                  throw new RouteRefused('superseded');
              }
@@ -673,7 +675,7 @@ index 4261f19..6d7f3d4 100644
          } catch (error) {
              if (current.route === route) {
                  stopRoute(route);
-@@ -791,6 +846,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -791,6 +848,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              current.request = { ...current.request, audioOrdinal: ordinal, paused };
              return startRoute(current, atMs, audioPrewarm);
          },
@@ -708,7 +710,7 @@ index 4261f19..6d7f3d4 100644
          setMuted: (next: boolean): void => {
              muted = next;
              opened?.route?.controller?.setMuted(next);
-@@ -838,7 +921,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -838,7 +923,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              pictureInPicture = open;
              onVisibility();
          },
@@ -728,13 +730,14 @@ index 4261f19..6d7f3d4 100644
          setPasses: (sources: readonly string[]): Promise<PlanReport> => presenter.setPresentationPreset(
              sources.map((source: string): PresentationPresetFile => ({ parameters: {}, source }))
          ),
-@@ -884,7 +978,8 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -884,7 +980,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
                  passes: presenter.getPresentationPlanReport().activePasses,
                  presentedMs: presentation.lastPresentedMediaTimeMicroseconds === null ? null : toMilliseconds(presentation.lastPresentedMediaTimeMicroseconds),
                  route: describeRoute(eligibility),
 -                toneMapped: presentation.mode === 'hdr-to-sdr',
 +                toneMapped: presentation.mode === 'hdr-to-sdr' && !hdrOutput,
 +                hdrOutputPeakNits: presentation.mode === 'hdr-to-sdr' && hdrOutput ? hdrPeakNits : null,
++                dolbyVisionDM: presenter.getDolbyVisionDMDescription(),
                  video: opened.source.MediaStreams.find((stream: DescribedStream): boolean => stream.Type === 'Video') ?? null,
                  videoAheadMs: aheadOf(telemetry.videoDecode.lastFrameEndMediaTimeMicroseconds)
              };
@@ -763,7 +766,7 @@ index 35dc39f..0068309 100644
          }, attempt.streamingDownmixSettings);
          const sampleWindow = getAudioSampleWindow(
 diff --git a/src/presentation/WebGPUPresenter.ts b/src/presentation/WebGPUPresenter.ts
-index 18d2deb..940dbad 100644
+index 18d2deb..cbadc99 100644
 --- a/src/presentation/WebGPUPresenter.ts
 +++ b/src/presentation/WebGPUPresenter.ts
 @@ -28,7 +28,13 @@ import {
@@ -827,7 +830,7 @@ index 18d2deb..940dbad 100644
      private surface: PresentationSurface | null = null;
      private submissionValidated = false;
      private telemetry = createTelemetry(this.settings);
-@@ -1499,6 +1537,71 @@ export default class WebGPUPresenter {
+@@ -1499,6 +1537,77 @@ export default class WebGPUPresenter {
          this.decodedPresentationRefreshHandler = decodedPresentationRefreshHandler;
          this.deviceLossHandler = deviceLossHandler;
          this.scheduleDevicePrewarm();
@@ -878,6 +881,12 @@ index 18d2deb..940dbad 100644
 +        }
 +    }
 +
++    /** What the Dolby Vision display management renders the frames presented with, such as "CM v4.0, 1000 nits"; null while it isn't running. */
++    getDolbyVisionDMDescription(): string | null {
++        const state = this.dolbyVisionDMState;
++        return this.executor?.bindsDolbyVisionDM && state.executor === this.executor ? state.frame?.description ?? null : null;
++    }
++
 +    /** Loads the gamut LUT the display management wants; the next frame computes its tables with it. */
 +    private loadDolbyVisionGamut(dm: DolbyVisionDMImplementation, name: string | null): void {
 +        const state = this.dolbyVisionDMState;
@@ -899,7 +908,7 @@ index 18d2deb..940dbad 100644
      }
  
      private scheduleDevicePrewarm(): void {
-@@ -3418,7 +3521,7 @@ export default class WebGPUPresenter {
+@@ -3418,7 +3527,7 @@ export default class WebGPUPresenter {
          const configuration = withStreamChroma(this.desiredChainConfiguration, this.streamChromaSubsampling, this.streamChromaLocation);
          return {
              blackBarAnalysis: this.blackBarCropEnabled,
@@ -908,7 +917,7 @@ index 18d2deb..940dbad 100644
              deinterlace,
              displayRateAvailable: this.decodedFramePushActive,
              device: {
-@@ -3818,7 +3921,7 @@ export default class WebGPUPresenter {
+@@ -3818,7 +3927,7 @@ export default class WebGPUPresenter {
                      this.fallback(generation, 'dolby-vision-metadata-invalid', rpu.failure);
                      return null;
                  }
@@ -917,7 +926,7 @@ index 18d2deb..940dbad 100644
                  break;
              }
              case 'external-hdr': {
-@@ -3950,7 +4053,7 @@ export default class WebGPUPresenter {
+@@ -3950,7 +4059,7 @@ export default class WebGPUPresenter {
              this.fallback(generation, 'dolby-vision-metadata-invalid', rpu.failure);
              return null;
          }
@@ -926,7 +935,7 @@ index 18d2deb..940dbad 100644
          const submission = this.submitFrame(
              { frame: decodedFrame.frame, kind: 'frame-pool' },
              decodedFrame.displayWidth,
-@@ -4024,7 +4127,7 @@ export default class WebGPUPresenter {
+@@ -4024,7 +4133,7 @@ export default class WebGPUPresenter {
              return null;
          }
          const dualLayerRPUData = rpu.data.dualLayer;
