@@ -675,7 +675,7 @@ msgid "At 0% there is no background."
 msgstr "设为 0% 时不显示背景。"
 
 #: src/app/settings/page.tsx src/features/player/options.tsx
-#: src/features/remote/remote-sheet.tsx
+#: src/features/player/settings-dialog.tsx src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr "音频"
 
@@ -2814,6 +2814,10 @@ msgstr "还没有播放列表。你可以在这里新建播放列表，也可以
 msgid "No server answered at that address."
 msgstr "该地址上的服务器没有响应。"
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr ""
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr ""
@@ -3272,6 +3276,10 @@ msgstr "页面和面板会使用它的色调。深色通常更易阅读。"
 msgid "Pages load from the server again until they are saved anew."
 msgstr "在重新保存之前，页面会继续从服务器加载。"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr ""
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr "直通环绕声音频"
@@ -3367,6 +3375,10 @@ msgstr "选择你在 {heardAt} 听到的台词。"
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
 msgstr "选择要下载的版本。"
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
+msgstr ""
 
 #: src/app/settings/apps.tsx src/app/settings/playback.tsx
 #: src/features/player/options.tsx
@@ -3513,8 +3525,9 @@ msgstr "使用 mpv 播放"
 msgid "Play/Pause"
 msgstr "播放/暂停"
 
-#: src/app/settings/page.tsx src/lib/hosts/shell/exo-stats.ts
-#: src/lib/hosts/shell/player.ts src/lib/playback/webgpu.ts
+#: src/app/settings/page.tsx src/features/player/settings-dialog.tsx
+#: src/lib/hosts/shell/exo-stats.ts src/lib/hosts/shell/player.ts
+#: src/lib/playback/webgpu.ts
 msgid "Playback"
 msgstr "播放"
 
@@ -4150,6 +4163,10 @@ msgstr "再次搜索"
 msgid "Search by voice"
 msgstr "语音搜索"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr "搜索台词"
@@ -4724,7 +4741,8 @@ msgid "Subtitle types"
 msgstr "字幕类型"
 
 #: src/app/settings/page.tsx src/app/settings/subtitles.tsx
-#: src/features/player/options.tsx src/features/remote/remote-sheet.tsx
+#: src/features/player/options.tsx src/features/player/settings-dialog.tsx
+#: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr "字幕"
 

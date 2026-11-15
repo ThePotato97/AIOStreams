@@ -671,7 +671,7 @@ msgid "At 0% there is no background."
 msgstr "Em 0%, não há plano de fundo."
 
 #: src/app/settings/page.tsx src/features/player/options.tsx
-#: src/features/remote/remote-sheet.tsx
+#: src/features/player/settings-dialog.tsx src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr "Áudio"
 
@@ -2790,6 +2790,10 @@ msgstr "Você ainda não tem playlists. Crie uma aqui ou use o menu de um títul
 msgid "No server answered at that address."
 msgstr "Nenhum servidor respondeu nesse endereço."
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr ""
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr ""
@@ -3243,6 +3247,10 @@ msgstr "As páginas e os painéis usam variações dessa cor. Tons escuros propo
 msgid "Pages load from the server again until they are saved anew."
 msgstr "As páginas voltarão a ser carregadas do servidor até serem salvas novamente."
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr ""
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr "Repassar áudio surround"
@@ -3338,6 +3346,10 @@ msgstr "Selecione a linha da legenda correspondente à fala que você ouviu em {
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
 msgstr "Escolha a versão para baixar."
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
+msgstr ""
 
 #: src/app/settings/apps.tsx src/app/settings/playback.tsx
 #: src/features/player/options.tsx
@@ -3481,8 +3493,9 @@ msgstr "Tentar reproduzir com o mpv"
 msgid "Play/Pause"
 msgstr "Reproduzir/Pausar"
 
-#: src/app/settings/page.tsx src/lib/hosts/shell/exo-stats.ts
-#: src/lib/hosts/shell/player.ts src/lib/playback/webgpu.ts
+#: src/app/settings/page.tsx src/features/player/settings-dialog.tsx
+#: src/lib/hosts/shell/exo-stats.ts src/lib/hosts/shell/player.ts
+#: src/lib/playback/webgpu.ts
 msgid "Playback"
 msgstr "Reprodução"
 
@@ -4107,6 +4120,10 @@ msgstr "Pesquisar novamente"
 msgid "Search by voice"
 msgstr "Pesquisar por voz"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr "Pesquisar nas falas"
@@ -4671,7 +4688,8 @@ msgid "Subtitle types"
 msgstr "Tipos de legenda"
 
 #: src/app/settings/page.tsx src/app/settings/subtitles.tsx
-#: src/features/player/options.tsx src/features/remote/remote-sheet.tsx
+#: src/features/player/options.tsx src/features/player/settings-dialog.tsx
+#: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr "Legendas"
 

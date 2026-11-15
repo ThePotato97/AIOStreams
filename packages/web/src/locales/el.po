@@ -672,7 +672,7 @@ msgid "At 0% there is no background."
 msgstr "Στο 0% δεν υπάρχει φόντο."
 
 #: src/app/settings/page.tsx src/features/player/options.tsx
-#: src/features/remote/remote-sheet.tsx
+#: src/features/player/settings-dialog.tsx src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr "Ήχος"
 
@@ -2794,6 +2794,10 @@ msgstr "Δεν υπάρχουν ακόμη λίστες αναπαραγωγής
 msgid "No server answered at that address."
 msgstr "Δεν αποκρίθηκε κανένας διακομιστής σε αυτή τη διεύθυνση."
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr ""
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr ""
@@ -3249,6 +3253,10 @@ msgstr "Οι σελίδες και τα πλαίσια αντλούν τις α�
 msgid "Pages load from the server again until they are saved anew."
 msgstr "Οι σελίδες φορτώνονται ξανά από τον διακομιστή μέχρι να αποθηκευτούν εκ νέου."
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr ""
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr "Απευθείας μεταβίβαση περιβάλλοντος ήχου"
@@ -3344,6 +3352,10 @@ msgstr "Επίλεξε την ατάκα που άκουσες στο {heardAt}.
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
 msgstr "Επίλεξε την έκδοση για λήψη."
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
+msgstr ""
 
 #: src/app/settings/apps.tsx src/app/settings/playback.tsx
 #: src/features/player/options.tsx
@@ -3487,8 +3499,9 @@ msgstr "Αναπαραγωγή με mpv"
 msgid "Play/Pause"
 msgstr "Αναπαραγωγή/Παύση"
 
-#: src/app/settings/page.tsx src/lib/hosts/shell/exo-stats.ts
-#: src/lib/hosts/shell/player.ts src/lib/playback/webgpu.ts
+#: src/app/settings/page.tsx src/features/player/settings-dialog.tsx
+#: src/lib/hosts/shell/exo-stats.ts src/lib/hosts/shell/player.ts
+#: src/lib/playback/webgpu.ts
 msgid "Playback"
 msgstr "Αναπαραγωγή"
 
@@ -4116,6 +4129,10 @@ msgstr "Νέα αναζήτηση"
 msgid "Search by voice"
 msgstr "Φωνητική αναζήτηση"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr "Αναζήτηση στις ατάκες"
@@ -4682,7 +4699,8 @@ msgid "Subtitle types"
 msgstr "Τύποι υποτίτλων"
 
 #: src/app/settings/page.tsx src/app/settings/subtitles.tsx
-#: src/features/player/options.tsx src/features/remote/remote-sheet.tsx
+#: src/features/player/options.tsx src/features/player/settings-dialog.tsx
+#: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr "Υπότιτλοι"
 

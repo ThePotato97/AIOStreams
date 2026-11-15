@@ -687,6 +687,7 @@ msgstr "At 0% there is no background."
 
 #: src/app/settings/page.tsx
 #: src/features/player/options.tsx
+#: src/features/player/settings-dialog.tsx
 #: src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr "Audio"
@@ -2900,6 +2901,10 @@ msgstr "No playlists yet. Make one here, or add a title to one from its menu."
 msgid "No server answered at that address."
 msgstr "No server answered at that address."
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr "No settings match."
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr "No share links yet."
@@ -3367,6 +3372,10 @@ msgstr "Pages and panels take their shades from it. Dark colours read best."
 msgid "Pages load from the server again until they are saved anew."
 msgstr "Pages load from the server again until they are saved anew."
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr "Party & sharing"
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr "Pass surround audio through"
@@ -3464,6 +3473,10 @@ msgstr "Pick the line you heard at {heardAt}."
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
 msgstr "Pick the version to download."
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
+msgstr "Picture"
 
 #: src/app/settings/apps.tsx
 #: src/app/settings/playback.tsx
@@ -3615,6 +3628,7 @@ msgid "Play/Pause"
 msgstr "Play/Pause"
 
 #: src/app/settings/page.tsx
+#: src/features/player/settings-dialog.tsx
 #: src/lib/hosts/shell/exo-stats.ts
 #: src/lib/hosts/shell/player.ts
 #: src/lib/playback/webgpu.ts
@@ -4273,6 +4287,10 @@ msgstr "Search again"
 msgid "Search by voice"
 msgstr "Search by voice"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr "Search settings"
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr "Search the lines"
@@ -4861,6 +4879,7 @@ msgstr "Subtitle types"
 #: src/app/settings/page.tsx
 #: src/app/settings/subtitles.tsx
 #: src/features/player/options.tsx
+#: src/features/player/settings-dialog.tsx
 #: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr "Subtitles"

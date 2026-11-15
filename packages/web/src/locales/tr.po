@@ -675,7 +675,7 @@ msgid "At 0% there is no background."
 msgstr "%0 olduğunda arkaplan yok."
 
 #: src/app/settings/page.tsx src/features/player/options.tsx
-#: src/features/remote/remote-sheet.tsx
+#: src/features/player/settings-dialog.tsx src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr "Ses"
 
@@ -2813,6 +2813,10 @@ msgstr "Henüz oynatma listesi yok. Buradan oluştur veya bir içeriği menüsü
 msgid "No server answered at that address."
 msgstr "Bu adreste yanıt veren sunucu bulunamadı."
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr ""
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr ""
@@ -3271,6 +3275,10 @@ msgstr "Sayfa ve panellerin tonları bu renge göre belirlenir. Koyu renkler dah
 msgid "Pages load from the server again until they are saved anew."
 msgstr "Sayfalar yeniden kaydedilene kadar sunucudan yüklenir."
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr ""
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr "Çevresel sesi doğrudan aktar"
@@ -3366,6 +3374,10 @@ msgstr "{heardAt} konumunda duyduğun repliği seç."
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
 msgstr "İndirilecek sürümü seç."
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
+msgstr ""
 
 #: src/app/settings/apps.tsx src/app/settings/playback.tsx
 #: src/features/player/options.tsx
@@ -3512,8 +3524,9 @@ msgstr "mpv ile oynat"
 msgid "Play/Pause"
 msgstr "Oynat/Duraklat"
 
-#: src/app/settings/page.tsx src/lib/hosts/shell/exo-stats.ts
-#: src/lib/hosts/shell/player.ts src/lib/playback/webgpu.ts
+#: src/app/settings/page.tsx src/features/player/settings-dialog.tsx
+#: src/lib/hosts/shell/exo-stats.ts src/lib/hosts/shell/player.ts
+#: src/lib/playback/webgpu.ts
 msgid "Playback"
 msgstr "Oynatma"
 
@@ -4147,6 +4160,10 @@ msgstr "Yeniden ara"
 msgid "Search by voice"
 msgstr "Sesle ara"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr "Repliklerde ara"
@@ -4719,7 +4736,8 @@ msgid "Subtitle types"
 msgstr "Altyazı türleri"
 
 #: src/app/settings/page.tsx src/app/settings/subtitles.tsx
-#: src/features/player/options.tsx src/features/remote/remote-sheet.tsx
+#: src/features/player/options.tsx src/features/player/settings-dialog.tsx
+#: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr "Altyazılar"
 

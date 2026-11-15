@@ -675,7 +675,7 @@ msgid "At 0% there is no background."
 msgstr "À 0 %, il n'y a aucun arrière-plan."
 
 #: src/app/settings/page.tsx src/features/player/options.tsx
-#: src/features/remote/remote-sheet.tsx
+#: src/features/player/settings-dialog.tsx src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr "Audio"
 
@@ -2817,6 +2817,10 @@ msgstr "Aucune playlist pour l'instant. Créez-en une ici ou ajoutez un titre de
 msgid "No server answered at that address."
 msgstr "Aucun serveur n'a répondu à cette adresse."
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr ""
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr ""
@@ -3275,6 +3279,10 @@ msgstr "Les pages et panneaux adoptent ses nuances. Les couleurs sombres offrent
 msgid "Pages load from the server again until they are saved anew."
 msgstr "Les pages se rechargent depuis le serveur jusqu'à ce qu'elles soient à nouveau enregistrées."
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr ""
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr "Passthrough audio surround"
@@ -3370,6 +3378,10 @@ msgstr "Sélectionnez la réplique que vous avez entendue à {heardAt}."
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
 msgstr "Choisissez la version à télécharger."
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
+msgstr ""
 
 #: src/app/settings/apps.tsx src/app/settings/playback.tsx
 #: src/features/player/options.tsx
@@ -3516,8 +3528,9 @@ msgstr "Lire avec mpv"
 msgid "Play/Pause"
 msgstr "Lecture/Pause"
 
-#: src/app/settings/page.tsx src/lib/hosts/shell/exo-stats.ts
-#: src/lib/hosts/shell/player.ts src/lib/playback/webgpu.ts
+#: src/app/settings/page.tsx src/features/player/settings-dialog.tsx
+#: src/lib/hosts/shell/exo-stats.ts src/lib/hosts/shell/player.ts
+#: src/lib/playback/webgpu.ts
 msgid "Playback"
 msgstr "Lecture"
 
@@ -4151,6 +4164,10 @@ msgstr "Rechercher à nouveau"
 msgid "Search by voice"
 msgstr "Recherche vocale"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr "Rechercher dans les répliques"
@@ -4723,7 +4740,8 @@ msgid "Subtitle types"
 msgstr "Types de sous-titres"
 
 #: src/app/settings/page.tsx src/app/settings/subtitles.tsx
-#: src/features/player/options.tsx src/features/remote/remote-sheet.tsx
+#: src/features/player/options.tsx src/features/player/settings-dialog.tsx
+#: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr "Sous-titres"
 

@@ -686,6 +686,7 @@ msgstr ""
 
 #: src/app/settings/page.tsx
 #: src/features/player/options.tsx
+#: src/features/player/settings-dialog.tsx
 #: src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr ""
@@ -2899,6 +2900,10 @@ msgstr ""
 msgid "No server answered at that address."
 msgstr ""
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr ""
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr ""
@@ -3366,6 +3371,10 @@ msgstr ""
 msgid "Pages load from the server again until they are saved anew."
 msgstr ""
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr ""
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr ""
@@ -3462,6 +3471,10 @@ msgstr ""
 
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
+msgstr ""
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
 msgstr ""
 
 #: src/app/settings/apps.tsx
@@ -3614,6 +3627,7 @@ msgid "Play/Pause"
 msgstr ""
 
 #: src/app/settings/page.tsx
+#: src/features/player/settings-dialog.tsx
 #: src/lib/hosts/shell/exo-stats.ts
 #: src/lib/hosts/shell/player.ts
 #: src/lib/playback/webgpu.ts
@@ -4272,6 +4286,10 @@ msgstr ""
 msgid "Search by voice"
 msgstr ""
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr ""
@@ -4860,6 +4878,7 @@ msgstr ""
 #: src/app/settings/page.tsx
 #: src/app/settings/subtitles.tsx
 #: src/features/player/options.tsx
+#: src/features/player/settings-dialog.tsx
 #: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr ""

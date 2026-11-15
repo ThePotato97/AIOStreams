@@ -671,7 +671,7 @@ msgid "At 0% there is no background."
 msgstr "Pada 0% tiada latar belakang."
 
 #: src/app/settings/page.tsx src/features/player/options.tsx
-#: src/features/remote/remote-sheet.tsx
+#: src/features/player/settings-dialog.tsx src/features/remote/remote-sheet.tsx
 msgid "Audio"
 msgstr "Audio"
 
@@ -2790,6 +2790,10 @@ msgstr "Belum ada senarai main. Cipta satu di sini, atau tambah tajuk daripada m
 msgid "No server answered at that address."
 msgstr "Tiada pelayan memberi maklum balas pada alamat tersebut."
 
+#: src/features/player/settings-dialog.tsx
+msgid "No settings match."
+msgstr ""
+
 #: src/features/share/share-links-card.tsx
 msgid "No share links yet."
 msgstr ""
@@ -3243,6 +3247,10 @@ msgstr "Halaman dan panel mengambil warna daripadanya. Warna gelap adalah yang t
 msgid "Pages load from the server again until they are saved anew."
 msgstr "Halaman dimuatkan semula daripada pelayan sehingga ia disimpan semula."
 
+#: src/features/player/settings-dialog.tsx
+msgid "Party & sharing"
+msgstr ""
+
 #: src/app/settings/audio.tsx
 msgid "Pass surround audio through"
 msgstr "Lalukan audio bunyi sekeliling (Passthrough)"
@@ -3338,6 +3346,10 @@ msgstr "Pilih baris yang anda dengar pada {heardAt}."
 #: src/features/versions/version-list.tsx
 msgid "Pick the version to download."
 msgstr "Pilih versi untuk dimuat turun."
+
+#: src/features/player/settings-dialog.tsx
+msgid "Picture"
+msgstr ""
 
 #: src/app/settings/apps.tsx src/app/settings/playback.tsx
 #: src/features/player/options.tsx
@@ -3481,8 +3493,9 @@ msgstr "Main dengan mpv"
 msgid "Play/Pause"
 msgstr "Main/Jeda"
 
-#: src/app/settings/page.tsx src/lib/hosts/shell/exo-stats.ts
-#: src/lib/hosts/shell/player.ts src/lib/playback/webgpu.ts
+#: src/app/settings/page.tsx src/features/player/settings-dialog.tsx
+#: src/lib/hosts/shell/exo-stats.ts src/lib/hosts/shell/player.ts
+#: src/lib/playback/webgpu.ts
 msgid "Playback"
 msgstr "Main Balik"
 
@@ -4107,6 +4120,10 @@ msgstr "Cari lagi"
 msgid "Search by voice"
 msgstr "Cari guna suara"
 
+#: src/features/player/settings-dialog.tsx
+msgid "Search settings"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Search the lines"
 msgstr "Cari dialog"
@@ -4671,7 +4688,8 @@ msgid "Subtitle types"
 msgstr "Jenis sarikata"
 
 #: src/app/settings/page.tsx src/app/settings/subtitles.tsx
-#: src/features/player/options.tsx src/features/remote/remote-sheet.tsx
+#: src/features/player/options.tsx src/features/player/settings-dialog.tsx
+#: src/features/remote/remote-sheet.tsx
 msgid "Subtitles"
 msgstr "Sarikata"
 
