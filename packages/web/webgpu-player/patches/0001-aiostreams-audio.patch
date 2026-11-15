@@ -333,7 +333,7 @@ index f0ea172..e62a697 100644
          Title: name
      };
 diff --git a/src/embed/EmbeddedPlayer.ts b/src/embed/EmbeddedPlayer.ts
-index 4261f19..d71dfce 100644
+index 4261f19..1c0f1f2 100644
 --- a/src/embed/EmbeddedPlayer.ts
 +++ b/src/embed/EmbeddedPlayer.ts
 @@ -6,6 +6,7 @@ import { selectCustomAudioOutputLayout, selectCustomAudioSpeakerLayout } from '.
@@ -353,7 +353,26 @@ index 4261f19..d71dfce 100644
  }>;
  
  export type EmbeddedAudioTrack = Readonly<{
-@@ -161,6 +164,8 @@ export type EmbeddedPlayer = Readonly<{
+@@ -123,7 +126,10 @@ export type EmbeddedStats = Readonly<{
+     video: DescribedStream | null
+     audio: DescribedStream | null
+     dolbyVisionProfile: number | null
++    /** HDR mapped down to SDR: an HDR source on the SDR canvas. */
+     toneMapped: boolean
++    /** The display peak an HDR source maps to on the HDR canvas, in nits; null when it doesn't present as HDR. */
++    hdrOutputPeakNits: number | null
+     audioOutputLayout: string | null
+     audioObjects: number | null
+     audioUnderflows: number
+@@ -155,12 +161,16 @@ export type EmbeddedPlayer = Readonly<{
+     setPasses(sources: readonly string[]): Promise<PlanReport>
+     /** Presents HDR video as HDR on a screen that shows it, rather than tone-mapped; it outlives routes. */
+     setHDROutput(enabled: boolean): Promise<void>
++    /** The display peak HDR output tone maps to, in nits (DEFAULT_HDR_OUTPUT_PEAK_NITS until set); it outlives routes. */
++    setHDRPeakNits(nits: number): void
+     /** The drawn pictures without their bars, at most 1920 on the longer side; a paused playback draws its frame again for it. */
+     pictureStream(onPicture?: () => void): EmbeddedPictureStream | null
+     /** While a window shows the playback, a hidden page the browser still paints for it keeps presenting. */
      setPictureInPicture(open: boolean): void
      /** Restarts the route at the clock. */
      setAudio(ordinal: number): Promise<EmbeddedOpenResult>
@@ -362,7 +381,41 @@ index 4261f19..d71dfce 100644
      /** Null before a frame shows. */
      presentedMs(): number | null
      /** Null while nothing plays. */
-@@ -347,6 +352,8 @@ type Route = {
+@@ -266,14 +276,31 @@ async function packagesFor(source: DescribedSource): Promise<DecoderPackages> {
+     };
+ }
+ 
+-function automaticRenderConfiguration(detectedInputPeakNits: number): HDRRenderConfiguration {
++/** The display peak HDR output tone maps to unless the host sets another (`setHDRPeakNits`). */
++export const DEFAULT_HDR_OUTPUT_PEAK_NITS = 1_000;
++
++/** Clamps a display peak to the render settings' output peak range. */
++function clampOutputPeakNits(nits: number): number {
++    const range = HDR_RENDER_SETTING_RANGES.outputPeakNits;
++    return Math.min(Math.max(Math.round(nits), range.minimum), range.maximum);
++}
++
++/**
++ * The HDR render configuration for a detected input peak. `outputPeakNits` is the display peak HDR output maps to; without it the
++ * output peak is the SDR default, as for an SDR canvas.
++ */
++function automaticRenderConfiguration(detectedInputPeakNits: number, outputPeakNits?: number): HDRRenderConfiguration {
+     const defaults = createHDRToSDRRenderSettings();
+     const range = HDR_RENDER_SETTING_RANGES.inputPeakNits;
+     const inputPeakNits = Math.min(Math.max(detectedInputPeakNits, range.minimum), range.maximum);
+     return {
+         automaticInputPeakNits: true,
+         settings: createHDRToSDRRenderSettings({
+-            toneMapping: { inputPeakNits, paperWhiteNits: Math.min(defaults.toneMapping.paperWhiteNits, inputPeakNits) }
++            toneMapping: {
++                inputPeakNits,
++                paperWhiteNits: Math.min(defaults.toneMapping.paperWhiteNits, inputPeakNits),
++                ...(outputPeakNits === undefined ? {} : { outputPeakNits })
++            }
+         })
+     };
+ }
+@@ -347,6 +374,8 @@ type Route = {
      options: unknown
      /** Names what a fallback's reason only classifies. */
      lastError: string | null
@@ -371,7 +424,41 @@ index 4261f19..d71dfce 100644
  };
  
  const withDetail = (route: Route, reason: string): string => (route.lastError ? `${reason}: ${route.lastError}` : reason);
-@@ -637,7 +644,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -362,6 +391,24 @@ class RouteRefused extends Error {}
+ export function createEmbeddedPlayer(surface: PresentationSurface, events: EmbeddedPlayerEvents): EmbeddedPlayer {
+     let generation = 0;
+     let opened: Opened | null = null;
++    let hdrOutput = false;
++    let hdrPeakNits = DEFAULT_HDR_OUTPUT_PEAK_NITS;
++    /** The output peak HDR sources map to: the display peak on the HDR canvas, else the SDR default. */
++    const outputPeakNits = (): number | undefined => (hdrOutput ? hdrPeakNits : undefined);
++    const renderConfiguration = (detectedInputPeakNits: number): HDRRenderConfiguration =>
++        automaticRenderConfiguration(detectedInputPeakNits, outputPeakNits());
++    /** Applies the output peak to the HDR source presenting now, live. */
++    const applyOutputPeak = (): void => {
++        const current = presenter.getRenderSettings();
++        if (current.mode !== 'hdr-to-sdr') {
++            return;
++        }
++        const target = outputPeakNits() ?? createHDRToSDRRenderSettings().toneMapping.outputPeakNits;
++        if (current.toneMapping.outputPeakNits === target) {
++            return;
++        }
++        presenter.updateRenderSettings({ ...current, toneMapping: { ...current.toneMapping, outputPeakNits: target } }, generation);
++    };
+     /** Settles once every stopped route's controller has closed. */
+     let teardown: Promise<void> = Promise.resolve();
+     let volume = 1;
+@@ -419,7 +466,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+             return;
+         }
+         const settings = getStaticHDRRenderSettings({
+-            createHDRRenderConfiguration: automaticRenderConfiguration,
++            createHDRRenderConfiguration: renderConfiguration,
+             currentSettings: presenter.getRenderSettings(),
+             eligibility: route.eligibility,
+             input: route.input,
+@@ -637,7 +684,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
      const playRoute = async (current: Opened, route: Route, routeGeneration: number, startMs: number): Promise<EligibleCustomPlayback> => {
          const audioContext = route.audioPrewarm?.audioContext;
          const target: CustomAudioRenderTarget = {
@@ -380,7 +467,16 @@ index 4261f19..d71dfce 100644
              speakerLayout: selectCustomAudioSpeakerLayout('auto', audioContext?.destination.maxChannelCount ?? null)
          };
          const { eligibility, input } = await chooseRoute(current, route, routeGeneration, target);
-@@ -680,7 +687,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -653,7 +700,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+         presenter.attach(surface, routeGeneration);
+         const configured = await configurePresentationColorPipeline(presenter, {
+             clearDetectedInputPeak: (): void => undefined,
+-            createHDRRenderConfiguration: automaticRenderConfiguration,
++            createHDRRenderConfiguration: renderConfiguration,
+             dolbyVisionProfile: eligibility.dolbyVisionProfile,
+             eligibility,
+             generation: routeGeneration,
+@@ -680,7 +727,9 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          route.frameLoop = frameLoop;
          frameLoop.synchronizePageVisibility(presentsAsVisible());
          events.onState('loading');
@@ -391,7 +487,7 @@ index 4261f19..d71dfce 100644
          if (!isCurrent(route, controller)) {
              throw new RouteRefused('superseded');
          }
-@@ -694,8 +703,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -694,8 +743,21 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
          return eligibility;
      };
  
@@ -414,7 +510,7 @@ index 4261f19..d71dfce 100644
          current.route = route;
          try {
              // The last route's decoders, workers and audio output close first
-@@ -703,17 +725,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -703,17 +765,7 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              if (current.route !== route || opened !== current) {
                  throw new RouteRefused('superseded');
              }
@@ -433,7 +529,7 @@ index 4261f19..d71dfce 100644
          } catch (error) {
              if (current.route === route) {
                  stopRoute(route);
-@@ -791,6 +803,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+@@ -791,6 +843,34 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
              current.request = { ...current.request, audioOrdinal: ordinal, paused };
              return startRoute(current, atMs, audioPrewarm);
          },
@@ -468,6 +564,36 @@ index 4261f19..d71dfce 100644
          setMuted: (next: boolean): void => {
              muted = next;
              opened?.route?.controller?.setMuted(next);
+@@ -838,7 +918,18 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+             pictureInPicture = open;
+             onVisibility();
+         },
+-        setHDROutput: (enabled: boolean): Promise<void> => presenter.setHDROutputEnabled(enabled),
++        setHDROutput: async (enabled: boolean): Promise<void> => {
++            hdrOutput = enabled;
++            await presenter.setHDROutputEnabled(enabled);
++            applyOutputPeak();
++        },
++        setHDRPeakNits: (nits: number): void => {
++            if (!Number.isFinite(nits)) {
++                return;
++            }
++            hdrPeakNits = clampOutputPeakNits(nits);
++            applyOutputPeak();
++        },
+         setPasses: (sources: readonly string[]): Promise<PlanReport> => presenter.setPresentationPreset(
+             sources.map((source: string): PresentationPresetFile => ({ parameters: {}, source }))
+         ),
+@@ -884,7 +975,8 @@ export function createEmbeddedPlayer(surface: PresentationSurface, events: Embed
+                 passes: presenter.getPresentationPlanReport().activePasses,
+                 presentedMs: presentation.lastPresentedMediaTimeMicroseconds === null ? null : toMilliseconds(presentation.lastPresentedMediaTimeMicroseconds),
+                 route: describeRoute(eligibility),
+-                toneMapped: presentation.mode === 'hdr-to-sdr',
++                toneMapped: presentation.mode === 'hdr-to-sdr' && !hdrOutput,
++                hdrOutputPeakNits: presentation.mode === 'hdr-to-sdr' && hdrOutput ? hdrPeakNits : null,
+                 video: opened.source.MediaStreams.find((stream: DescribedStream): boolean => stream.Type === 'Video') ?? null,
+                 videoAheadMs: aheadOf(telemetry.videoDecode.lastFrameEndMediaTimeMicroseconds)
+             };
 diff --git a/src/pipeline/AudioDecodeWorkerRuntime.ts b/src/pipeline/AudioDecodeWorkerRuntime.ts
 index 35dc39f..0068309 100644
 --- a/src/pipeline/AudioDecodeWorkerRuntime.ts

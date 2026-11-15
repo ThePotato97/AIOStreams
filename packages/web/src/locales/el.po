@@ -188,6 +188,10 @@ msgstr "Συμμετέχει στην ομαδική προβολή: {name}"
 msgid "{name} left the party"
 msgstr "Αποχώρησε από την ομαδική προβολή: {name}"
 
+#: src/app/settings/playback.tsx
+msgid "{nits} nits"
+msgstr ""
+
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {Επίλεξε την έκδοση για λήψη. Για το άλλο επεισόδιο θα επιλεγεί η ίδια κυκλοφορία, εφόσον είναι διαθέσιμη.} other {Επίλεξε την έκδοση για λήψη. Για τα υπόλοιπα # επεισόδια θα επιλεγεί η ίδια κυκλοφορία, εφόσον είναι διαθέσιμη.}}"
@@ -1962,6 +1966,10 @@ msgstr "Με PIN"
 #: src/app/settings/playback.tsx
 msgid "HDR output"
 msgstr "Έξοδος HDR"
+
+#: src/app/settings/playback.tsx
+msgid "HDR peak brightness"
+msgstr ""
 
 #: src/app/settings/audio.tsx
 msgid "Headphones"
@@ -4938,6 +4946,10 @@ msgstr "Το πρόγραμμα αναπαραγωγής της εφαρμογή
 
 #: src/app/settings/theme.tsx
 msgid "The artwork of the title you're on, blurred and darkened, behind the pages and the version list."
+msgstr ""
+
+#: src/app/settings/playback.tsx
+msgid "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
 msgstr ""
 
 #: src/app/settings/account.tsx

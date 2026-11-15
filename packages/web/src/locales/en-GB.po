@@ -187,6 +187,10 @@ msgstr "{name} joined the party"
 msgid "{name} left the party"
 msgstr "{name} left the party"
 
+#: src/app/settings/playback.tsx
+msgid "{nits} nits"
+msgstr "{nits} nits"
+
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
@@ -2038,6 +2042,10 @@ msgstr "Has a PIN"
 #: src/app/settings/playback.tsx
 msgid "HDR output"
 msgstr "HDR output"
+
+#: src/app/settings/playback.tsx
+msgid "HDR peak brightness"
+msgstr "HDR peak brightness"
 
 #: src/app/settings/audio.tsx
 msgid "Headphones"
@@ -5120,6 +5128,10 @@ msgstr "The app's player and its options, such as starting videos in landscape."
 #: src/app/settings/theme.tsx
 msgid "The artwork of the title you're on, blurred and darkened, behind the pages and the version list."
 msgstr "The artwork of the title you're on, blurred and darkened, behind the pages and the version list."
+
+#: src/app/settings/playback.tsx
+msgid "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
+msgstr "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
 
 #: src/app/settings/account.tsx
 msgid "The device is signed in"

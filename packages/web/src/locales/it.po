@@ -188,6 +188,10 @@ msgstr "{name} si è unito al watch party"
 msgid "{name} left the party"
 msgstr "{name} ha lasciato il watch party"
 
+#: src/app/settings/playback.tsx
+msgid "{nits} nits"
+msgstr ""
+
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {Scegli la versione da scaricare. Anche l'altro episodio riceve la stessa release, se disponibile.} other {Scegli la versione da scaricare. Anche gli altri # episodi ricevono la stessa release, se disponibile.}}"
@@ -1958,6 +1962,10 @@ msgstr "Protetto da PIN"
 #: src/app/settings/playback.tsx
 msgid "HDR output"
 msgstr "Uscita HDR"
+
+#: src/app/settings/playback.tsx
+msgid "HDR peak brightness"
+msgstr ""
 
 #: src/app/settings/audio.tsx
 msgid "Headphones"
@@ -4928,6 +4936,10 @@ msgstr "Il lettore dell'app e le sue opzioni, come l'avvio dei video in modalit�
 #: src/app/settings/theme.tsx
 msgid "The artwork of the title you're on, blurred and darkened, behind the pages and the version list."
 msgstr "La copertina del titolo che hai aperto, sfocata e reso più scuro, dietro le pagine e l'elenco delle versioni."
+
+#: src/app/settings/playback.tsx
+msgid "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
+msgstr ""
 
 #: src/app/settings/account.tsx
 msgid "The device is signed in"

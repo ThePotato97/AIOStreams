@@ -18,6 +18,8 @@ export interface GpuStats {
   audio: GpuStream | null;
   dolbyVisionProfile: number | null;
   toneMapped: boolean;
+  /** This fork's engine patch: the display peak HDR output maps to, when it does. */
+  hdrOutputPeakNits?: number | null;
   audioOutputLayout: string | null;
   audioObjects: number | null;
   audioUnderflows: number;
@@ -90,6 +92,8 @@ export function gpuStatsRows(
         video.VideoRangeType ?? 'SDR',
         video.ColorPrimaries === 'bt2020' && 'BT.2020',
         stats.toneMapped && 'tone-mapped to SDR',
+        stats.hdrOutputPeakNits &&
+          `HDR output, ${stats.hdrOutputPeakNits} nits peak`,
       ]
         .filter(Boolean)
         .join(' · '),

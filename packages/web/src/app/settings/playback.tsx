@@ -35,6 +35,7 @@ import {
   SEGMENT_ACTIONS,
   SEGMENT_TYPES,
   CACHE_SIZES,
+  HDR_PEAK_NITS,
   type CacheSize,
   type PlayerBack,
   type PlayerEngine,
@@ -519,6 +520,25 @@ function HdrOutputSwitch() {
   );
 }
 
+/** The display peak HDR output maps to, shown while HDR output is on. */
+function HdrPeakSelect() {
+  const [hdrOutput] = useSetting(settings.video.hdrOutput);
+  const [peak, setPeak] = useSetting(settings.video.hdrPeakNits);
+  if (!hdrOutput) return null;
+  return (
+    <Select
+      label={t`HDR peak brightness`}
+      help={t`The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights.`}
+      options={HDR_PEAK_NITS.map((nits) => ({
+        value: String(nits),
+        label: t`${nits} nits`,
+      }))}
+      value={String(peak)}
+      onValueChange={(v) => setPeak(Number(v))}
+    />
+  );
+}
+
 function UpscalingSwitch() {
   const [upscaling, setUpscaling] = useSetting(settings.video.upscaling);
   return (
@@ -630,6 +650,7 @@ function PlayerCard() {
               <>
                 <UpscalingSwitch />
                 <HdrOutputSwitch />
+                <HdrPeakSelect />
                 <ShaderFilesRow
                   help={t`Shader files (.wgsl) for the WebGPU engine, applied in name order to what plays. They stay in this browser. Heavy ones can make video stutter.`}
                   accept=".wgsl"

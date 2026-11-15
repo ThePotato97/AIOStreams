@@ -97,6 +97,8 @@ interface GpuPlayer {
     inactivePasses: readonly { name: string; reason: string; detail: string }[];
   }>;
   setHDROutput(enabled: boolean): Promise<void>;
+  /** This fork's engine patch; absent from the published engine. */
+  setHDRPeakNits?(nits: number): void;
   pictureStream(
     onPicture?: () => void
   ): { stream: MediaStream; stop(): void } | null;
@@ -532,6 +534,7 @@ export function webGpuEngine(
           appLog('warn', `webgpu: passes not set: ${String(error)}`)
         ),
         opened.setHDROutput(settings.video.hdrOutput.read()).catch(() => {}),
+        opened.setHDRPeakNits?.(settings.video.hdrPeakNits.read()),
       ]);
       if (load !== opening) return;
       const asked = paused;
@@ -603,6 +606,7 @@ export function webGpuEngine(
             void player
               ?.setHDROutput(settings.video.hdrOutput.read())
               .catch(() => {});
+            player?.setHDRPeakNits?.(settings.video.hdrPeakNits.read());
             const headphones = settings.audio.headphones.read();
             if (headphones !== binaural) {
               binaural = headphones;

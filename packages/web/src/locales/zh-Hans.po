@@ -188,6 +188,10 @@ msgstr "{name} 加入了一起观看"
 msgid "{name} left the party"
 msgstr "{name} 离开了一起观看"
 
+#: src/app/settings/playback.tsx
+msgid "{nits} nits"
+msgstr ""
+
 #: src/features/versions/version-list.tsx
 msgid "{others, plural, one {Pick the version to download. The other episode gets the same release where it has it.} other {Pick the version to download. The other # episodes get the same release where they have it.}}"
 msgstr "{others, plural, one {选择要下载的版本。另一集如有相同版本，也会下载该版本。} other {选择要下载的版本。其他 # 集如有相同版本，也会下载该版本。}}"
@@ -1977,6 +1981,10 @@ msgstr "已设置 PIN 码"
 #, fuzzy
 msgid "HDR output"
 msgstr "视频输出"
+
+#: src/app/settings/playback.tsx
+msgid "HDR peak brightness"
+msgstr ""
 
 #: src/app/settings/audio.tsx
 msgid "Headphones"
@@ -4981,6 +4989,10 @@ msgstr "应用自带的播放器及其选项，例如以横屏启动视频。"
 
 #: src/app/settings/theme.tsx
 msgid "The artwork of the title you're on, blurred and darkened, behind the pages and the version list."
+msgstr ""
+
+#: src/app/settings/playback.tsx
+msgid "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
 msgstr ""
 
 #: src/app/settings/account.tsx
