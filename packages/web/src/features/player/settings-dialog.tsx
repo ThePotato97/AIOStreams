@@ -6,6 +6,8 @@ import { TextInput } from '@aiostreams/ui/text-input';
 import { AudioSection } from '@/app/settings/audio';
 import { PlaybackSection } from '@/app/settings/playback';
 import { SubtitlesSection } from '@/app/settings/subtitles';
+import { GUEST_USER_ID } from '@/lib/guest/guest-client';
+import { useSession } from '@/lib/jellyfin/session';
 
 /** The Playback page's cards each tab shows, by their `data-name`; the Audio and Subtitles tabs show their whole page. */
 const PLAYBACK_CARDS = {
@@ -15,17 +17,25 @@ const PLAYBACK_CARDS = {
 } as const;
 type PlaybackTab = keyof typeof PLAYBACK_CARDS;
 
+/** A guest's Playback tab: the host picks versions and what plays next. */
+const GUEST_PLAYBACK = ['skipping', 'controls'];
+
 /** Hides the Playback page's cards a tab doesn't show; cards it adds later are hidden too. */
-const TAB_CSS = (Object.keys(PLAYBACK_CARDS) as PlaybackTab[])
-  .map(
-    (tab) =>
-      `[data-settings-tab="${tab}"] [data-ui="settings-card"]${PLAYBACK_CARDS[
-        tab
-      ]
-        .map((name) => `:not([data-name="${name}"])`)
-        .join('')}{display:none}`
-  )
-  .join('');
+const TAB_CSS =
+  (Object.keys(PLAYBACK_CARDS) as PlaybackTab[])
+    .map(
+      (tab) =>
+        `[data-settings-tab="${tab}"] [data-ui="settings-card"]${PLAYBACK_CARDS[
+          tab
+        ]
+          .map((name) => `:not([data-name="${name}"])`)
+          .join('')}{display:none}`
+    )
+    .join('') +
+  `[data-settings-guest] [data-settings-tab="playback"] [data-ui="settings-card"]${GUEST_PLAYBACK.map(
+    (name) => `:not([data-name="${name}"])`
+  ).join('')}{display:none}` +
+  `[data-settings-guest] [data-ui="settings-card"]:is([data-name="versions"],[data-name="next-episode"]){display:none}`;
 
 /**
  * The app's playback, audio and subtitle settings over the player, in tabs by what they're about, with a search across them all:
@@ -40,6 +50,7 @@ export function PlayerSettingsDialog({
 }) {
   const [tab, setTab] = React.useState<string>('picture');
   const [query, setQuery] = React.useState('');
+  const guest = useSession().user.Id === GUEST_USER_ID;
   return (
     <Modal
       data-ui="dialog"
@@ -50,51 +61,56 @@ export function PlayerSettingsDialog({
       contentClass="max-w-3xl max-h-[85vh] flex flex-col overflow-hidden"
     >
       <style>{TAB_CSS}</style>
-      <TextInput
-        type="search"
-        placeholder={t`Search settings`}
-        aria-label={t`Search settings`}
-        value={query}
-        onValueChange={setQuery}
-      />
-      {query.trim() ? (
-        <SearchResults query={query} />
-      ) : (
-        <Tabs
-          value={tab}
-          onValueChange={setTab}
-          variant="pill"
-          animated={false}
-          className="flex min-h-0 flex-col"
-        >
-          <TabsList className="flex-wrap">
-            <TabsTrigger value="picture">{t`Picture`}</TabsTrigger>
-            <TabsTrigger value="playback">{t`Playback`}</TabsTrigger>
-            <TabsTrigger value="audio">{t`Audio`}</TabsTrigger>
-            <TabsTrigger value="subtitles">{t`Subtitles`}</TabsTrigger>
-            <TabsTrigger value="party">{t`Party & sharing`}</TabsTrigger>
-          </TabsList>
-          <div className="min-h-0 overflow-y-auto pt-4">
-            {(Object.keys(PLAYBACK_CARDS) as PlaybackTab[]).map((name) => (
-              <TabsContent key={name} value={name}>
-                <div data-settings-tab={name} className="space-y-6">
-                  <PlaybackSection />
+      <div
+        data-settings-guest={guest || undefined}
+        className="flex min-h-0 flex-col gap-4"
+      >
+        <TextInput
+          type="search"
+          placeholder={t`Search settings`}
+          aria-label={t`Search settings`}
+          value={query}
+          onValueChange={setQuery}
+        />
+        {query.trim() ? (
+          <SearchResults query={query} />
+        ) : (
+          <Tabs
+            value={tab}
+            onValueChange={setTab}
+            variant="pill"
+            animated={false}
+            className="flex min-h-0 flex-col"
+          >
+            <TabsList className="flex-wrap">
+              <TabsTrigger value="picture">{t`Picture`}</TabsTrigger>
+              <TabsTrigger value="playback">{t`Playback`}</TabsTrigger>
+              <TabsTrigger value="audio">{t`Audio`}</TabsTrigger>
+              <TabsTrigger value="subtitles">{t`Subtitles`}</TabsTrigger>
+              <TabsTrigger value="party">{t`Party & sharing`}</TabsTrigger>
+            </TabsList>
+            <div className="min-h-0 overflow-y-auto pt-4">
+              {(Object.keys(PLAYBACK_CARDS) as PlaybackTab[]).map((name) => (
+                <TabsContent key={name} value={name}>
+                  <div data-settings-tab={name} className="space-y-6">
+                    <PlaybackSection />
+                  </div>
+                </TabsContent>
+              ))}
+              <TabsContent value="audio">
+                <div className="space-y-6">
+                  <AudioSection />
                 </div>
               </TabsContent>
-            ))}
-            <TabsContent value="audio">
-              <div className="space-y-6">
-                <AudioSection />
-              </div>
-            </TabsContent>
-            <TabsContent value="subtitles">
-              <div className="space-y-6">
-                <SubtitlesSection />
-              </div>
-            </TabsContent>
-          </div>
-        </Tabs>
-      )}
+              <TabsContent value="subtitles">
+                <div className="space-y-6">
+                  <SubtitlesSection />
+                </div>
+              </TabsContent>
+            </div>
+          </Tabs>
+        )}
+      </div>
     </Modal>
   );
 }

@@ -47,6 +47,7 @@ import {
 import { useFeature } from '@/lib/jellyfin/server-info';
 import { useSession } from '@/lib/jellyfin/session';
 import { ShareLinksCard } from '@/features/share/share-links-card';
+import { GUEST_USER_ID } from '@/lib/guest/guest-client';
 import { mayConvert, qualityOptions } from '@/lib/playback/quality';
 import { canMinimise } from '@/lib/playback/session';
 import { SettingsCard, SettingsRow } from './_components/settings-card';
@@ -564,6 +565,8 @@ function PlayerCard() {
   );
   const [quality, setQuality] = useSetting(settings.player.quality);
   const { user } = useSession();
+  // A party's guest plays the host's file here, with no pages to go back to and no server to convert it.
+  const guest = user.Id === GUEST_USER_ID;
   const found = useExternalPlayers();
   const launched = LAUNCHED_PLAYERS.find((p) => p.id === player);
   const preset = linkPreset(player);
@@ -617,22 +620,28 @@ function PlayerCard() {
   } = LINK_TOKENS;
   return (
     <SettingsCard name="player" title={t`Player`} description={onDevice()}>
-      <Select
-        label={t`Play versions in`}
-        help={help}
-        options={playerOptions(found?.map((p) => p.id) ?? [])}
-        value={player}
-        onValueChange={setPlayer}
-      />
-      {canMinimise() && !launched && !preset && player !== CUSTOM_LINK && (
+      {!guest && (
         <Select
-          label={t`Back in the player`}
-          help={t`The mini player keeps the video going over the pages while you look around. Tap it to open the player again, or close it with its cross.`}
-          options={backOptions()}
-          value={back}
-          onValueChange={(v) => setBack(v as PlayerBack)}
+          label={t`Play versions in`}
+          help={help}
+          options={playerOptions(found?.map((p) => p.id) ?? [])}
+          value={player}
+          onValueChange={setPlayer}
         />
       )}
+      {!guest &&
+        canMinimise() &&
+        !launched &&
+        !preset &&
+        player !== CUSTOM_LINK && (
+          <Select
+            label={t`Back in the player`}
+            help={t`The mini player keeps the video going over the pages while you look around. Tap it to open the player again, or close it with its cross.`}
+            options={backOptions()}
+            value={back}
+            onValueChange={(v) => setBack(v as PlayerBack)}
+          />
+        )}
       {!currentHost().player &&
         canPlayWithWebGpu() &&
         !launched &&
@@ -696,18 +705,22 @@ function PlayerCard() {
           />
         </>
       )}
-      {mayConvert(user) && !launched && !preset && player !== CUSTOM_LINK && (
-        <Select
-          label={t`Quality`}
-          help={t`The most a version may stream at. Above it, the server converts it down, which helps on a slow connection. Original plays every version as it is. The player's own quality menu changes this too.`}
-          options={qualityOptions().map(({ id, label }) => ({
-            value: id,
-            label,
-          }))}
-          value={String(quality)}
-          onValueChange={(v) => setQuality(Number(v))}
-        />
-      )}
+      {!guest &&
+        mayConvert(user) &&
+        !launched &&
+        !preset &&
+        player !== CUSTOM_LINK && (
+          <Select
+            label={t`Quality`}
+            help={t`The most a version may stream at. Above it, the server converts it down, which helps on a slow connection. Original plays every version as it is. The player's own quality menu changes this too.`}
+            options={qualityOptions().map(({ id, label }) => ({
+              value: id,
+              label,
+            }))}
+            value={String(quality)}
+            onValueChange={(v) => setQuality(Number(v))}
+          />
+        )}
       {launched && (
         <SettingsRow
           label={t`Your ${name}`}

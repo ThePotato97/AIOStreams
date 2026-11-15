@@ -21,7 +21,7 @@ import type {
   EngineState,
   EngineTrack,
 } from './engine';
-import { ownTrackLabel } from './controller';
+import { ofType, ownTrackLabel } from './controller';
 import {
   canFullscreen,
   isFullscreen,
@@ -234,6 +234,10 @@ export function videoEngine(
     const listTracks = () => {
       const audio = video.current && audioTracksOf(video.current);
       const audioTracks = audio ? listed(audio) : [];
+      // The server's streams in the same order, where the browser lists as many: their format.
+      const streams = file ? ofType(file.source, 'Audio') : [];
+      const stream = (i: number) =>
+        streams.length === audioTracks.length ? streams[i] : undefined;
       const tracks: EngineTrack[] = [
         ...audioTracks.map((t, i) => ({
           id: String(i),
@@ -241,6 +245,11 @@ export function videoEngine(
           label: ownTrackLabel(t.label, t.language, i + 1),
           lang: t.language,
           title: t.label,
+          codec: stream(i)?.Codec ?? undefined,
+          profile: stream(i)?.Profile ?? undefined,
+          channels: stream(i)?.Channels ?? undefined,
+          layout: stream(i)?.ChannelLayout ?? undefined,
+          default: stream(i)?.IsDefault ?? undefined,
         })),
         ...ownTracks.map(ownSubtitleTrack),
         ...files.map(({ id, label }) => ({
