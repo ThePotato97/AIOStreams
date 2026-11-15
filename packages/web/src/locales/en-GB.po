@@ -67,6 +67,10 @@ msgstr "{count, plural, one {Trailer} other {Trailers}}"
 msgid "{count} switched off, rendered again from here"
 msgstr "{count} switched off, rendered again from here"
 
+#: src/features/share/share-links-card.tsx
+msgid "{days, plural, one {# day} other {# days}}"
+msgstr "{days, plural, one {# day} other {# days}}"
+
 #: src/app/downloads/page.tsx
 msgid "{downloaded} downloaded"
 msgstr "{downloaded} downloaded"
@@ -1767,6 +1771,10 @@ msgstr "Exit picture-in-picture"
 msgid "ExoPlayer, which uses less battery, and mpv for a video this device has no decoder for."
 msgstr "ExoPlayer, which uses less battery, and mpv for a video this device has no decoder for."
 
+#: src/features/share/share-links-card.tsx
+msgid "Expires {when}"
+msgstr "Expires {when}"
+
 #: src/app/history/page.tsx
 msgid "Export"
 msgstr "Export"
@@ -2507,8 +2515,8 @@ msgid "macOS draws the video, using less power, and shows Dolby Vision itself. S
 msgstr "macOS draws the video, using less power, and shows Dolby Vision itself. Shaders and mpv's picture options do not apply."
 
 #: src/features/share/share-links-card.tsx
-msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
-msgstr "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until it expires or you revoke it."
+msgstr "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until it expires or you revoke it."
 
 #: src/lib/i18n.ts
 msgid "Magenta"
@@ -2726,12 +2734,21 @@ msgid "Needs attention"
 msgstr "Needs attention"
 
 #: src/app/settings/playback.tsx
+#: src/features/share/share-links-card.tsx
 msgid "Never"
 msgstr "Never"
+
+#: src/features/share/share-links-card.tsx
+msgid "Never expires"
+msgstr "Never expires"
 
 #: src/app/sign-in/page.tsx
 msgid "New code"
 msgstr "New code"
+
+#: src/features/share/share-links-card.tsx
+msgid "New links expire after"
+msgstr "New links expire after"
 
 #: src/features/playlists/playlists.tsx
 msgid "New playlist"

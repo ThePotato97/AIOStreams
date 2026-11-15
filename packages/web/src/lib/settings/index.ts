@@ -34,6 +34,9 @@ export type Featured = 'auto' | FeaturedSource[];
 
 export const MAX_FEATURED = 4;
 
+/** How long a new share link can last, in days; 0 is until it's revoked. */
+export const SHARE_LINK_DAYS = [0, 1, 7, 30] as const;
+
 export type PosterSize = 'small' | 'medium' | 'large';
 
 export type PosterLine = 'title' | 'year';
@@ -587,6 +590,14 @@ export const settings = {
     showOnPauseAndSkip: device<boolean>(
       'aiostreams-web-controls-show-on-pause-and-skip',
       true
+    ),
+  },
+  share: {
+    /** How many days a new share link lasts; 0, until it's revoked. */
+    linkDays: device<number>(
+      'aiostreams-web-share-link-days',
+      0,
+      SHARE_LINK_DAYS
     ),
   },
   player: {

@@ -184,7 +184,8 @@ const shareStore = sharedBackend().records<SavedShare>({
   ownCap: true,
   save: (s) => s,
   load: (s) => s,
-  due: (s) => s.expiresAt,
+  // A share link that never expires is never due.
+  due: (s) => (s.expiresAt === NEVER ? null : s.expiresAt),
   tags: (s) => (s.link ? [`link-owner:${s.owner}`] : []),
   refs: (s) => Object.values(s.revisions).map((r) => `src:${r.ref}`),
   receive: () => {},
@@ -760,8 +761,9 @@ router.post('/exchange', async (req, res) => {
   const session = await guestSessions.create(body.party, binding.expiresAt);
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });
-/** How long a share link is kept: until its owner revokes it, in practice. */
-const LINK_LIFETIME_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+/** A share link that lasts until it's revoked: kept with no expiry. */
+const NEVER = Number.MAX_SAFE_INTEGER;
+const DAY_MS = 24 * 60 * 60 * 1000;
 /** How long a link's viewer session lasts; the page exchanges the link again after. */
 const LINK_SESSION_MS = 24 * 60 * 60 * 1000;
 /** The most share links one user keeps. */
@@ -769,6 +771,8 @@ const MAX_LINKS = 100;
 const linkSchema = z.object({
   itemId: z.string().regex(/^[0-9a-f]{32}$/),
   sourceId: z.string().max(100).optional(),
+  /** How many days the link lasts; none, until it's revoked. */
+  days: z.number().int().min(1).max(365).nullable().optional(),
 });
 /** The signed-in user a share link request comes from. */
 async function linkOwner(req: Request) {
@@ -826,7 +830,7 @@ router.post('/links', async (req, res) => {
     owner: user.uuid,
     link: true,
     createdAt: now,
-    expiresAt: now + LINK_LIFETIME_MS,
+    expiresAt: body.days ? now + body.days * DAY_MS : NEVER,
     entries: [
       { ref: id, itemId: body.itemId, title, filename: record.filename },
     ],
@@ -838,7 +842,13 @@ router.post('/links', async (req, res) => {
   };
   if ((await shareStore.create(id, () => saved, 0)) !== 'ok')
     fail(503, 'The link could not be kept; try again');
-  res.json({ id, secret, title, createdAt: now });
+  res.json({
+    id,
+    secret,
+    title,
+    createdAt: now,
+    expiresAt: saved.expiresAt === NEVER ? null : saved.expiresAt,
+  });
 });
 /** The user's share links, newest first, with what rebuilds each address. */
 router.get('/links', async (req, res) => {
@@ -854,6 +864,7 @@ router.get('/links', async (req, res) => {
       secret,
       title: saved.entries[0]?.title ?? '',
       createdAt: saved.createdAt ?? 0,
+      expiresAt: saved.expiresAt === NEVER ? null : saved.expiresAt,
     });
   }
   links.sort((a, b) => b.createdAt - a.createdAt);
@@ -1580,14 +1591,24 @@ router.use((error: any, _req: Request, res: Response, _next: unknown) => {
     code: typeof error.code === 'string' ? error.code : undefined,
   });
 });
-const sweep = setInterval(() => {
+/**
+ * Ends the shares this process holds whose party is gone or whose time is up. A share link has no
+ * party: it ends only when it's revoked or its time is up.
+ */
+export function sweepShares(): void {
   guestSessions.sweep();
-  for (const [id, b] of bindings)
+  for (const [id, b] of bindings) {
+    if (b.link) {
+      if (b.expiresAt <= Date.now()) void endShare(id);
+      continue;
+    }
     void guestPartyState(id)
       .then((p) => {
         if (!p || b.expiresAt <= Date.now()) return endShare(id);
       })
       .catch(() => {});
-}, 30000);
+  }
+}
+const sweep = setInterval(sweepShares, 30000);
 sweep.unref();
 export default router;

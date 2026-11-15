@@ -257,7 +257,7 @@ vi.mock('../routes/jellyfin/playback.js', () => ({
   ),
 }));
 import { decryptString } from '@aiostreams/core';
-import guestRouter, { CURRENT_WAIT } from './routes.js';
+import guestRouter, { CURRENT_WAIT, sweepShares } from './routes.js';
 import { guestSessions } from './sessions.js';
 import { BLOCK } from './source-reader.js';
 /** The guest sessions of the server running now (a restart imports them anew). */
@@ -1078,7 +1078,12 @@ describe('share links', () => {
       body: JSON.stringify({ itemId: ITEM, sourceId: 'source' }),
     });
     expect(made.status).toBe(200);
-    return (await made.json()) as { id: string; secret: string; title: string };
+    return (await made.json()) as {
+      id: string;
+      secret: string;
+      title: string;
+      expiresAt: number | null;
+    };
   }
   it('plays the title to whoever has the link, with no party and no account', async () => {
     fixture.sourcePath = '/ranged/file';
@@ -1113,6 +1118,32 @@ describe('share links', () => {
       secret: 'x'.repeat(43),
     });
     expect(wrong.status).toBe(410);
+  });
+  it('lives through the sweep that ends shares whose party is gone', async () => {
+    const link = await makeLink();
+    const { token } = (await (
+      await api('/links/exchange', '', { link: link.id, secret: link.secret })
+    ).json()) as { token: string };
+    expect((await api('/current', token)).status).toBe(200);
+    sweepShares();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await api('/current', token)).status).toBe(200);
+    const again = await api('/links/exchange', '', {
+      link: link.id,
+      secret: link.secret,
+    });
+    expect(again.status).toBe(200);
+  });
+  it('lasts the days asked for, or until revoked', async () => {
+    const made = await owner('/links', {
+      method: 'POST',
+      body: JSON.stringify({ itemId: ITEM, days: 7 }),
+    });
+    const week = (await made.json()) as { expiresAt: number | null };
+    expect(week.expiresAt! - Date.now()).toBeGreaterThan(6.9 * 86_400_000);
+    expect(week.expiresAt! - Date.now()).toBeLessThanOrEqual(7 * 86_400_000);
+    const forever = await makeLink();
+    expect(forever.expiresAt).toBeNull();
   });
   it('ends, with its viewers, when the user revokes it', async () => {
     const link = await makeLink();

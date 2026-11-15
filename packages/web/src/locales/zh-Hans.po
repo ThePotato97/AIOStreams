@@ -71,6 +71,10 @@ msgstr "{count, plural, one {预告片} other {预告片}}"
 msgid "{count} switched off, rendered again from here"
 msgstr ""
 
+#: src/features/share/share-links-card.tsx
+msgid "{days, plural, one {# day} other {# days}}"
+msgstr ""
+
 #: src/app/downloads/page.tsx
 msgid "{downloaded} downloaded"
 msgstr "{downloaded} 已下载"
@@ -1713,6 +1717,10 @@ msgstr "画中画"
 msgid "ExoPlayer, which uses less battery, and mpv for a video this device has no decoder for."
 msgstr "使用更省电的 ExoPlayer；对于设备无法解码的视频，则使用 mpv。"
 
+#: src/features/share/share-links-card.tsx
+msgid "Expires {when}"
+msgstr ""
+
 #: src/app/history/page.tsx
 msgid "Export"
 msgstr "导出"
@@ -2435,7 +2443,7 @@ msgid "macOS draws the video, using less power, and shows Dolby Vision itself. S
 msgstr "由 macOS 负责渲染视频，耗电更少，并直接显示杜比视界效果。着色器和 mpv 的画面选项不会生效。"
 
 #: src/features/share/share-links-card.tsx
-msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until it expires or you revoke it."
 msgstr ""
 
 #: src/lib/i18n.ts
@@ -2645,13 +2653,21 @@ msgstr "切换到此用户时需要。"
 msgid "Needs attention"
 msgstr "需要处理"
 
-#: src/app/settings/playback.tsx
+#: src/app/settings/playback.tsx src/features/share/share-links-card.tsx
 msgid "Never"
 msgstr "从不"
+
+#: src/features/share/share-links-card.tsx
+msgid "Never expires"
+msgstr ""
 
 #: src/app/sign-in/page.tsx
 msgid "New code"
 msgstr "新代码"
+
+#: src/features/share/share-links-card.tsx
+msgid "New links expire after"
+msgstr ""
 
 #: src/features/playlists/playlists.tsx
 msgid "New playlist"

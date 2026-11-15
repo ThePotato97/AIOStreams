@@ -10,6 +10,8 @@ export interface ShareLink {
   secret: string;
   title: string;
   createdAt: number;
+  /** When it stops working; null, not until it's revoked. */
+  expiresAt: number | null;
 }
 
 /** The guest routes of the server at `root` (its address without `/jellyfin`), as its user. */
@@ -26,11 +28,14 @@ export function createLink(
   root: string,
   token: string,
   itemId: string,
-  sourceId: string | undefined
+  sourceId: string | undefined,
+  /** How many days it lasts; 0, until it's revoked. */
+  days: number
 ): Promise<ShareLink> {
   return linksApi(root, token).request<ShareLink>('/links', {
     itemId,
     sourceId,
+    days: days || null,
   });
 }
 

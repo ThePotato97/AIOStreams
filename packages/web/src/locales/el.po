@@ -71,6 +71,10 @@ msgstr "{count, plural, one {Τρέιλερ} other {Τρέιλερ}}"
 msgid "{count} switched off, rendered again from here"
 msgstr ""
 
+#: src/features/share/share-links-card.tsx
+msgid "{days, plural, one {# day} other {# days}}"
+msgstr ""
+
 #: src/app/downloads/page.tsx
 msgid "{downloaded} downloaded"
 msgstr "Έχουν ληφθεί {downloaded}"
@@ -1702,6 +1706,10 @@ msgstr "Έξοδος από την εικόνα μέσα σε εικόνα"
 msgid "ExoPlayer, which uses less battery, and mpv for a video this device has no decoder for."
 msgstr "ExoPlayer για χαμηλότερη κατανάλωση μπαταρίας και mpv για βίντεο που η συσκευή δεν μπορεί να αποκωδικοποιήσει."
 
+#: src/features/share/share-links-card.tsx
+msgid "Expires {when}"
+msgstr ""
+
 #: src/app/history/page.tsx
 msgid "Export"
 msgstr "Εξαγωγή"
@@ -2419,7 +2427,7 @@ msgid "macOS draws the video, using less power, and shows Dolby Vision itself. S
 msgstr "Το macOS αποδίδει το βίντεο με χαμηλότερη κατανάλωση ενέργειας και εμφανίζει το Dolby Vision απευθείας. Τα shaders και οι επιλογές εικόνας του mpv δεν εφαρμόζονται."
 
 #: src/features/share/share-links-card.tsx
-msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until it expires or you revoke it."
 msgstr ""
 
 #: src/lib/i18n.ts
@@ -2627,13 +2635,21 @@ msgstr "Απαιτείται για μετάβαση σε αυτόν τον χρ
 msgid "Needs attention"
 msgstr "Χρειάζεται προσοχή"
 
-#: src/app/settings/playback.tsx
+#: src/app/settings/playback.tsx src/features/share/share-links-card.tsx
 msgid "Never"
 msgstr "Ποτέ"
+
+#: src/features/share/share-links-card.tsx
+msgid "Never expires"
+msgstr ""
 
 #: src/app/sign-in/page.tsx
 msgid "New code"
 msgstr "Νέος κωδικός"
+
+#: src/features/share/share-links-card.tsx
+msgid "New links expire after"
+msgstr ""
 
 #: src/features/playlists/playlists.tsx
 msgid "New playlist"

@@ -103,7 +103,13 @@ export function Versions({
     try {
       const url = linkUrl(
         root,
-        await createLink(root, client.token!, itemId, sourceId)
+        await createLink(
+          root,
+          client.token!,
+          itemId,
+          sourceId,
+          settings.share.linkDays.read()
+        )
       );
       await copyToClipboard(url, {
         onSuccess: () =>

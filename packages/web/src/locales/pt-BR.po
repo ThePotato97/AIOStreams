@@ -71,6 +71,10 @@ msgstr "{count, plural, one {Trailer} other {Trailers}}"
 msgid "{count} switched off, rendered again from here"
 msgstr ""
 
+#: src/features/share/share-links-card.tsx
+msgid "{days, plural, one {# day} other {# days}}"
+msgstr ""
+
 #: src/app/downloads/page.tsx
 msgid "{downloaded} downloaded"
 msgstr "{downloaded} baixados"
@@ -1698,6 +1702,10 @@ msgstr "Voltar à janela normal"
 msgid "ExoPlayer, which uses less battery, and mpv for a video this device has no decoder for."
 msgstr "ExoPlayer, que consome menos bateria, e mpv para vídeos que o aparelho não consegue decodificar."
 
+#: src/features/share/share-links-card.tsx
+msgid "Expires {when}"
+msgstr ""
+
 #: src/app/history/page.tsx
 msgid "Export"
 msgstr "Exportar"
@@ -2415,7 +2423,7 @@ msgid "macOS draws the video, using less power, and shows Dolby Vision itself. S
 msgstr "No macOS, o vídeo é renderizado com menor consumo de energia e o Dolby Vision é exibido pelo próprio sistema. Shaders e as opções de imagem do mpv não se aplicam."
 
 #: src/features/share/share-links-card.tsx
-msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until you revoke it."
+msgid "Made with Copy share link in a title's versions list. Whoever has one plays that video on their own, without an account, until it expires or you revoke it."
 msgstr ""
 
 #: src/lib/i18n.ts
@@ -2623,13 +2631,21 @@ msgstr "Necessário para mudar para este usuário."
 msgid "Needs attention"
 msgstr "Requer atenção"
 
-#: src/app/settings/playback.tsx
+#: src/app/settings/playback.tsx src/features/share/share-links-card.tsx
 msgid "Never"
 msgstr "Nunca"
+
+#: src/features/share/share-links-card.tsx
+msgid "Never expires"
+msgstr ""
 
 #: src/app/sign-in/page.tsx
 msgid "New code"
 msgstr "Novo código"
+
+#: src/features/share/share-links-card.tsx
+msgid "New links expire after"
+msgstr ""
 
 #: src/features/playlists/playlists.tsx
 msgid "New playlist"
