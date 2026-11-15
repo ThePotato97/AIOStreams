@@ -1162,6 +1162,10 @@ msgid "Copy link"
 msgstr "Copy link"
 
 #: src/features/versions/version-list.tsx
+msgid "Copy share link"
+msgstr "Copy share link"
+
+#: src/features/versions/version-list.tsx
 msgid "Copy stream link"
 msgstr "Copy stream link"
 
@@ -4365,11 +4369,13 @@ msgid "Shadow"
 msgstr "Shadow"
 
 #: src/features/player/options.tsx
+#: src/features/versions/version-list.tsx
 msgid "Share link"
 msgstr "Share link"
 
 #: src/features/player/options.tsx
 #: src/features/share/share-links-card.tsx
+#: src/features/versions/version-list.tsx
 msgid "Share link copied"
 msgstr "Share link copied"
 

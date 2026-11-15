@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import {
   BiBarChartAlt2,
   BiCopy,
+  BiShareAlt,
   BiDotsVerticalRounded,
   BiDownload,
   BiErrorCircle,
@@ -31,6 +32,9 @@ import {
   useRefreshPlaybackInfo,
 } from '@/lib/jellyfin/playback-info';
 import { directUrl } from '@/lib/playback/stream';
+import { GUEST_USER_ID } from '@/lib/guest/guest-client';
+import { createLink, linkUrl } from '@/lib/guest/links';
+import { relayBase } from '@/lib/party/invite';
 import {
   downloadable,
   useAddDownloads,
@@ -92,7 +96,24 @@ export function Versions({
   /** In a narrow sheet, however wide the screen. */
   compact: boolean;
 }) {
-  const { client } = useSession();
+  const { client, user } = useSession();
+  /** Makes a share link to this version and copies it; the toast shows it should copying fail. */
+  const shareVersion = async (itemId: string, sourceId: string | undefined) => {
+    const root = relayBase(client.base) ?? client.base;
+    try {
+      const url = linkUrl(
+        root,
+        await createLink(root, client.token!, itemId, sourceId)
+      );
+      await copyToClipboard(url, {
+        onSuccess: () =>
+          toast.success(t`Share link copied`, { description: url }),
+        onError: () => toast.message(t`Share link`, { description: url }),
+      });
+    } catch (error) {
+      toast.error((error as Error).message);
+    }
+  };
   const { item } = request;
   const purpose = request.download ? 'download' : undefined;
   const [preloaded] = useSetting(settings.playback.preloadVersions);
@@ -523,6 +544,18 @@ export function Versions({
                         onError: () => toast.error(t`Could not copy the link`),
                       }),
                   },
+                  // A link that plays this version in the web player, for someone without an account.
+                  ...(user.Id !== GUEST_USER_ID && client.token
+                    ? [
+                        {
+                          name: 'share-link',
+                          label: t`Copy share link`,
+                          icon: <BiShareAlt />,
+                          run: () =>
+                            void shareVersion(item.Id!, source.Id ?? undefined),
+                        },
+                      ]
+                    : []),
                 ]),
           ];
           return (

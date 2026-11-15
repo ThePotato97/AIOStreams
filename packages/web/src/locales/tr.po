@@ -1122,6 +1122,10 @@ msgid "Copy link"
 msgstr "Bağlantıyı kopyala"
 
 #: src/features/versions/version-list.tsx
+msgid "Copy share link"
+msgstr ""
+
+#: src/features/versions/version-list.tsx
 msgid "Copy stream link"
 msgstr "Yayın bağlantısını kopyala"
 
@@ -4234,11 +4238,12 @@ msgstr "Gölge"
 msgid "Shadow"
 msgstr "Gölge"
 
-#: src/features/player/options.tsx
+#: src/features/player/options.tsx src/features/versions/version-list.tsx
 msgid "Share link"
 msgstr ""
 
 #: src/features/player/options.tsx src/features/share/share-links-card.tsx
+#: src/features/versions/version-list.tsx
 msgid "Share link copied"
 msgstr ""
 

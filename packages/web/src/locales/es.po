@@ -1115,6 +1115,10 @@ msgid "Copy link"
 msgstr "Copiar enlace"
 
 #: src/features/versions/version-list.tsx
+msgid "Copy share link"
+msgstr ""
+
+#: src/features/versions/version-list.tsx
 msgid "Copy stream link"
 msgstr "Copiar enlace de la transmisión"
 
@@ -4196,11 +4200,12 @@ msgstr "Sombreadores"
 msgid "Shadow"
 msgstr "Sombra"
 
-#: src/features/player/options.tsx
+#: src/features/player/options.tsx src/features/versions/version-list.tsx
 msgid "Share link"
 msgstr ""
 
 #: src/features/player/options.tsx src/features/share/share-links-card.tsx
+#: src/features/versions/version-list.tsx
 msgid "Share link copied"
 msgstr ""
 

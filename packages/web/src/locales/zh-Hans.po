@@ -1122,6 +1122,10 @@ msgid "Copy link"
 msgstr "复制链接"
 
 #: src/features/versions/version-list.tsx
+msgid "Copy share link"
+msgstr ""
+
+#: src/features/versions/version-list.tsx
 msgid "Copy stream link"
 msgstr "复制串流链接"
 
@@ -4238,11 +4242,12 @@ msgstr "阴影"
 msgid "Shadow"
 msgstr "阴影"
 
-#: src/features/player/options.tsx
+#: src/features/player/options.tsx src/features/versions/version-list.tsx
 msgid "Share link"
 msgstr ""
 
 #: src/features/player/options.tsx src/features/share/share-links-card.tsx
+#: src/features/versions/version-list.tsx
 msgid "Share link copied"
 msgstr ""
 
