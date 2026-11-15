@@ -32,10 +32,16 @@ COPY pnpm-lock.yaml ./
 COPY packages/web/webgpu-player ./packages/web/webgpu-player
 COPY --from=atmos-packages /packages /atmos-packages
 # The published package at the pinned version, which build.mjs checks against pnpm-lock.yaml.
+# The Dolby Vision display management, from the private dovi-dm submodule when the build checked it
+# out (CI does with the DOVI_DM_SSH_KEY secret); without it the player keeps the engine's tone map.
 RUN npm pack --silent --pack-destination /tmp \
     "@aiostreams/webgpu-player@$(node -p "require('./packages/web/webgpu-player/engine.json').tag.slice(1)")" \
+  && dm="" \
+  && if [ -f packages/web/webgpu-player/dovi-dm/webgpu/build.sh ]; then \
+       sh packages/web/webgpu-player/dovi-dm/webgpu/build.sh /dovi-dm && dm="--dm /dovi-dm"; \
+     fi \
   && node packages/web/webgpu-player/build.mjs --packages /atmos-packages \
-    --published /tmp/aiostreams-webgpu-player-*.tgz
+    --published /tmp/aiostreams-webgpu-player-*.tgz $dm
 
 FROM base AS builder
 

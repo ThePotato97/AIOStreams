@@ -58,6 +58,10 @@ on:
         required: false
       DOCKERHUB_TOKEN:
         required: false
+      # A read-only deploy key of the private Dolby Vision DM repository (packages/web/webgpu-player/dovi-dm);
+      # without it the image builds without the DM
+      DOVI_DM_SSH_KEY:
+        required: false
 
 jobs:
   build:
@@ -81,6 +85,22 @@ jobs:
           # generateMetadata.cjs reads git tags, so it needs the full history.
           fetch-depth: ${{ inputs.metadata-channel != '' && '0' || '1' }}
           ref: ${{ inputs.ref }}
+      - name: Check out the Dolby Vision DM
+        env:
+          DOVI_DM_SSH_KEY: ${{ secrets.DOVI_DM_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DOVI_DM_SSH_KEY" ]; then
+            echo "No DOVI_DM_SSH_KEY: building without the Dolby Vision DM"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/dovi-dm-key"
+          printf '%s\n' "$DOVI_DM_SSH_KEY" > "$key"
+          chmod 600 "$key"
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+            git -c url."git@github.com:".insteadOf="https://github.com/" \
+            submodule update --init --depth 1 packages/web/webgpu-player/dovi-dm
+          rm -f "$key"
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
         with:

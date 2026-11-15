@@ -71,3 +71,5 @@ jobs:
       tags: ${{ needs.setup.outputs.tag }}
       metadata-channel: dev
       metadata-ref: ${{ needs.setup.outputs.tag }}
+    secrets:
+      DOVI_DM_SSH_KEY: ${{ secrets.DOVI_DM_SSH_KEY }}
