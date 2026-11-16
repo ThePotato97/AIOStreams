@@ -36,7 +36,11 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+      # Saved on every branch, not only the default one, so a branch's builds
+      # reuse their downloads rather than fetching all of Maven Central again.
       - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
