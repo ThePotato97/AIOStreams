@@ -54,7 +54,16 @@ jobs:
           pinned() { sed -n "s/^$1 = \"\(.*\)\"/\1/p" packages/android/gradle/libs.versions.toml; }
           "$sdkmanager" --install "platforms;android-37.2" "ndk;$(pinned android-ndk)" "cmake;$(pinned android-cmake)" >/dev/null
       - working-directory: packages/android
-        run: ./gradlew :app:assembleDebug
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          # The repository's own debug key, so each debug APK installs over the
+          # last; without it (a fork's pull request) the runner's own.
+          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+            export ANDROID_DEBUG_KEYSTORE="$RUNNER_TEMP/debug.keystore"
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 -d >"$ANDROID_DEBUG_KEYSTORE"
+          fi
+          ./gradlew :app:assembleDebug
       - if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
