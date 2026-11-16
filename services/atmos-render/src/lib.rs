@@ -16,6 +16,9 @@ pub mod limiter;
 pub mod loudness;
 mod joc_tables;
 pub mod objects;
+/// Atmos objects for Windows' spatial audio, through a C interface (FFmpeg's decoder).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod objects_api;
 pub mod qmf;
 pub mod render;
 mod qmf_window;

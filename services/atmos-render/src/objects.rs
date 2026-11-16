@@ -351,6 +351,13 @@ impl Scene {
         self.slots.clone()
     }
 
+    /// Each input's latest target position (Dolby x/y/z), before Atmos for Headphones' smoothing,
+    /// in `sources` order: what Windows' spatial audio is handed, since its renderer smooths
+    /// positions itself (after `advance`).
+    pub fn targets(&self) -> Vec<[f32; 3]> {
+        self.inputs.iter().map(|i| i.target.pos).collect()
+    }
+
     /// The renderer's sources for the current block (after `advance`).
     pub fn sources(&self) -> Vec<crate::render::Source> {
         use crate::render::Source;

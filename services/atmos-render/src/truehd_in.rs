@@ -294,6 +294,10 @@ impl Feed for TrueHd {
         }
     }
 
+    fn targets(&self) -> Vec<[f32; 3]> {
+        if self.atmos == Some(true) { self.scene.targets() } else { Vec::new() }
+    }
+
     fn windows_slots(&self) -> Vec<Option<u16>> {
         if self.atmos == Some(true) {
             self.scene.windows_slots()

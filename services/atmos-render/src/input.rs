@@ -47,6 +47,12 @@ pub trait Feed {
     fn windows_slots(&self) -> Vec<Option<u16>> {
         Vec::new()
     }
+    /// Each input's target position (Dolby x/y/z) for the block `sources` was last asked for,
+    /// before the scene's smoothing, in `sources` order; nothing where `sources`' positions are
+    /// already the targets (fixed channel layouts).
+    fn targets(&self) -> Vec<[f32; 3]> {
+        Vec::new()
+    }
     /// Per input, in `sources` order: whether E folds it into the stereo-bypass pair, which gets
     /// neither its -3 dB headroom nor its clip (those belong to `SetAudioObject` alone:
     /// stereo_bypass.md section 1.3). Inputs past the end get both.
