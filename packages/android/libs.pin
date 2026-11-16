@@ -1,4 +1,4 @@
-# The libs AAR the app ships: a release of github.com/AIOStreams/libs, which pins every source
-# it builds, and the AAR's SHA-256.
-url=https://github.com/AIOStreams/libs/releases/download/20261108-19b1008/libs-android.aar
-sha256=ed1412ef7656456a3db80769eac2cfc02b04ca422a5835d68c1f510388f27dd9
+# The libs AAR the app ships: a release of github.com/ThePotato97/libs (the Dolby Vision DM build), which pins
+# every source it builds, and the AAR's SHA-256.
+url=https://github.com/ThePotato97/libs/releases/download/20261116-cdce5f5/libs-android.aar
+sha256=a332db28e7ae1eee21d61c00a1a3edf9bad935105389d1337ea7379a73d93241
