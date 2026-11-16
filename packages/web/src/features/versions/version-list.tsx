@@ -2,6 +2,14 @@ import { plural, t } from '@lingui/core/macro';
 import { Trans } from '@lingui/react/macro';
 import React from 'react';
 import { toast } from 'sonner';
+
+/**
+ * Sonner adds a toast on a timeout but delivers a dismissal on an animation
+ * frame, so a dismissal straight after the toast can arrive first and leave it
+ * showing for good. Queued as a timeout, it lands after the toast.
+ */
+const dismissToast = (id: string | number) =>
+  setTimeout(() => toast.dismiss(id));
 import {
   BiBarChartAlt2,
   BiCopy,
@@ -135,7 +143,7 @@ export function Versions({
       toast.error((error as Error).message);
       return;
     } finally {
-      if (notice !== undefined) toast.dismiss(notice);
+      if (notice !== undefined) dismissToast(notice);
     }
     await then();
   };
@@ -275,7 +283,9 @@ export function Versions({
     });
     // The list stays until the version is known to play, so a broken one
     // leaves it showing with the reason.
-    const notice = toast.loading(t`Starting…`);
+    const notice = source.aiostreams?.checkUrl
+      ? toast.loading(t`Starting…`)
+      : undefined;
     play(item, {
       source,
       startMs,
@@ -285,7 +295,9 @@ export function Versions({
     })
       .then(onDone)
       .catch((e: Error) => toast.error(e.message))
-      .finally(() => toast.dismiss(notice));
+      .finally(() => {
+        if (notice !== undefined) dismissToast(notice);
+      });
   };
   const retry = () =>
     refresh.mutate(undefined, {
