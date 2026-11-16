@@ -435,14 +435,17 @@ pub fn start_player(
         now_playing::observe(&message);
         emit(message)
     };
-    let sized = std::fs::read_to_string(mpv_dir.join("mpv.conf"))
-        .is_ok_and(|c| c.contains("demuxer-max-bytes"));
-    let auto_cache = (!sized).then(|| playback::auto_cache(platform::total_memory()));
+    let conf = std::fs::read_to_string(mpv_dir.join("mpv.conf")).unwrap_or_default();
+    let auto_cache = (!conf.contains("demuxer-max-bytes"))
+        .then(|| playback::auto_cache(platform::total_memory()));
+    // A tone mapping the user's mpv.conf chooses holds for Dolby Vision too.
+    let dolby_vision_dm = !conf.contains("tone-mapping") && !conf.contains("libplacebo-opts");
     Player::start(
         library,
         &defaults,
         &required,
         auto_cache,
+        dolby_vision_dm,
         paths.upscaling_hook.clone(),
         Arc::new(emit),
     )

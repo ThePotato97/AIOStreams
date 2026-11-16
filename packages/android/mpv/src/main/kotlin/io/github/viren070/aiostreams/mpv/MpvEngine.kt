@@ -482,13 +482,18 @@ class MpvEngine(private val context: Context) : Engine {
     private fun routeDolbyVision() {
         if (stripping) runCatching { mpv.command("vf", "remove", DOLBY_VISION_FILTER) }
         stripping = false
-        when (mpv.getPropertyString("current-tracks/video/dolby-vision-profile")) {
+        val profile = mpv.getPropertyString("current-tracks/video/dolby-vision-profile")
+        when (profile) {
             null, "" -> {}
             "5" -> mpv.setPropertyString("file-local-options/hwdec", "no")
             else -> if (!dolbyVision) {
                 mpv.command("vf", "add", "$DOLBY_VISION_FILTER:format=dolbyvision=no")
                 stripping = true
             }
+        }
+        // libplacebo's Dolby Vision DM, for this file only, unless the user's mpv.conf picks a tone mapping
+        if (!profile.isNullOrEmpty() && !stripping && !configSets("tone-mapping") && !configSets("libplacebo-opts")) {
+            mpv.setPropertyString("file-local-options/libplacebo-opts", DOLBY_VISION_DM)
         }
     }
 
@@ -640,6 +645,9 @@ class MpvEngine(private val context: Context) : Engine {
 
         /** Labelled, so the user's own `vf` stays as it is. */
         private const val DOLBY_VISION_FILTER = "@aiostreams-dovi"
+
+        /** libplacebo's reference Dolby Vision DM, CM v2.9/v4, with the reference gamut LUTs. */
+        private const val DOLBY_VISION_DM = "tone_mapping_function=dovi-ref"
 
         /** Observed for the sound filters rather than the page. */
         private const val AUDIO_PARAMS = "audio-params"

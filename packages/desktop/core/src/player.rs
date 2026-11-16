@@ -199,6 +199,9 @@ fn read_ahead(mpv: &Mpv) -> Vec<SubtitleLine> {
 /// The page's settings that the event thread applies.
 struct Wanted {
     dolby_vision: AtomicBool,
+    /// Whether Dolby Vision files map through libplacebo's Dolby Vision DM, which the user's
+    /// mpv.conf turns off by choosing a tone mapping itself.
+    dolby_vision_dm: bool,
     upscaling: AtomicBool,
     /// Until the event thread has applied it.
     sound: Mutex<Option<Sound>>,
@@ -237,6 +240,7 @@ impl Player {
         defaults: &[(&str, &str)],
         required: &[(&str, &str)],
         auto_cache: Option<u64>,
+        dolby_vision_dm: bool,
         upscaling_hook: PathBuf,
         emit: Emit,
     ) -> Result<Self, String> {
@@ -267,6 +271,7 @@ impl Player {
         let quit = Arc::new(AtomicBool::new(false));
         let wanted = Arc::new(Wanted {
             dolby_vision: AtomicBool::new(true),
+            dolby_vision_dm,
             upscaling: AtomicBool::new(false),
             sound: Mutex::new(None),
         });
@@ -804,6 +809,20 @@ impl Throttle {
 
 /// Labelled, so a user's own `vf` stays as it is.
 const DOLBY_VISION_FILTER: &str = "@aiostreams-dovi";
+/// libplacebo's reference Dolby Vision DM, CM v2.9/v4, with the reference gamut LUTs.
+const DOLBY_VISION_DM: &str = "tone_mapping_function=dovi-ref";
+
+/// Maps a Dolby Vision file through libplacebo's Dolby Vision display management (the libs build's
+/// libplacebo), for this file only: other HDR keeps the platform's tone mapping.
+fn dolby_vision_dm(mpv: &Mpv) {
+    if text(mpv, "current-tracks/video/dolby-vision-profile").is_none() {
+        return;
+    }
+    let (name, value) = ("file-local-options/libplacebo-opts", DOLBY_VISION_DM);
+    if let Err(e) = mpv.set_property(name, value) {
+        log::warn!("mpv {name}={value}: {e}");
+    }
+}
 
 /// Without Dolby Vision, the HDR10 picture under it plays; profile 5 has none, so it keeps it.
 fn strip_dolby_vision(mpv: &Mpv) -> bool {
@@ -930,8 +949,11 @@ fn pump(
                     if stripping {
                         let _ = mpv.command(&["vf", "remove", DOLBY_VISION_FILTER]);
                     }
-                    stripping =
-                        !wanted.dolby_vision.load(Ordering::SeqCst) && strip_dolby_vision(mpv);
+                    let dolby_vision = wanted.dolby_vision.load(Ordering::SeqCst);
+                    stripping = !dolby_vision && strip_dolby_vision(mpv);
+                    if dolby_vision && wanted.dolby_vision_dm {
+                        dolby_vision_dm(mpv);
+                    }
                     upscale.file_loaded(mpv);
                     filters.loaded(mpv);
                     filters.apply(mpv, sound);
