@@ -257,6 +257,12 @@ export const DEFAULT_FAILOVER_PREFERRED_GRACE_MS = 2000;
 export const INTERNAL_PROXY_MARKER = 'from_proxy';
 /** Query marker naming the client path a play came from (`jellyfin`). */
 export const PLAY_PATH_MARKER = 'via';
+/**
+ * Query marker on a playback link asking whether it will play, from AIOStreams'
+ * own apps: an error comes back as JSON rather than as an error video, which
+ * only a Stremio player needs.
+ */
+export const PLAYBACK_CHECK_MARKER = 'check';
 
 /**
  * Path prefix of an AIOStreams builtin-proxy URL.
