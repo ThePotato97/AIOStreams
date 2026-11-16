@@ -33,7 +33,7 @@ import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
 import { requireAdmin } from '../../middlewares/auth.js';
 import { corsMiddleware } from '../../middlewares/cors.js';
-import { StaticFiles } from '../../utils/static-errors.js';
+import { StaticFiles, sendPlaybackError } from '../../utils/static-errors.js';
 
 const logger = createLogger('server');
 const router: Router = Router();
@@ -397,9 +397,16 @@ router.all(
             clientIp,
             reason: session.verdict.reason,
           });
-          res
-            .status(302)
-            .redirect(`/static/${StaticFiles.CONTENT_PROXY_LIMIT_REACHED}`);
+          sendPlaybackError(
+            req,
+            res,
+            {
+              code: 'TOO_MANY_ACTIVE_CONNECTIONS',
+              message: 'Too many streams through the proxy at once.',
+              file: StaticFiles.CONTENT_PROXY_LIMIT_REACHED,
+            },
+            302
+          );
           return;
         }
         // A full-buffered player never notices a clean FIN.

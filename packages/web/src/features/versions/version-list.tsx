@@ -64,7 +64,7 @@ import { backdropUrl, landscapeUrl } from '@/lib/artwork/urls';
 import { itemPath, navigate } from '@/lib/paths';
 import { settings, useSetting } from '@/lib/settings';
 import type { BaseItemDto, SourceInfo } from '@/lib/jellyfin/types';
-import { checkPlayable } from '@/lib/playback/check';
+import { checkPlayable, isActionDone } from '@/lib/playback/check';
 import { compileQuery, versionText } from '@/lib/versions';
 import { matchBadges } from '@/lib/badges';
 import { CachedImage } from '@/components/cached-image';
@@ -140,7 +140,7 @@ export function Versions({
     try {
       await checkPlayable(source);
     } catch (error) {
-      toast.error((error as Error).message);
+      if (!isActionDone(error)) toast.error((error as Error).message);
       return;
     } finally {
       if (notice !== undefined) dismissToast(notice);
@@ -294,7 +294,9 @@ export function Versions({
       onExternal,
     })
       .then(onDone)
-      .catch((e: Error) => toast.error(e.message))
+      .catch((e: Error) => {
+        if (!isActionDone(e)) toast.error(e.message);
+      })
       .finally(() => {
         if (notice !== undefined) dismissToast(notice);
       });

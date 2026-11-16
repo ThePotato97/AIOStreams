@@ -1571,6 +1571,7 @@ msgstr ""
 #: src/components/send-report.tsx
 #: src/features/player/subtitle-sync.tsx
 #: src/features/playlists/playlists.tsx
+#: src/lib/playback/check.ts
 msgid "Done"
 msgstr ""
 

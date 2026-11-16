@@ -96,6 +96,7 @@ export {
   runPlayChain,
   resolvePlaybackTarget,
   resolveExternalTarget,
+  probeResolvedLink,
   parsePlaybackUrl,
   decodeFileInfo,
 } from './main/failover.js';

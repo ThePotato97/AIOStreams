@@ -250,6 +250,52 @@ export async function resolveExternalTarget(
   }
 }
 
+/**
+ * Whether a link a debrid service resolved to will actually play: it answers
+ * its first byte with a file at least the size of a real release. A dead or
+ * expired download link, or a service's own error page or clip, fails. The
+ * type isn't required: debrid CDNs often serve releases as generic downloads.
+ * Resolves with the reason it won't play, or null when it will.
+ */
+export async function probeResolvedLink(
+  url: string,
+  ctx: { clientIp?: string },
+  signal?: AbortSignal
+): Promise<string | null> {
+  let res: Awaited<ReturnType<typeof makeRequest>>;
+  try {
+    res = await makeRequest(url, {
+      timeout: 10000,
+      method: 'GET',
+      forwardIp: ctx.clientIp,
+      signal,
+      headers: { Range: 'bytes=0-0' },
+    });
+  } catch (err) {
+    return `the download link didn't answer (${(err as Error).message})`;
+  }
+  try {
+    if (res.status < 200 || res.status >= 300)
+      return `the download link answered ${res.status}`;
+    const size =
+      res.status === 206
+        ? parseContentRangeTotal(res.headers.get('content-range'))
+        : Number(res.headers.get('content-length') ?? NaN);
+    if (size === undefined || !Number.isFinite(size))
+      return 'the download link gave no file size';
+    if (size < MIN_PLAUSIBLE_FILE_SIZE)
+      return `the download link served a ${size}-byte file, too small to be the release`;
+    return null;
+  } finally {
+    // Only the headers were needed; a server ignoring Range sends the whole file.
+    try {
+      await res.body?.cancel();
+    } catch {
+      // already closed
+    }
+  }
+}
+
 /** One attempt the orchestrator can race or sequence. */
 export interface FailoverAttempt {
   resolve: (signal?: AbortSignal) => Promise<string | undefined>;

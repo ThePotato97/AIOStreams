@@ -4,7 +4,7 @@ import {
   openNativeUsenetStream,
   DebridError,
 } from '@aiostreams/core';
-import { mapDebridErrorToStaticFile } from '../../utils/static-errors.js';
+import { sendPlaybackError } from '../../utils/static-errors.js';
 import { serveRangeStream } from '../../utils/range-stream.js';
 import { corsMiddleware } from '../../middlewares/cors.js';
 
@@ -47,7 +47,12 @@ router.get(
             detail: err.message,
           });
         } else {
-          res.redirect(302, `/static/${mapDebridErrorToStaticFile(err.code)}`);
+          sendPlaybackError(
+            req,
+            res,
+            { code: err.code, message: err.message },
+            302
+          );
         }
         return;
       }

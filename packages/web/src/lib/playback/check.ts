@@ -1,11 +1,26 @@
 import { t } from '@lingui/core/macro';
+import { toast } from 'sonner';
 import type { SourceInfo } from '@/lib/jellyfin/types';
 
-/** What the server's playback check answers when a version won't play. */
+/** What the server's playback check answers. */
 interface CheckAnswer {
   ok: boolean;
+  /** An entry that does something (a library refresh) instead of playing. */
+  action?: boolean;
+  message?: string;
   error?: { code?: string; message?: string };
 }
+
+/**
+ * Thrown by {@link checkPlayable} for an entry that was an action: it ran, its
+ * message is shown, and there's nothing to play. Callers stay where they are
+ * and show nothing more.
+ */
+export class PlaybackActionDone extends Error {}
+
+/** Whether an error from playing something is only {@link PlaybackActionDone}. */
+export const isActionDone = (error: unknown): boolean =>
+  error instanceof PlaybackActionDone;
 
 function reason(code: string | undefined, message: string | undefined): string {
   switch (code) {
@@ -48,8 +63,16 @@ export async function checkPlayable(source: SourceInfo): Promise<void> {
   } catch {
     return;
   }
-  if (response.ok) return;
-  const answer = (await response.json().catch(() => null)) as CheckAnswer | null;
+  const answer = (await response
+    .json()
+    .catch(() => null)) as CheckAnswer | null;
+  if (response.ok) {
+    if (answer?.action) {
+      toast.success(answer.message || t`Done`);
+      throw new PlaybackActionDone();
+    }
+    return;
+  }
   if (!answer || answer.ok !== false) return;
   throw new Error(reason(answer.error?.code, answer.error?.message));
 }
