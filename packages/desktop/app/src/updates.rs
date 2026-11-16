@@ -8,7 +8,9 @@ use velopack::locator::{LocationContext, auto_locate_app_manifest};
 use velopack::sources::HttpSource;
 use velopack::{UpdateCheck, UpdateInfo, UpdateManager, UpdateOptions};
 
-const RELEASES: &str = "https://github.com/Viren070/AIOStreams/releases/download";
+// This fork's own feeds, so a copy with the Dolby Vision DM updates to this fork's builds and not
+// upstream's, which would replace it with a build without the DM.
+const RELEASES: &str = "https://github.com/ThePotato97/AIOStreams/releases/download";
 const RECHECK: Duration = Duration::from_secs(6 * 60 * 60);
 /// Velopack's names for the operating systems, which begin its channel names.
 const OS: &str = if cfg!(windows) {
