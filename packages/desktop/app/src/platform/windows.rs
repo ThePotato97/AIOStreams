@@ -594,13 +594,55 @@ pub fn window_icon() -> Option<Icon> {
 }
 
 pub fn mpv_options(video: &VideoSurface) -> Vec<(&'static str, String)> {
-    vec![
+    let mut options = vec![
         ("wid", (video.hwnd as i64).to_string()),
         ("vo", "gpu-next,gpu,".into()),
         ("gpu-context", "d3d11".into()),
         ("hwdec", "auto-safe".into()),
         ("tone-mapping", "bt.2390".into()),
-    ]
+        // Atmos objects go to Windows' spatial audio; the spatial output refuses anything else,
+        // which wasapi then plays.
+        ("ao", "wasapi_spatial,wasapi".into()),
+    ];
+    // The decoders that give Atmos objects, only where the spatial output can take them: plain
+    // wasapi can't play objects.
+    if spatial_objects() {
+        log::info!(
+            "spatial audio takes dynamic objects: TrueHD and E-AC-3 decode to Atmos objects"
+        );
+        options.push(("ad", "libatmos_truehd,libatmos_eac3".into()));
+    }
+    options
+}
+
+/// Whether Windows' spatial audio (Dolby Atmos for Headphones, Windows Sonic) takes dynamic objects
+/// on the default output, as mpv's wasapi_spatial output needs.
+fn spatial_objects() -> bool {
+    use windows::Win32::Media::Audio::{
+        IMMDeviceEnumerator, ISpatialAudioClient, MMDeviceEnumerator, eMultimedia, eRender,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
+    };
+    // A thread of its own, in the apartment it needs, whatever the caller's is.
+    std::thread::spawn(|| unsafe {
+        let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let available = (|| -> windows::core::Result<bool> {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+            let client: ISpatialAudioClient = device.Activate(CLSCTX_INPROC_SERVER, None)?;
+            Ok(client.GetMaxDynamicObjectCount()? > 0)
+        })()
+        .unwrap_or(false);
+        if initialized {
+            CoUninitialize();
+        }
+        available
+    })
+    .join()
+    .unwrap_or(false)
 }
 
 /// mpv keeps the display on itself, as the video is its own window.

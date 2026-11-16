@@ -69,9 +69,20 @@ fn track_layout(mpv: &Mpv) -> Option<(String, usize)> {
     if passes {
         return None;
     }
+    // FFmpeg's libatmos decoders give Atmos objects, not speaker channels: filters would remix them
+    // and lose the objects' positions (the platform asks for them only with spatial audio there).
+    if matches!(codec, "truehd" | "eac3") && atmos_objects(mpv) {
+        return None;
+    }
     let channels = track.get("demux-channels")?.as_str()?;
     let count = track.get("demux-channel-count")?.as_u64()? as usize;
     Some((channels.to_string(), count))
+}
+
+/// Whether mpv prefers FFmpeg's libatmos decoders (`ad`), which decode TrueHD and E-AC-3 to Atmos
+/// objects for Windows' spatial audio.
+fn atmos_objects(mpv: &Mpv) -> bool {
+    matches!(mpv.get_property("options/ad", Kind::String), Some(Value::String(ad)) if ad.contains("libatmos_"))
 }
 
 fn spdif(mpv: &Mpv) -> Vec<String> {
@@ -108,6 +119,10 @@ fn centre_boost(channels: &str, count: usize, db: u8) -> Option<String> {
 }
 
 fn graph(sound: Sound, channels: &str, count: usize) -> Option<String> {
+    // Channels with no speaker positions (Atmos objects come as "unknown32"): nothing to filter.
+    if channels.starts_with("unknown") {
+        return None;
+    }
     let mut filters = Vec::new();
     if sound.dialogue_boost > 0
         && let Some(pan) = centre_boost(channels, count, sound.dialogue_boost)
