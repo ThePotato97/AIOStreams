@@ -1,8 +1,8 @@
 # The libmpv the desktop app ships, with FFmpeg's DLLs: a github.com/ThePotato97/libs
 # release (the Dolby Vision DM and Atmos objects build) and the SHA-256 of each architecture's libs-windows zip.
-libs=20261116-56e8e66
-libs_x86_64=54638217fd08aa06196daa2389868d6f8e82aceb0f92d5fdf412bb6f530e79d9
-libs_aarch64=6d8afc8196f607bab3a6b4f64ddb483326e9d0ab014740ce73079c1bfefe9aeb
+libs=20261116-7c4f2b9
+libs_x86_64=785a0afb2da439ef463ebe6412edeb09758277d07966ec36588cd1b157411148
+libs_aarch64=857d2a6e4126324c5e9ce1820d6cd3a5eadd05d74c1d98487c88f5fde3385aa8
 # The LunarG Vulkan Runtime whose vulkan-1.dll the app loads when Windows has none, and
 # the SHA-256 of each architecture's components archive.
 vulkan=1.4.363.0
