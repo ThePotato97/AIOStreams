@@ -647,7 +647,7 @@ class MpvEngine(private val context: Context) : Engine {
         private const val DOLBY_VISION_FILTER = "@aiostreams-dovi"
 
         /** libplacebo's reference Dolby Vision DM, CM v2.9/v4, with the reference gamut LUTs. */
-        private const val DOLBY_VISION_DM = "tone_mapping_function=dovi-ref"
+        private const val DOLBY_VISION_DM = "tone_mapping=dovi-ref"
 
         /** Observed for the sound filters rather than the page. */
         private const val AUDIO_PARAMS = "audio-params"

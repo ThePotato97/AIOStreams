@@ -345,6 +345,20 @@ pub fn receive_script(message: &Outbound) -> String {
     format!("window.__aiostreamsAppReceive?.({})", message.to_json())
 }
 
+/// Whether mpv.conf sets `name` for every file: an option line (not a comment) of exactly that
+/// name, before any profile section or in `[default]`, as the Android app reads it.
+fn conf_sets(conf: &str, name: &str) -> bool {
+    let mut every_file = true;
+    conf.lines().map(str::trim).any(|line| {
+        if line.starts_with('[') {
+            every_file = line == "[default]";
+            return false;
+        }
+        let option = line.split('=').next().unwrap_or_default().trim();
+        every_file && option.trim_start_matches("--") == name
+    })
+}
+
 fn mpv_config_dir(config_dir: &Path) -> PathBuf {
     let dir = config_dir.join("mpv");
     let _ = std::fs::create_dir_all(&dir);
@@ -439,7 +453,7 @@ pub fn start_player(
     let auto_cache = (!conf.contains("demuxer-max-bytes"))
         .then(|| playback::auto_cache(platform::total_memory()));
     // A tone mapping the user's mpv.conf chooses holds for Dolby Vision too.
-    let dolby_vision_dm = !conf.contains("tone-mapping") && !conf.contains("libplacebo-opts");
+    let dolby_vision_dm = !conf_sets(&conf, "tone-mapping") && !conf_sets(&conf, "libplacebo-opts");
     Player::start(
         library,
         &defaults,
@@ -814,4 +828,25 @@ pub fn handle(
 
 fn page_text(message: &str) -> String {
     message.chars().take(MAX_PAGE_TEXT).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conf_sets;
+
+    #[test]
+    fn conf_sets_reads_option_names() {
+        assert!(conf_sets("tone-mapping=bt.2390\n", "tone-mapping"));
+        assert!(conf_sets(
+            "--libplacebo-opts=tone_mapping=spline",
+            "libplacebo-opts"
+        ));
+        assert!(conf_sets("[default]\ntone-mapping=spline", "tone-mapping"));
+        assert!(!conf_sets("#tone-mapping=bt.2390", "tone-mapping"));
+        assert!(!conf_sets(
+            "tone-mapping-param=0.5\ninverse-tone-mapping=yes",
+            "tone-mapping"
+        ));
+        assert!(!conf_sets("[hdr]\ntone-mapping=bt.2390", "tone-mapping"));
+    }
 }

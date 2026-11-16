@@ -17,7 +17,11 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 base64 = "0.22"
-velopack = "1.2"
+# public-utils exposes the types an update source of its own implements (bundle::Manifest)
+velopack = { version = "1.2", features = ["public-utils"] }
+# The update source's HTTPS, checked against the system's certificates (see updates.rs)
+ureq = { version = "3.4", features = ["platform-verifier"] }
+url = "2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tao.workspace = true

@@ -810,7 +810,7 @@ impl Throttle {
 /// Labelled, so a user's own `vf` stays as it is.
 const DOLBY_VISION_FILTER: &str = "@aiostreams-dovi";
 /// libplacebo's reference Dolby Vision DM, CM v2.9/v4, with the reference gamut LUTs.
-const DOLBY_VISION_DM: &str = "tone_mapping_function=dovi-ref";
+const DOLBY_VISION_DM: &str = "tone_mapping=dovi-ref";
 
 /// Maps a Dolby Vision file through libplacebo's Dolby Vision display management (the libs build's
 /// libplacebo), for this file only: other HDR keeps the platform's tone mapping.
