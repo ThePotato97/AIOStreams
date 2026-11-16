@@ -1109,13 +1109,15 @@ export function parsePlaybackUrl(url: string): PlaybackTarget | undefined {
 
 /**
  * Where AIOStreams' own apps ask whether an owned playback URL will play, which
- * answers with the error (as JSON) instead of an error video. None for any
- * other URL, which has no such check.
+ * answers with the error (as JSON) instead of an error video. A proxied one is
+ * checked at the playback URL the proxy fetches. None for any other URL, which
+ * has no such check.
  */
 export function playbackCheckUrl(url: string): string | undefined {
-  if (!parsePlaybackUrl(url)) return undefined;
+  const target = unwrapProxyUrl(url);
+  if (!parsePlaybackUrl(target)) return undefined;
   try {
-    const u = new URL(url);
+    const u = new URL(target);
     u.searchParams.set(constants.PLAYBACK_CHECK_MARKER, '1');
     return u.toString();
   } catch {
