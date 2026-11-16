@@ -303,6 +303,8 @@ class Session {
         host: this.hostTicket
           ? { ticket: this.hostTicket, lock: this.state.lock }
           : undefined,
+        // The host brings back its party as the account it started it from.
+        code: this.hostTicket && this.token ? this.invite.code : undefined,
       };
     return { t: 'join', ...base, seat: this.seat, token: this.token };
   }

@@ -828,15 +828,21 @@ async function resume(
 ): Promise<void> {
   const expiresAt = ticketExpiry(m.party, m.ticket);
   if (!expiresAt) return refuse(conn, 'not-found');
-  if (relayMode() === 'off' && !(await userOf(m.token)))
-    return refuse(conn, 'denied');
+  const user = await userOf(m.token);
+  if (relayMode() === 'off' && !user) return refuse(conn, 'denied');
+  // Only the host's ticket brings the party back as its account's: guest links
+  // check that account, and refuse a party that came back without one.
+  const home =
+    m.host && ticketExpiry(m.party, m.host.ticket, 'host')
+      ? homeOf(user, m.code)
+      : null;
   const seat = newSeat(conn, randomId(), m);
   seatHere(conn, m.party, seat.id);
   const created = await settled(conn, () =>
     parties.create(
       m.party,
       (tx) => {
-        const party = newParty(m.party, seat, expiresAt, null);
+        const party = newParty(m.party, seat, expiresAt, home);
         changing(party, tx, () => {
           party.group.create(groupMember(seat.id));
           if (m.host) claimHost(party, tx, seat, m.host);

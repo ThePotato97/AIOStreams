@@ -58,9 +58,13 @@ vi.mock('@aiostreams/core', async () => {
     },
   };
 });
-// Nobody signs in with a server token here; the relay is public.
+// The relay is public, so nobody needs to sign in; OWNER_TOKEN signs in as an
+// account, for parties that belong to one.
 vi.mock('../routes/jellyfin/context.js', () => ({
-  userForToken: async () => null,
+  userForToken: async (token: string) =>
+    token === 'owner-token'
+      ? { uuid: 'owner-uuid', userId: 'owner', userData: {} }
+      : null,
 }));
 vi.mock('../routes/jellyfin/users.js', () => ({
   accountName: () => 'account',
@@ -272,6 +276,46 @@ describe('kick', () => {
       hello.you
     );
     expect(host.ws.readyState).toBe(WebSocket.OPEN);
+  });
+});
+
+describe('resume', () => {
+  const resumeAs = (
+    client: Client,
+    party: string,
+    extra: Record<string, unknown>
+  ) =>
+    client.send({
+      t: 'resume',
+      v: PARTY_PROTOCOL,
+      party,
+      name: NAME,
+      ticket: ticketFor(party, Date.now() + 60 * 60_000),
+      state: resumeState,
+      token: 'owner-token',
+      code: 'ABCDE12345',
+      ...extra,
+    });
+
+  it('brings the party back as the host’s account, so its guest links still pass', async () => {
+    const party = newKey();
+    const host = await connect();
+    resumeAs(host, party, {
+      host: {
+        ticket: ticketFor(party, Date.now() + 60 * 60_000, 'host'),
+        lock: { control: false, joins: false },
+      },
+    });
+    await welcome(host);
+    expect((await guestPartyState(party))?.homeUuid).toBe('owner-uuid');
+  });
+
+  it('gives a party resumed without the host’s ticket no account', async () => {
+    const party = newKey();
+    const member = await connect();
+    resumeAs(member, party, {});
+    await welcome(member);
+    expect((await guestPartyState(party))?.homeUuid).toBeUndefined();
   });
 });
 
