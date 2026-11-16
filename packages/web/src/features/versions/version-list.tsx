@@ -254,14 +254,19 @@ export function Versions({
       queryKey: infoOptions(item.Id!, source.Id ?? undefined).queryKey,
       exact: true,
     });
-    onDone();
+    // The list stays until the version is known to play, so a broken one
+    // leaves it showing with the reason.
+    const notice = toast.loading(t`Starting…`);
     play(item, {
       source,
       startMs,
       replace: !!request.playing || !!request.replace,
       playlist: request.playlist,
       onExternal,
-    }).catch((e: Error) => toast.error(e.message));
+    })
+      .then(onDone)
+      .catch((e: Error) => toast.error(e.message))
+      .finally(() => toast.dismiss(notice));
   };
   const retry = () =>
     refresh.mutate(undefined, {

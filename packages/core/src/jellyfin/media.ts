@@ -1,7 +1,7 @@
 import type { MediaTrack, ParsedFile, ParsedStream } from '../db/schemas.js';
 import { constants, getSimpleTextHash, hasTrackLists } from '../utils/index.js';
 import type { TitleMetadata } from '../debrid/base.js';
-import { withPlayPath } from '../debrid/utils.js';
+import { playbackCheckUrl, withPlayPath } from '../debrid/utils.js';
 import { applyMediaInfo } from '../media-info/apply.js';
 import { mediaInfoIdentity, storedMediaInfoFor } from '../media-info/lookup.js';
 import { nzbUrlKey } from '../media-info/identity.js';
@@ -808,7 +808,11 @@ export function buildMediaSource(
     DefaultSubtitleStreamIndex: defaults.subtitle,
   };
   if (opts.includeExtension)
-    source.aiostreams = { ...record.extension, id: record.msid };
+    source.aiostreams = {
+      ...record.extension,
+      id: record.msid,
+      checkUrl: record.url ? playbackCheckUrl(record.url) : undefined,
+    };
   return onlyFields(source, opts.fields);
 }
 

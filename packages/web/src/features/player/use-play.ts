@@ -6,6 +6,7 @@ import { fullTitle, ticksToMs } from '@/lib/format';
 import { navigate, to } from '@/lib/paths';
 import { externalReturnUrl } from '@/lib/playback/external-return';
 import { chosenPlayer, playerLink } from '@/lib/playback/player-choice';
+import { checkPlayable } from '@/lib/playback/check';
 import { directUrl } from '@/lib/playback/stream';
 import { subtitleUrl, textSubtitles } from '@/lib/subtitles/tracks';
 import { useSession } from '@/lib/jellyfin/session';
@@ -86,6 +87,9 @@ export function usePlay() {
       opts.startMs ?? ticksToMs(item.UserData?.PlaybackPositionTicks);
     if (party.state()?.status === 'live')
       return playForParty(item, source, startMs, playlist);
+
+    // A version that won't play fails here, so the caller stays where it is.
+    await checkPlayable(source);
 
     const { play } = currentHost();
     if (play) {

@@ -1107,6 +1107,22 @@ export function parsePlaybackUrl(url: string): PlaybackTarget | undefined {
   };
 }
 
+/**
+ * Where AIOStreams' own apps ask whether an owned playback URL will play, which
+ * answers with the error (as JSON) instead of an error video. None for any
+ * other URL, which has no such check.
+ */
+export function playbackCheckUrl(url: string): string | undefined {
+  if (!parsePlaybackUrl(url)) return undefined;
+  try {
+    const u = new URL(url);
+    u.searchParams.set(constants.PLAYBACK_CHECK_MARKER, '1');
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Our playback and proxy URLs carry the client path they were listed for. */
 export function withPlayPath(
   url: string,

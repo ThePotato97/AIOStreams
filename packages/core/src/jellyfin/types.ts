@@ -74,6 +74,12 @@ export interface AiostreamsSourceExtension {
   externalUrl?: string;
   /** A YouTube video, which the client opens itself. */
   ytId?: string;
+  /**
+   * Where the client asks whether this version will play before opening it:
+   * 200 when it will, an error as JSON when not. Only versions that resolve
+   * through AIOStreams' playback route have one. Set when sent.
+   */
+  checkUrl?: string;
   type: string;
   /** Stremio's: the next episode's version with the same group plays on. */
   bingeGroup?: string;

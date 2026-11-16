@@ -222,7 +222,9 @@ export function VersionPickerProvider({
             playlist,
             onExternal: () => setExternal(item),
           });
-      } catch {
+      } catch (e) {
+        // The version it went for won't play: the list, with why.
+        if (e instanceof Error && e.message) toast.error(e.message);
         setRequest({ item, startMs, replace, playlist });
       } finally {
         setTimeout(() => toast.dismiss(notice));
