@@ -387,6 +387,8 @@ pub fn start_player(
         ("config-dir", mpv_dir.to_string_lossy().into_owned()),
         ("config", "yes".into()),
         ("audio-client-name", "AIOStreams".into()),
+        // The stats overlay's text smaller than mpv's 20, so its pages fit the window.
+        ("script-opts", "stats-font_size=14".into()),
         // `%23%` quotes the next 23 characters, whose commas would split the option.
         (
             "stream-lavf-o",
