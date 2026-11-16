@@ -32,6 +32,7 @@ const LOGGED_PROPS: &[&str] = &[
     "audio-device",
     "audio-delay",
     "demuxer-max-bytes",
+    "ad",
 ];
 
 /// Observed for the sound filters, past the ids of the page's properties.
@@ -42,6 +43,23 @@ const VIDEO_GAMMA: u64 = 1002;
 const VIDEO_PRIMARIES: u64 = 1003;
 /// Observed for the app's picture-in-picture window.
 const VIDEO_ASPECT: u64 = 1004;
+/// Observed for Atmos objects that end up on an output that can't play them.
+const CURRENT_AO: u64 = 1005;
+/// FFmpeg's decoders that give Atmos objects, for an output that takes them (`ad`).
+const ATMOS_DECODERS: &str = "libatmos_truehd,libatmos_eac3";
+
+/// The platform's answer to whether `audio-device` (mpv's name for it, "auto" for the default)
+/// takes Atmos objects: spatial audio with dynamic objects, on Windows.
+pub type SpatialCheck = fn(&str) -> bool;
+
+/// What the app chose for playback, from the platform and the user's mpv.conf.
+pub struct Playback {
+    /// Dolby Vision files map through libplacebo's Dolby Vision DM.
+    pub dolby_vision_dm: bool,
+    /// Atmos objects where the output takes them (None: the platform has no spatial output, or
+    /// mpv.conf sets `ad`).
+    pub spatial: Option<SpatialCheck>,
+}
 const READ_AHEAD_EVERY: Duration = Duration::from_secs(15);
 const READ_AHEAD_STEPS: usize = 500;
 
@@ -225,6 +243,8 @@ pub struct Player {
     previews: Previews,
     ac3_encoder: bool,
     own_font: String,
+    /// None where the platform has no spatial output, or the user's mpv.conf sets `ad`.
+    spatial: Option<SpatialCheck>,
     styled: Mutex<HashMap<&'static str, String>>,
     /// None when the user's mpv.conf sizes the cache.
     auto_cache: Option<u64>,
@@ -240,7 +260,7 @@ impl Player {
         defaults: &[(&str, &str)],
         required: &[(&str, &str)],
         auto_cache: Option<u64>,
-        dolby_vision_dm: bool,
+        playback: Playback,
         upscaling_hook: PathBuf,
         emit: Emit,
     ) -> Result<Self, String> {
@@ -259,6 +279,7 @@ impl Player {
         mpv.observe("video-params/gamma", Kind::String, VIDEO_GAMMA)?;
         mpv.observe("video-params/primaries", Kind::String, VIDEO_PRIMARIES)?;
         mpv.observe("video-params/aspect", Kind::Double, VIDEO_ASPECT)?;
+        mpv.observe("current-ao", Kind::String, CURRENT_AO)?;
         let versions = (text(&mpv, "mpv-version"), text(&mpv, "ffmpeg-version"));
         log::info!(
             "mpv started version=\"{}\" ffmpeg={}",
@@ -271,7 +292,7 @@ impl Player {
         let quit = Arc::new(AtomicBool::new(false));
         let wanted = Arc::new(Wanted {
             dolby_vision: AtomicBool::new(true),
-            dolby_vision_dm,
+            dolby_vision_dm: playback.dolby_vision_dm,
             upscaling: AtomicBool::new(false),
             sound: Mutex::new(None),
         });
@@ -312,6 +333,7 @@ impl Player {
             previews: Previews::new(emit.clone()),
             ac3_encoder,
             own_font,
+            spatial: playback.spatial,
             styled: Mutex::default(),
             auto_cache,
             youtube: Arc::default(),
@@ -384,6 +406,13 @@ impl Player {
     /// Errs only on refused requests; mpv's own errors reach the page as a message.
     pub fn load(&self, load: &Load, local: &dyn Fn(&str) -> bool) -> Result<(), String> {
         let mut file = Loadfile::new(load, local)?;
+        // Atmos objects for this file only where its output takes them, decided before mpv picks
+        // the decoder (the request queue runs in order, the set ahead of the loadfile).
+        if let Some(check) = self.spatial {
+            let device = text(&self.mpv, "audio-device").unwrap_or_else(|| "auto".into());
+            let ad = if check(&device) { ATMOS_DECODERS } else { "" };
+            self.set("ad", ad.into());
+        }
         log::info!("load url={} options={}", file.url, file.options.join(","));
         if let Some(playable) = self
             .youtube
@@ -812,6 +841,24 @@ const DOLBY_VISION_FILTER: &str = "@aiostreams-dovi";
 /// libplacebo's reference Dolby Vision DM, CM v2.9/v4, with the reference gamut LUTs.
 const DOLBY_VISION_DM: &str = "tone_mapping=dovi-ref";
 
+/// Atmos objects playing through an output other than the spatial one (spatial sound turned off
+/// mid-file, so the spatial output gave way to the next): the decoders that give them stop, and
+/// the audio track restarts with the stock ones, which give channels.
+fn objects_without_spatial(mpv: &Mpv) {
+    let ao = text(mpv, "current-ao").unwrap_or_default();
+    let objects = text(mpv, "audio-params/channels").is_some_and(|c| c.starts_with("unknown"))
+        && text(mpv, "options/ad").is_some_and(|ad| ad.contains("libatmos_"));
+    if ao.is_empty() || ao == "wasapi_spatial" || !objects {
+        return;
+    }
+    log::warn!("Atmos objects reached {ao}, which can't play them: decoding channels instead");
+    let _ = mpv.set_property("ad", "");
+    if let Some(aid) = text(mpv, "aid").filter(|a| a != "no") {
+        let _ = mpv.set_property("aid", "no");
+        let _ = mpv.set_property("aid", &aid);
+    }
+}
+
 /// Maps a Dolby Vision file through libplacebo's Dolby Vision display management (the libs build's
 /// libplacebo), for this file only: other HDR keeps the platform's tone mapping.
 fn dolby_vision_dm(mpv: &Mpv) {
@@ -982,11 +1029,13 @@ fn pump(
                     let cause = cause.take().filter(|_| error.is_some());
                     emit(playback::ended(reason, error, cause, false));
                 }
+                Event::Property { id: CURRENT_AO, .. } => objects_without_spatial(mpv),
                 Event::Property {
                     id: AUDIO_PARAMS,
                     value,
                     ..
                 } => {
+                    objects_without_spatial(mpv);
                     filters.decoded(&value);
                     filters.apply(mpv, sound);
                     report("audio-params", &value);

@@ -947,6 +947,11 @@ pub fn install_menu(on_quit: impl Fn() + Send + Sync + 'static) -> Option<Menu> 
 
 const QUIT: &str = "quit";
 
+/// No spatial audio output for Atmos objects here.
+pub fn spatial_check() -> Option<fn(&str) -> bool> {
+    None
+}
+
 pub fn mpv_options(video: &VideoSurface) -> Vec<(&'static str, String)> {
     match &video.drawn {
         Drawn::OpenGl(_) => vec![

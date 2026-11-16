@@ -594,7 +594,7 @@ pub fn window_icon() -> Option<Icon> {
 }
 
 pub fn mpv_options(video: &VideoSurface) -> Vec<(&'static str, String)> {
-    let mut options = vec![
+    vec![
         ("wid", (video.hwnd as i64).to_string()),
         ("vo", "gpu-next,gpu,".into()),
         ("gpu-context", "d3d11".into()),
@@ -603,21 +603,19 @@ pub fn mpv_options(video: &VideoSurface) -> Vec<(&'static str, String)> {
         // Atmos objects go to Windows' spatial audio; the spatial output refuses anything else,
         // which wasapi then plays.
         ("ao", "wasapi_spatial,wasapi".into()),
-    ];
-    // The decoders that give Atmos objects, only where the spatial output can take them: plain
-    // wasapi can't play objects.
-    if spatial_objects() {
-        log::info!(
-            "spatial audio takes dynamic objects: TrueHD and E-AC-3 decode to Atmos objects"
-        );
-        options.push(("ad", "libatmos_truehd,libatmos_eac3".into()));
-    }
-    options
+    ]
+}
+
+/// The check before each file for whether its output takes Atmos objects (the player then asks for
+/// the decoders that give them).
+pub fn spatial_check() -> Option<fn(&str) -> bool> {
+    Some(spatial_objects)
 }
 
 /// Whether Windows' spatial audio (Dolby Atmos for Headphones, Windows Sonic) takes dynamic objects
-/// on the default output, as mpv's wasapi_spatial output needs.
-fn spatial_objects() -> bool {
+/// on mpv's `audio-device` ("auto", or "wasapi/<id>" as mpv lists it), as mpv's wasapi_spatial
+/// output needs: Dolby Atmos for Headphones is set per output.
+fn spatial_objects(device: &str) -> bool {
     use windows::Win32::Media::Audio::{
         IMMDeviceEnumerator, ISpatialAudioClient, MMDeviceEnumerator, eMultimedia, eRender,
     };
@@ -625,13 +623,25 @@ fn spatial_objects() -> bool {
         CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
         CoUninitialize,
     };
+    // mpv's wasapi ids leave out the endpoint prefix Windows' ids start with.
+    let id = device.strip_prefix("wasapi/").map(|id| {
+        let full = if id.starts_with("{0.0.0.00000000}.") {
+            id.to_string()
+        } else {
+            format!("{{0.0.0.00000000}}.{id}")
+        };
+        full.encode_utf16().chain([0]).collect::<Vec<u16>>()
+    });
     // A thread of its own, in the apartment it needs, whatever the caller's is.
-    std::thread::spawn(|| unsafe {
+    std::thread::spawn(move || unsafe {
         let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
         let available = (|| -> windows::core::Result<bool> {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-            let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+            let device = match &id {
+                Some(id) => enumerator.GetDevice(windows::core::PCWSTR(id.as_ptr()))?,
+                None => enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?,
+            };
             let client: ISpatialAudioClient = device.Activate(CLSCTX_INPROC_SERVER, None)?;
             Ok(client.GetMaxDynamicObjectCount()? > 0)
         })()

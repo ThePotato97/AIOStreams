@@ -471,6 +471,11 @@ pub fn clear_video() {
     });
 }
 
+/// No spatial audio output for Atmos objects here.
+pub fn spatial_check() -> Option<fn(&str) -> bool> {
+    None
+}
+
 pub fn mpv_options(_video: &VideoSurface) -> Vec<(&'static str, String)> {
     vec![("vo", "libmpv".into()), ("hwdec", "auto-safe".into())]
 }

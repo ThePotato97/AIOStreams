@@ -452,14 +452,18 @@ pub fn start_player(
     let conf = std::fs::read_to_string(mpv_dir.join("mpv.conf")).unwrap_or_default();
     let auto_cache = (!conf.contains("demuxer-max-bytes"))
         .then(|| playback::auto_cache(platform::total_memory()));
-    // A tone mapping the user's mpv.conf chooses holds for Dolby Vision too.
-    let dolby_vision_dm = !conf_sets(&conf, "tone-mapping") && !conf_sets(&conf, "libplacebo-opts");
+    let choices = aiostreams_desktop_core::player::Playback {
+        // A tone mapping the user's mpv.conf chooses holds for Dolby Vision too.
+        dolby_vision_dm: !conf_sets(&conf, "tone-mapping") && !conf_sets(&conf, "libplacebo-opts"),
+        // Atmos objects to the platform's spatial audio, unless the user's mpv.conf picks decoders.
+        spatial: platform::spatial_check().filter(|_| !conf_sets(&conf, "ad")),
+    };
     Player::start(
         library,
         &defaults,
         &required,
         auto_cache,
-        dolby_vision_dm,
+        choices,
         paths.upscaling_hook.clone(),
         Arc::new(emit),
     )
