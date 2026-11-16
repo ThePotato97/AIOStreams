@@ -56,6 +56,7 @@ import { backdropUrl, landscapeUrl } from '@/lib/artwork/urls';
 import { itemPath, navigate } from '@/lib/paths';
 import { settings, useSetting } from '@/lib/settings';
 import type { BaseItemDto, SourceInfo } from '@/lib/jellyfin/types';
+import { checkPlayable } from '@/lib/playback/check';
 import { compileQuery, versionText } from '@/lib/versions';
 import { matchBadges } from '@/lib/badges';
 import { CachedImage } from '@/components/cached-image';
@@ -119,6 +120,24 @@ export function Versions({
     } catch (error) {
       toast.error((error as Error).message);
     }
+  };
+  /** Runs `then` once the version is known to play; says why not when it won't. */
+  const ifPlayable = async (
+    source: SourceInfo,
+    then: () => Promise<unknown> | unknown
+  ) => {
+    const notice = source.aiostreams?.checkUrl
+      ? toast.loading(t`Checking it plays…`)
+      : undefined;
+    try {
+      await checkPlayable(source);
+    } catch (error) {
+      toast.error((error as Error).message);
+      return;
+    } finally {
+      if (notice !== undefined) toast.dismiss(notice);
+    }
+    await then();
   };
   const { item } = request;
   const purpose = request.download ? 'download' : undefined;
@@ -550,10 +569,16 @@ export function Versions({
                     label: t`Copy stream link`,
                     icon: <BiCopy />,
                     run: () =>
-                      copyToClipboard(link, {
-                        onSuccess: () => toast.success(t`Stream link copied`),
-                        onError: () => toast.error(t`Could not copy the link`),
-                      }),
+                      void ifPlayable(source, () =>
+                        copyToClipboard(link, {
+                          onSuccess: () => toast.success(t`Stream link copied`),
+                          // The check can outlast the click's permission to copy.
+                          onError: () =>
+                            toast.message(t`Stream link`, {
+                              description: link,
+                            }),
+                        })
+                      ),
                   },
                   // A link that plays this version in the web player, for someone without an account.
                   ...(user.Id !== GUEST_USER_ID && client.token
@@ -563,7 +588,9 @@ export function Versions({
                           label: t`Copy share link`,
                           icon: <BiShareAlt />,
                           run: () =>
-                            void shareVersion(item.Id!, source.Id ?? undefined),
+                            void ifPlayable(source, () =>
+                              shareVersion(item.Id!, source.Id ?? undefined)
+                            ),
                         },
                       ]
                     : []),

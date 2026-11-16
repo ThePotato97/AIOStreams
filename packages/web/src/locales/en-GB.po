@@ -1007,6 +1007,10 @@ msgstr "Chat"
 msgid "Check now"
 msgstr "Check now"
 
+#: src/features/versions/version-list.tsx
+msgid "Checking it plays…"
+msgstr "Checking it plays…"
+
 #: src/app/settings/apps.tsx
 #: src/lib/hosts/shell/index.ts
 msgid "Checking…"
@@ -1208,7 +1212,6 @@ msgid "Could not copy the invite link"
 msgstr "Could not copy the invite link"
 
 #: src/app/player/page.tsx
-#: src/features/versions/version-list.tsx
 msgid "Could not copy the link"
 msgstr "Could not copy the link"
 
@@ -4840,6 +4843,10 @@ msgstr "Stop listening"
 #: src/app/settings/playback.tsx
 msgid "Stops playing"
 msgstr "Stops playing"
+
+#: src/features/versions/version-list.tsx
+msgid "Stream link"
+msgstr "Stream link"
 
 #: src/app/player/page.tsx
 #: src/features/versions/version-list.tsx
