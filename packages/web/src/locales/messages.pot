@@ -4787,6 +4787,7 @@ msgid "Start on"
 msgstr ""
 
 #: src/features/remote/remote-sheet.tsx
+#: src/features/versions/version-list.tsx
 msgid "Starting…"
 msgstr ""
 
@@ -5284,6 +5285,18 @@ msgstr ""
 msgid "the server stopped answering, as it does while it restarts. Resume once it is back."
 msgstr ""
 
+#: src/lib/playback/check.ts
+msgid "The service is at its limit right now. Try again shortly."
+msgstr ""
+
+#: src/lib/playback/check.ts
+msgid "The service needs an active subscription to play this version."
+msgstr ""
+
+#: src/lib/playback/check.ts
+msgid "The service refused this version: check its credentials."
+msgstr ""
+
 #: src/app/guest/link-page.tsx
 #: src/app/guest/page.tsx
 msgid "The source couldn't be opened"
@@ -5485,8 +5498,24 @@ msgstr ""
 msgid "This user has a PIN."
 msgstr ""
 
+#: src/lib/playback/check.ts
+msgid "This version can't be played: the release is broken or no longer available."
+msgstr ""
+
+#: src/lib/playback/check.ts
+msgid "This version can't be played."
+msgstr ""
+
+#: src/lib/playback/check.ts
+msgid "This version doesn't contain the file for this title."
+msgstr ""
+
 #: src/app/player/page.tsx
 msgid "This version is no longer available."
+msgstr ""
+
+#: src/lib/playback/check.ts
+msgid "This version is still downloading to the service. Try again shortly."
 msgstr ""
 
 #: src/app/player/page.tsx

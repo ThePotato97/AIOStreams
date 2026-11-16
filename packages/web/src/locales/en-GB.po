@@ -4788,6 +4788,7 @@ msgid "Start on"
 msgstr "Start on"
 
 #: src/features/remote/remote-sheet.tsx
+#: src/features/versions/version-list.tsx
 msgid "Starting…"
 msgstr "Starting…"
 
@@ -5285,6 +5286,18 @@ msgstr "The server restarted; rejoin with the link"
 msgid "the server stopped answering, as it does while it restarts. Resume once it is back."
 msgstr "the server stopped answering, as it does while it restarts. Resume once it is back."
 
+#: src/lib/playback/check.ts
+msgid "The service is at its limit right now. Try again shortly."
+msgstr "The service is at its limit right now. Try again shortly."
+
+#: src/lib/playback/check.ts
+msgid "The service needs an active subscription to play this version."
+msgstr "The service needs an active subscription to play this version."
+
+#: src/lib/playback/check.ts
+msgid "The service refused this version: check its credentials."
+msgstr "The service refused this version: check its credentials."
+
 #: src/app/guest/link-page.tsx
 #: src/app/guest/page.tsx
 msgid "The source couldn't be opened"
@@ -5486,9 +5499,25 @@ msgstr "This trailer is gone."
 msgid "This user has a PIN."
 msgstr "This user has a PIN."
 
+#: src/lib/playback/check.ts
+msgid "This version can't be played: the release is broken or no longer available."
+msgstr "This version can't be played: the release is broken or no longer available."
+
+#: src/lib/playback/check.ts
+msgid "This version can't be played."
+msgstr "This version can't be played."
+
+#: src/lib/playback/check.ts
+msgid "This version doesn't contain the file for this title."
+msgstr "This version doesn't contain the file for this title."
+
 #: src/app/player/page.tsx
 msgid "This version is no longer available."
 msgstr "This version is no longer available."
+
+#: src/lib/playback/check.ts
+msgid "This version is still downloading to the service. Try again shortly."
+msgstr "This version is still downloading to the service. Try again shortly."
 
 #: src/app/player/page.tsx
 msgid "This video didn't load."
