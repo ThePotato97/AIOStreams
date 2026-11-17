@@ -43,6 +43,11 @@ RUN npm pack --silent --pack-destination /tmp \
   && node packages/web/webgpu-player/build.mjs --packages /atmos-packages \
     --published /tmp/aiostreams-webgpu-player-*.tgz $dm
 
+# The player alone. CI builds this target once and passes it to both platforms' builds as a named
+# build context of the same name, which replaces this stage there; a plain `docker build` builds it.
+FROM scratch AS webgpu-player-dist
+COPY --from=webgpu-player /build/packages/web/webgpu-player/dist /
+
 FROM base AS builder
 
 WORKDIR /build
@@ -85,7 +90,7 @@ COPY packages/web ./packages/web
 COPY packages/crypto ./packages/crypto
 COPY scripts ./scripts
 COPY resources ./resources
-COPY --from=webgpu-player /build/packages/web/webgpu-player/dist ./packages/web/webgpu-player/dist
+COPY --from=webgpu-player-dist / ./packages/web/webgpu-player/dist
 
 
 # Build the project.
