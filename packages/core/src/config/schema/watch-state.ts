@@ -19,6 +19,18 @@ export const watchStateSchema = {
     requiresRestart: false,
     secret: false,
   },
+  simklClientId: {
+    schema: z.string(),
+    // AIOStreams' own Simkl app (AUTH V2). Public by Simkl's rules: a client_id
+    // reaches nothing without a user's token.
+    default: '93f744ef7862e7e7a9a9e56c171f1b9cc2e46482233f4f0bf1b4aa8a5e260346',
+    label: 'Simkl client ID',
+    description:
+      'The Simkl app (AUTH V2) that users link their Simkl account through, so what they watch is scrobbled to Simkl. Defaults to AIOStreams’ own app; set your own from simkl.com/settings/developer, or leave it empty to turn Simkl linking off.',
+    env: 'SIMKL_CLIENT_ID',
+    requiresRestart: false,
+    secret: false,
+  },
   pullEnabled: {
     schema: z.boolean(),
     default: true,
