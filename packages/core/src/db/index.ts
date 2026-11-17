@@ -159,3 +159,10 @@ export type {
   Row,
   SqlInput,
 } from './driver/types.js';
+export {
+  SimklAccountRepository,
+  type SimklAccount,
+  type SimklAccountStatus,
+  type SimklOwner,
+  type SimklTokens,
+} from './repositories/simkl-accounts.js';

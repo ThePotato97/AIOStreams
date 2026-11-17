@@ -29,6 +29,7 @@ import imagesRouter from './images.js';
 import playstateRouter from './playstate.js';
 import playlistsRouter from './playlists.js';
 import webRouter from './web.js';
+import simklRouter from './simkl.js';
 import { jellyfinWebRoot } from '../../app.js';
 
 import { jellyfinCors } from './cors.js';
@@ -180,6 +181,7 @@ export function createJellyfinRouter(): Router {
 
   router.use(jellyfinContext);
   router.use(webRouter);
+  router.use(simklRouter);
   router.use(systemRouter);
   router.use(syncPlayRouter);
   router.use(remoteRouter);

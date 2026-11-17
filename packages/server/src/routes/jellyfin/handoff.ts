@@ -16,6 +16,8 @@ import {
   refreshSinkIfStale,
   retireOtherPersonaSinks,
   retireUnusedSinks,
+  scrobbleToSimkl,
+  simklEnabled,
   type AIOStreams,
   type ContentRef,
   type JellyfinItem,
@@ -418,11 +420,33 @@ export async function reportPlayback(
     sessionStartedAt?: number;
   } = {}
 ): Promise<void> {
+  const positionMs = opts.positionMs ?? opts.row?.positionMs;
+  const durationMs = opts.durationMs || opts.row?.durationMs;
+  let providerIds: Record<string, string> | undefined;
+  if (simklEnabled()) {
+    try {
+      providerIds = await idsFor(ctx, ref, opts.item);
+      scrobbleToSimkl(ctx.watch, {
+        kind,
+        type: ref.type,
+        season: ref.season,
+        episode: ref.episode,
+        positionMs,
+        durationMs,
+        providerIds,
+      });
+    } catch (error) {
+      logger.debug(
+        { err: error instanceof Error ? error.message : String(error) },
+        'failed to hand playback to simkl'
+      );
+    }
+  }
   if (!appConfig.watchState.reportEnabled) return;
   try {
     const sinks = await sinksFor(ctx);
     if (!sinks.length) return;
-    const providerIds = await idsFor(ctx, ref, opts.item);
+    providerIds ??= await idsFor(ctx, ref, opts.item);
     await dispatchPlayback(ctx.watch, sinks, {
       kind,
       type: ref.type,
@@ -432,8 +456,8 @@ export async function reportPlayback(
       season: ref.season,
       episode: ref.episode,
       // The row clears the position once it decides the item was played.
-      positionMs: opts.positionMs ?? opts.row?.positionMs,
-      durationMs: opts.durationMs || opts.row?.durationMs,
+      positionMs,
+      durationMs,
       played: opts.played ?? (opts.row ? opts.row.played : undefined),
       sessionStartedAt: opts.sessionStartedAt,
       providerIds,

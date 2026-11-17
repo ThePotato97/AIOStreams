@@ -648,6 +648,10 @@ msgstr ""
 msgid "Approve"
 msgstr ""
 
+#: src/app/settings/simkl.tsx
+msgid "Approve AIOStreams on Simkl. This closes by itself once you have."
+msgstr ""
+
 #: src/app/sign-in/page.tsx
 msgid "Approved. Signing in…"
 msgstr ""
@@ -1314,6 +1318,10 @@ msgstr ""
 
 #: src/lib/party/party.ts
 msgid "Couldn't reach {relay}."
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Couldn't reach Simkl. Try again in a moment."
 msgstr ""
 
 #: src/app/settings/playback.tsx
@@ -2461,6 +2469,26 @@ msgstr ""
 msgid "Link a pack someone shares, in this app's format or the one Fusion and Nuvio use. It stays up to date with its author's changes."
 msgstr ""
 
+#: src/app/settings/simkl.tsx
+msgid "Link again"
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Link it again to carry on scrobbling."
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Link Simkl"
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Linked"
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Linked as {username}"
+msgstr ""
+
 #: src/app/settings/theme.tsx
 msgid "Liquid glass"
 msgstr ""
@@ -2973,6 +3001,10 @@ msgstr ""
 msgid "Not found on this computer. Choose where {name} is installed."
 msgstr ""
 
+#: src/app/settings/simkl.tsx
+msgid "Not linked"
+msgstr ""
+
 #: src/features/versions/external-prompt.tsx
 msgid "Not now"
 msgstr ""
@@ -3223,6 +3255,10 @@ msgstr ""
 msgid "Open playlist"
 msgstr ""
 
+#: src/app/settings/simkl.tsx
+msgid "Open Simkl"
+msgstr ""
+
 #: src/app/downloads/page.tsx
 msgid "Open the app's downloads"
 msgstr ""
@@ -3293,6 +3329,10 @@ msgstr ""
 
 #: src/app/settings/_components/reaction-setting.tsx
 msgid "Or type one"
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Or, on another device, go to {verificationUri} and enter"
 msgstr ""
 
 #: src/lib/playback/quality.ts
@@ -4600,6 +4640,22 @@ msgstr ""
 msgid "Signs and songs"
 msgstr ""
 
+#: src/app/settings/simkl.tsx
+msgid "Simkl"
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Simkl linked"
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Simkl linked as {username}"
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "Simkl signed this link out"
+msgstr ""
+
 #: src/app/settings/subtitles.tsx
 #: src/features/player/options.tsx
 msgid "Size"
@@ -5166,6 +5222,10 @@ msgstr ""
 msgid "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
 msgstr ""
 
+#: src/app/settings/simkl.tsx
+msgid "The code expired. Close this and try again."
+msgstr ""
+
 #: src/app/settings/account.tsx
 msgid "The device is signed in"
 msgstr ""
@@ -5708,6 +5768,10 @@ msgstr ""
 msgid "Unknown language"
 msgstr ""
 
+#: src/app/settings/simkl.tsx
+msgid "Unlink"
+msgstr ""
+
 #: src/features/player/picture-in-picture.tsx
 #: src/features/player/volume.tsx
 msgid "Unmute"
@@ -6048,6 +6112,10 @@ msgstr ""
 
 #: src/app/settings/_components/reaction-setting.tsx
 msgid "What you can send from a party's chat."
+msgstr ""
+
+#: src/app/settings/simkl.tsx
+msgid "What you watch, on any device signed in as you, is scrobbled to your Simkl account."
 msgstr ""
 
 #: src/app/settings/apps.tsx

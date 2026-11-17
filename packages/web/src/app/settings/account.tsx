@@ -20,6 +20,7 @@ import { useServerInfo } from '@/lib/jellyfin/server-info';
 import { UserAvatar } from '@/components/user-avatar';
 import { SettingsCard, SettingsRow } from './_components/settings-card';
 import { onDevice } from './_components/common';
+import { SimklCard } from './simkl';
 
 export function AccountSection() {
   const { client, user, switchUser, signOut, changeServer } = useSession();
@@ -124,6 +125,7 @@ export function AccountSection() {
           </SettingsRow>
         )}
       </SettingsCard>
+      <SimklCard />
       {several && (
         <SettingsCard
           name="who-s-watching"

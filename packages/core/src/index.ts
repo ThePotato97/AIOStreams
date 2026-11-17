@@ -24,6 +24,7 @@ export * from './app-reports/index.js';
 export * from './watch-state/index.js';
 export * from './jellyfin/index.js';
 export * from './sync/index.js';
+export * from './simkl/index.js';
 export { requestTitleMetadata } from './media-info/lookup.js';
 export {
   onPlay,

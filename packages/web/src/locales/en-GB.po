@@ -649,6 +649,10 @@ msgstr "Apply to styled subtitles too"
 msgid "Approve"
 msgstr "Approve"
 
+#: src/app/settings/simkl.tsx
+msgid "Approve AIOStreams on Simkl. This closes by itself once you have."
+msgstr "Approve AIOStreams on Simkl. This closes by itself once you have."
+
 #: src/app/sign-in/page.tsx
 msgid "Approved. Signing in…"
 msgstr "Approved. Signing in…"
@@ -1316,6 +1320,10 @@ msgstr "Couldn't open {title}."
 #: src/lib/party/party.ts
 msgid "Couldn't reach {relay}."
 msgstr "Couldn't reach {relay}."
+
+#: src/app/settings/simkl.tsx
+msgid "Couldn't reach Simkl. Try again in a moment."
+msgstr "Couldn't reach Simkl. Try again in a moment."
 
 #: src/app/settings/playback.tsx
 msgid "Countdown"
@@ -2462,6 +2470,26 @@ msgstr "Licences"
 msgid "Link a pack someone shares, in this app's format or the one Fusion and Nuvio use. It stays up to date with its author's changes."
 msgstr "Link a pack someone shares, in this app's format or the one Fusion and Nuvio use. It stays up to date with its author's changes."
 
+#: src/app/settings/simkl.tsx
+msgid "Link again"
+msgstr "Link again"
+
+#: src/app/settings/simkl.tsx
+msgid "Link it again to carry on scrobbling."
+msgstr "Link it again to carry on scrobbling."
+
+#: src/app/settings/simkl.tsx
+msgid "Link Simkl"
+msgstr "Link Simkl"
+
+#: src/app/settings/simkl.tsx
+msgid "Linked"
+msgstr "Linked"
+
+#: src/app/settings/simkl.tsx
+msgid "Linked as {username}"
+msgstr "Linked as {username}"
+
 #: src/app/settings/theme.tsx
 msgid "Liquid glass"
 msgstr "Liquid glass"
@@ -2974,6 +3002,10 @@ msgstr "not found"
 msgid "Not found on this computer. Choose where {name} is installed."
 msgstr "Not found on this computer. Choose where {name} is installed."
 
+#: src/app/settings/simkl.tsx
+msgid "Not linked"
+msgstr "Not linked"
+
 #: src/features/versions/external-prompt.tsx
 msgid "Not now"
 msgstr "Not now"
@@ -3224,6 +3256,10 @@ msgstr "Open main menu"
 msgid "Open playlist"
 msgstr "Open playlist"
 
+#: src/app/settings/simkl.tsx
+msgid "Open Simkl"
+msgstr "Open Simkl"
+
 #: src/app/downloads/page.tsx
 msgid "Open the app's downloads"
 msgstr "Open the app's downloads"
@@ -3295,6 +3331,10 @@ msgstr "Options the app keeps for itself."
 #: src/app/settings/_components/reaction-setting.tsx
 msgid "Or type one"
 msgstr "Or type one"
+
+#: src/app/settings/simkl.tsx
+msgid "Or, on another device, go to {verificationUri} and enter"
+msgstr "Or, on another device, go to {verificationUri} and enter"
 
 #: src/lib/playback/quality.ts
 msgid "Original"
@@ -4601,6 +4641,22 @@ msgstr "Signed out"
 msgid "Signs and songs"
 msgstr "Signs and songs"
 
+#: src/app/settings/simkl.tsx
+msgid "Simkl"
+msgstr "Simkl"
+
+#: src/app/settings/simkl.tsx
+msgid "Simkl linked"
+msgstr "Simkl linked"
+
+#: src/app/settings/simkl.tsx
+msgid "Simkl linked as {username}"
+msgstr "Simkl linked as {username}"
+
+#: src/app/settings/simkl.tsx
+msgid "Simkl signed this link out"
+msgstr "Simkl signed this link out"
+
 #: src/app/settings/subtitles.tsx
 #: src/features/player/options.tsx
 msgid "Size"
@@ -5167,6 +5223,10 @@ msgstr "The artwork of the title you're on, blurred and darkened, behind the pag
 msgid "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
 msgstr "The brightest your screen shows, which HDR video's highlights are mapped to. Brighter parts are rolled off below it. Set it to your screen's peak for the most accurate highlights."
 
+#: src/app/settings/simkl.tsx
+msgid "The code expired. Close this and try again."
+msgstr "The code expired. Close this and try again."
+
 #: src/app/settings/account.tsx
 msgid "The device is signed in"
 msgstr "The device is signed in"
@@ -5709,6 +5769,10 @@ msgstr "Unfinished"
 msgid "Unknown language"
 msgstr "Unknown language"
 
+#: src/app/settings/simkl.tsx
+msgid "Unlink"
+msgstr "Unlink"
+
 #: src/features/player/picture-in-picture.tsx
 #: src/features/player/volume.tsx
 msgid "Unmute"
@@ -6050,6 +6114,10 @@ msgstr "What to save"
 #: src/app/settings/_components/reaction-setting.tsx
 msgid "What you can send from a party's chat."
 msgstr "What you can send from a party's chat."
+
+#: src/app/settings/simkl.tsx
+msgid "What you watch, on any device signed in as you, is scrobbled to your Simkl account."
+msgstr "What you watch, on any device signed in as you, is scrobbled to your Simkl account."
 
 #: src/app/settings/apps.tsx
 msgid "What your Discord profile shows. Kept on this device."
