@@ -1,4 +1,4 @@
 # The libs AAR the app ships: a release of github.com/ThePotato97/libs (the Dolby Vision DM and Atmos objects build), which pins
 # every source it builds, and the AAR's SHA-256.
-url=https://github.com/ThePotato97/libs/releases/download/20261116-7c4f2b9/libs-android.aar
-sha256=8b2d30791c3d704d3cc46470317e0d1f1bc6f57e0d60a56505a5578a087680a5
+url=https://github.com/ThePotato97/libs/releases/download/20261117-fd899f4/libs-android.aar
+sha256=990005582ed0bd23c421a2a255963f6488b9a25458d6da18059ab170b216cd04
