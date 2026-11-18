@@ -9,14 +9,16 @@ import android.widget.FrameLayout
 import androidx.core.view.children
 import io.github.viren070.aiostreams.exoplayer.ExoEngine
 import io.github.viren070.aiostreams.mpv.MpvEngine
+import io.github.viren070.aiostreams.playback.AudioRoute
 import io.github.viren070.aiostreams.playback.Engine
 import io.github.viren070.aiostreams.playback.PlayerChannel
 import io.github.viren070.aiostreams.playback.Sound
+import io.github.viren070.aiostreams.playback.atmosRender
 
 /**
  * The engine drawing beneath the page: the one the page picked, or with
  * `auto`, ExoPlayer for each file and mpv for a file ExoPlayer can't play, or mpv for every file
- * while the speaker render is on (only mpv has it).
+ * while the Channels setting asks for a Dolby Atmos render on this output (only mpv has them).
  */
 class Playback(private val context: Context, private val announce: (engine: String) -> Unit) {
     private val saved = context.getSharedPreferences("playback", Context.MODE_PRIVATE)
@@ -44,9 +46,14 @@ class Playback(private val context: Context, private val announce: (engine: Stri
             engine.setSound(value)
         }
 
+    /** The Channels setting; the next file's engine follows it. */
+    var audioChannels = "auto"
+
+    private val route = AudioRoute(context)
+
     private fun engineFor(choice: String) = when {
         choice == MPV -> MPV
-        choice == AUTO && sound.speakers -> MPV
+        choice == AUTO && atmosRender(audioChannels, route.current) != null -> MPV
         else -> EXOPLAYER
     }
 

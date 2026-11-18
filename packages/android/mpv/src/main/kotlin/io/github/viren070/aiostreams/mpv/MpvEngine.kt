@@ -21,7 +21,10 @@ import io.github.viren070.aiostreams.playback.PlayerChapter
 import io.github.viren070.aiostreams.playback.PlayerSettings
 import io.github.viren070.aiostreams.playback.PlayerState
 import io.github.viren070.aiostreams.playback.PlayerTrack
+import io.github.viren070.aiostreams.playback.OutputKind
+import io.github.viren070.aiostreams.playback.AudioRoute
 import io.github.viren070.aiostreams.playback.Sound
+import io.github.viren070.aiostreams.playback.atmosRender
 import io.github.viren070.aiostreams.playback.Style
 import io.github.viren070.aiostreams.playback.SubtitleFont
 import io.github.viren070.aiostreams.playback.SubtitleLine
@@ -68,8 +71,18 @@ class MpvEngine(private val context: Context) : Engine {
     @Volatile
     private var sound = Sound()
 
-    /** mpv's `ad`: atmos-render's speaker decoders first while the speaker render is on. */
+    /** mpv's `ad`: atmos-render's decoders for the render the Channels setting asks for, first. */
     private var decoders = ""
+
+    /** The Channels setting, which may ask for a Dolby Atmos render. */
+    @Volatile
+    private var audioChannels = "auto"
+
+    /** mpv's `audio-channels` as last set; on the calls thread. */
+    private var channels: String? = null
+
+    /** Automatic picks the render from the output in use. */
+    private val route = AudioRoute(context) { calls.execute { applyRender() } }
 
     // Used on the calls thread only.
     private var filters: SoundFilters? = null
@@ -308,7 +321,8 @@ class MpvEngine(private val context: Context) : Engine {
             this.hwdec = hwdec
             set("hwdec", hwdec)
         }
-        set("audio-channels", settings.audioChannels.takeIf { it in setOf("stereo", "5.1", "7.1") } ?: "auto-safe")
+        audioChannels = settings.audioChannels
+        applyRender()
         set("audio-spdif", settings.passthrough.joinToString(","))
         set("audio-delay", seconds(settings.audioDelayMs))
         if (!configSets("demuxer-max-bytes")) {
@@ -374,17 +388,34 @@ class MpvEngine(private val context: Context) : Engine {
     }
 
     override fun setSound(sound: Sound) {
-        val decoders = if (sound.speakers) SPEAKER_DECODERS else ""
         this.sound = sound
-        calls.execute {
-            // A user's own `ad` in mpv.conf wins.
-            if (decoders != this.decoders && !configSets("ad")) {
-                this.decoders = decoders
-                set("ad", decoders)
-                reloadAudio()
-            }
-            filters?.apply(sound)
+        calls.execute { filters?.apply(sound) }
+    }
+
+    /** On the calls thread: the channels and atmos-render's decoders for the Channels setting on this output. */
+    private fun applyRender() {
+        val render = atmosRender(audioChannels, route.current)
+        val channels = when {
+            // The renders' own output; anything they refuse is mixed down for it too.
+            render != null -> "stereo"
+            audioChannels in setOf("stereo", "5.1", "7.1") -> audioChannels
+            else -> "auto-safe"
         }
+        if (channels != this.channels) {
+            this.channels = channels
+            set("audio-channels", channels)
+        }
+        val decoders = when (render) {
+            OutputKind.SPEAKERS -> SPEAKER_DECODERS
+            OutputKind.HEADPHONES -> HEADPHONE_DECODERS
+            else -> ""
+        }
+        // A user's own `ad` in mpv.conf wins.
+        if (decoders == this.decoders || configSets("ad")) return
+        this.decoders = decoders
+        AppLog.i(TAG, "ad ${decoders.ifEmpty { "(mpv's own)" }}")
+        set("ad", decoders)
+        reloadAudio()
     }
 
     /** The decoders in use only change when the audio track is opened again. */
@@ -439,6 +470,7 @@ class MpvEngine(private val context: Context) : Engine {
     }
 
     override fun release() {
+        route.release()
         mpv.removeObserver(observer)
         mpv.removeLogObserver(logs)
         calls.shutdown()
@@ -603,11 +635,13 @@ class MpvEngine(private val context: Context) : Engine {
 
     companion object {
         /**
-         * FFmpeg's libatmos speaker decoders (atmos-render): TrueHD, E-AC-3 and AC-3 at 48 kHz rendered
-         * for two built-in speakers, as Dolby Atmos for built-in speakers does. Any other stream, or
-         * one they refuse, takes mpv's usual decoder; passthrough still comes first.
+         * FFmpeg's libatmos decoders (atmos-render): TrueHD, E-AC-3 and AC-3 at 48 kHz rendered to
+         * stereo for two built-in speakers (as Dolby Atmos for built-in speakers does) or for
+         * headphones (as the browser player does). Any other stream, or one they refuse, takes
+         * mpv's usual decoder; passthrough still comes first.
          */
         const val SPEAKER_DECODERS = "libatmos_speakers_truehd,libatmos_speakers_eac3,libatmos_speakers_ac3"
+        const val HEADPHONE_DECODERS = "libatmos_binaural_truehd,libatmos_binaural_eac3,libatmos_binaural_ac3"
 
         private val OBSERVED = listOf(
             "time-pos", "duration", "demuxer-cache-state", "pause", "paused-for-cache", "seeking",

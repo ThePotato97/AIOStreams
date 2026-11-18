@@ -342,11 +342,11 @@ msgstr "12-hour ({twelve})"
 msgid "24-hour ({twentyFour})"
 msgstr "24-hour ({twentyFour})"
 
-#: src/app/settings/audio.tsx
+#: src/lib/playback/sound.ts
 msgid "5.1 surround"
 msgstr "5.1 surround"
 
-#: src/app/settings/audio.tsx
+#: src/lib/playback/sound.ts
 msgid "7.1 surround"
 msgstr "7.1 surround"
 
@@ -720,9 +720,9 @@ msgstr "Audio: {label}"
 msgid "Auto-play the first version"
 msgstr "Auto-play the first version"
 
-#: src/app/settings/audio.tsx
 #: src/app/settings/interface.tsx
 #: src/app/settings/playback.tsx
+#: src/lib/playback/sound.ts
 msgid "Automatic"
 msgstr "Automatic"
 
@@ -870,9 +870,9 @@ msgstr "Built-in mpv"
 msgid "Built-in player"
 msgstr "Built-in player"
 
-#: src/app/settings/audio.tsx
-msgid "Built-in speakers"
-msgstr "Built-in speakers"
+#: src/lib/playback/sound.ts
+msgid "Built-in speakers (Dolby Atmos)"
+msgstr "Built-in speakers (Dolby Atmos)"
 
 #: src/app/settings/theme.tsx
 msgid "Buttons, progress bars and highlights."
@@ -2069,6 +2069,10 @@ msgstr "HDR peak brightness (nits)"
 msgid "Headphones"
 msgstr "Headphones"
 
+#: src/lib/playback/sound.ts
+msgid "Headphones (Dolby Atmos)"
+msgstr "Headphones (Dolby Atmos)"
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Heard"
 msgstr "Heard"
@@ -2842,6 +2846,10 @@ msgstr "Next in {playlistName}"
 #: src/app/calendar/page.tsx
 msgid "Next month"
 msgstr "Next month"
+
+#: src/features/player/options.tsx
+msgid "Next output"
+msgstr "Next output"
 
 #: src/lib/input/actions.ts
 msgid "Next subtitles"
@@ -3847,6 +3855,10 @@ msgstr "Previous episode"
 msgid "Previous month"
 msgstr "Previous month"
 
+#: src/features/player/options.tsx
+msgid "Previous output"
+msgstr "Previous output"
+
 #: src/lib/input/keys.ts
 msgid "Previous track"
 msgstr "Previous track"
@@ -4094,10 +4106,6 @@ msgstr "Render only {label}"
 #: src/app/settings/audio.tsx
 msgid "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
 msgstr "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
-
-#: src/app/settings/audio.tsx
-msgid "Renders Dolby Atmos and surround sound for this device's own two speakers, as Dolby Atmos for built-in speakers does. Plays through mpv. Not for sound passed through, or for headphones."
-msgstr "Renders Dolby Atmos and surround sound for this device's own two speakers, as Dolby Atmos for built-in speakers does. Plays through mpv. Not for sound passed through, or for headphones."
 
 #: src/features/playlists/playlists.tsx
 msgid "Repeat"
@@ -4807,6 +4815,10 @@ msgstr "Sort by"
 msgid "Sound"
 msgstr "Sound"
 
+#: src/features/player/options.tsx
+msgid "Sound for"
+msgstr "Sound for"
+
 #: src/app/history/page.tsx
 msgid "Source"
 msgstr "Source"
@@ -4878,8 +4890,8 @@ msgstr "Status"
 msgid "Stays as it is"
 msgstr "Stays as it is"
 
-#: src/app/settings/audio.tsx
 #: src/lib/playback/controller.ts
+#: src/lib/playback/sound.ts
 msgid "Stereo"
 msgstr "Stereo"
 
@@ -6114,6 +6126,10 @@ msgstr "What the others say shows here."
 #: src/app/settings/playback.tsx
 msgid "What the people you watch with say shows for a few seconds. It always stays in the party's chat."
 msgstr "What the people you watch with say shows for a few seconds. It always stays in the party's chat."
+
+#: src/app/settings/audio.tsx
+msgid "What the sound is played for. The Dolby Atmos choices render Atmos and surround sound for this device's own speakers or for headphones; Automatic picks between them from the output in use, and passes through or decodes for HDMI and receivers as before."
+msgstr "What the sound is played for. The Dolby Atmos choices render Atmos and surround sound for this device's own speakers or for headphones; Automatic picks between them from the output in use, and passes through or decodes for HDMI and receivers as before."
 
 #: src/app/settings/cache.tsx
 msgid "What to save"

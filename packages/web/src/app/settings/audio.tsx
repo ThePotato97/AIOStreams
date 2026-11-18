@@ -12,11 +12,15 @@ import {
   ORIGINAL_LANGUAGE,
   usePlaybackPrefs,
 } from '@/lib/jellyfin/user-config';
-import { audioDelayLabel, dialogueLabel } from '@/lib/playback/sound';
+import {
+  audioChannelChoices,
+  audioChannelLabel,
+  audioDelayLabel,
+  dialogueLabel,
+} from '@/lib/playback/sound';
 import {
   settings,
   useSetting,
-  AUDIO_CHANNELS,
   AUDIO_DELAY_LIMIT_MS,
   AUDIO_DELAY_STEP_MS,
   DIALOGUE_BOOSTS,
@@ -146,10 +150,14 @@ function OutputCard() {
       {!android && <AudioDeviceSelect />}
       <Select
         label={t`Channels`}
-        help={t`What your speakers or receiver take. Surround sound with more is mixed down, with its dialogue kept in.`}
-        options={AUDIO_CHANNELS.map((c) => ({
+        help={
+          android
+            ? t`What the sound is played for. The Dolby Atmos choices render Atmos and surround sound for this device's own speakers or for headphones; Automatic picks between them from the output in use, and passes through or decodes for HDMI and receivers as before.`
+            : t`What your speakers or receiver take. Surround sound with more is mixed down, with its dialogue kept in.`
+        }
+        options={audioChannelChoices().map((c) => ({
           value: c,
-          label: channelLabel(c),
+          label: audioChannelLabel(c),
         }))}
         value={audioChannels}
         onValueChange={(v) => setAudioChannels(v as AudioChannels)}
@@ -246,20 +254,9 @@ function SoundCard() {
   const [boost, setBoost] = useSetting(settings.audio.dialogueBoost);
   const [nightMode, setNightMode] = useSetting(settings.audio.nightMode);
   const [delay, setDelay] = useSetting(settings.audio.delayMs);
-  const [speakers, setSpeakers] = useSetting(settings.audio.speakerRender);
-  const android = currentHost().name === 'android-app';
   const delayLabel = audioDelayLabel(delay);
   return (
     <SettingsCard name="sound" title={t`Sound`} description={onDevice()}>
-      {android && (
-        <Switch
-          side="right"
-          label={t`Built-in speakers`}
-          help={t`Renders Dolby Atmos and surround sound for this device's own two speakers, as Dolby Atmos for built-in speakers does. Plays through mpv. Not for sound passed through, or for headphones.`}
-          value={speakers}
-          onValueChange={setSpeakers}
-        />
-      )}
       <Select
         label={t`Dialogue boost`}
         help={t`Raises the centre channel, where surround sound puts dialogue. Not for sound passed through.`}
@@ -289,11 +286,3 @@ function SoundCard() {
     </SettingsCard>
   );
 }
-
-const channelLabel = (channels: AudioChannels) =>
-  ({
-    auto: t`Automatic`,
-    stereo: t`Stereo`,
-    '5.1': t`5.1 surround`,
-    '7.1': t`7.1 surround`,
-  })[channels];

@@ -90,7 +90,7 @@ data class Style(val fit: Fit, val subtitles: SubtitleLook)
 /** The settings the page sends that each engine applies itself. */
 data class PlayerSettings(
     val hardwareDecoding: Boolean = true,
-    /** `auto`, `stereo`, `5.1` or `7.1`. */
+    /** `auto`, `stereo`, `5.1`, `7.1`, or a Dolby Atmos render: `speakers` or `headphones`. */
     val audioChannels: String = "auto",
     /** In mpv's `audio-spdif` names. */
     val passthrough: List<String> = emptyList(),

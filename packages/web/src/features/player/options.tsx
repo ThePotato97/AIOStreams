@@ -55,6 +55,8 @@ import {
   type VideoFit,
 } from '@/lib/settings';
 import {
+  audioChannelChoices,
+  audioChannelLabel,
   audioDelayLabel,
   dialogueLabel,
   stepAudioDelay,
@@ -433,9 +435,27 @@ function SoundControls() {
   const [boost, setBoost] = useSetting(settings.audio.dialogueBoost);
   const [nightMode, setNightMode] = useSetting(settings.audio.nightMode);
   const [delay, setDelay] = useSetting(settings.audio.delayMs);
+  const [channels, setChannels] = useSetting(settings.audio.channels);
   const at = DIALOGUE_BOOSTS.indexOf(boost);
+  const choices = audioChannelChoices();
+  const pick = choices.indexOf(channels);
   return (
     <>
+      <Stepper
+        label={t`Sound for`}
+        value={audioChannelLabel(channels)}
+        less={{
+          label: t`Previous output`,
+          onClick: pick > 0 ? () => setChannels(choices[pick - 1]) : undefined,
+        }}
+        more={{
+          label: t`Next output`,
+          onClick:
+            pick < choices.length - 1
+              ? () => setChannels(choices[pick + 1])
+              : undefined,
+        }}
+      />
       <Stepper
         label={t`Dialogue`}
         value={dialogueLabel(boost)}

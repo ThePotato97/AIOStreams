@@ -184,8 +184,24 @@ export interface SubtitleStyle {
 
 const isPercent = (value: number) => value >= 0 && value <= 100;
 
-export const AUDIO_CHANNELS = ['auto', 'stereo', '5.1', '7.1'] as const;
+/**
+ * What the sound is played for. `speakers` and `headphones` are atmos-render's Dolby Atmos renders
+ * (the Android app's mpv); `auto` there picks one from the output in use.
+ */
+export const AUDIO_CHANNELS = [
+  'auto',
+  'stereo',
+  '5.1',
+  '7.1',
+  'speakers',
+  'headphones',
+] as const;
 export type AudioChannels = (typeof AUDIO_CHANNELS)[number];
+/** The choices only the Android app has. */
+export const AUDIO_RENDERS: readonly AudioChannels[] = [
+  'speakers',
+  'headphones',
+];
 
 /** What plays versions inside the Android app. */
 /** `auto` is the browser's own player in a browser. */
@@ -716,11 +732,6 @@ export const settings = {
     ),
     /** Dolby Atmos (and other surround) rendered for headphones by the WebGPU player's audio packages. */
     headphones: device<boolean>('aiostreams-web-audio-headphones', false),
-    /** The Android app: Dolby Atmos and surround rendered for the device's two speakers (mpv's atmos-render decoders). */
-    speakerRender: device<boolean>(
-      'aiostreams-web-audio-speaker-render',
-      false
-    ),
     /** Positive plays the sound later than the picture. */
     delayMs: device<number>(
       'aiostreams-web-audio-delay',

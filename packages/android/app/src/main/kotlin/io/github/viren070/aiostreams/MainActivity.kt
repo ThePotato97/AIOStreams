@@ -291,7 +291,9 @@ class MainActivity : ComponentActivity() {
                 message["shown"]?.jsonPrimitive?.booleanOrNull?.let { runOnUiThread { frameRates.controls(it) } }
             }
             "player-settings" -> {
-                player.setSettings(PlayerProtocol.settings(message))
+                val settings = PlayerProtocol.settings(message)
+                player.setSettings(settings)
+                playback.audioChannels = settings.audioChannels
                 message["frameRate"]?.jsonPrimitive?.booleanOrNull?.let { frameRates.enabled = it }
                 message["tunneling"]?.jsonPrimitive?.booleanOrNull?.let { playback.tunneling = it }
                 message["dolbyVision"]?.jsonPrimitive?.booleanOrNull?.let { playback.dolbyVision = it }
@@ -300,7 +302,6 @@ class MainActivity : ComponentActivity() {
                     dialogueBoost = message["dialogueBoost"]?.jsonPrimitive?.intOrNull ?: 0,
                     nightMode = message["nightMode"]?.jsonPrimitive?.booleanOrNull == true,
                     ac3Encode = message["ac3Encode"]?.jsonPrimitive?.booleanOrNull == true,
-                    speakers = message["speakerRender"]?.jsonPrimitive?.booleanOrNull == true,
                 )
             }
             "youtube-resolve" -> youtube.resolve(

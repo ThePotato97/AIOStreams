@@ -341,11 +341,11 @@ msgstr ""
 msgid "24-hour ({twentyFour})"
 msgstr ""
 
-#: src/app/settings/audio.tsx
+#: src/lib/playback/sound.ts
 msgid "5.1 surround"
 msgstr ""
 
-#: src/app/settings/audio.tsx
+#: src/lib/playback/sound.ts
 msgid "7.1 surround"
 msgstr ""
 
@@ -719,9 +719,9 @@ msgstr ""
 msgid "Auto-play the first version"
 msgstr ""
 
-#: src/app/settings/audio.tsx
 #: src/app/settings/interface.tsx
 #: src/app/settings/playback.tsx
+#: src/lib/playback/sound.ts
 msgid "Automatic"
 msgstr ""
 
@@ -869,8 +869,8 @@ msgstr ""
 msgid "Built-in player"
 msgstr ""
 
-#: src/app/settings/audio.tsx
-msgid "Built-in speakers"
+#: src/lib/playback/sound.ts
+msgid "Built-in speakers (Dolby Atmos)"
 msgstr ""
 
 #: src/app/settings/theme.tsx
@@ -2068,6 +2068,10 @@ msgstr ""
 msgid "Headphones"
 msgstr ""
 
+#: src/lib/playback/sound.ts
+msgid "Headphones (Dolby Atmos)"
+msgstr ""
+
 #: src/features/player/subtitle-sync.tsx
 msgid "Heard"
 msgstr ""
@@ -2840,6 +2844,10 @@ msgstr ""
 
 #: src/app/calendar/page.tsx
 msgid "Next month"
+msgstr ""
+
+#: src/features/player/options.tsx
+msgid "Next output"
 msgstr ""
 
 #: src/lib/input/actions.ts
@@ -3846,6 +3854,10 @@ msgstr ""
 msgid "Previous month"
 msgstr ""
 
+#: src/features/player/options.tsx
+msgid "Previous output"
+msgstr ""
+
 #: src/lib/input/keys.ts
 msgid "Previous track"
 msgstr ""
@@ -4092,10 +4104,6 @@ msgstr ""
 
 #: src/app/settings/audio.tsx
 msgid "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
-msgstr ""
-
-#: src/app/settings/audio.tsx
-msgid "Renders Dolby Atmos and surround sound for this device's own two speakers, as Dolby Atmos for built-in speakers does. Plays through mpv. Not for sound passed through, or for headphones."
 msgstr ""
 
 #: src/features/playlists/playlists.tsx
@@ -4806,6 +4814,10 @@ msgstr ""
 msgid "Sound"
 msgstr ""
 
+#: src/features/player/options.tsx
+msgid "Sound for"
+msgstr ""
+
 #: src/app/history/page.tsx
 msgid "Source"
 msgstr ""
@@ -4877,8 +4889,8 @@ msgstr ""
 msgid "Stays as it is"
 msgstr ""
 
-#: src/app/settings/audio.tsx
 #: src/lib/playback/controller.ts
+#: src/lib/playback/sound.ts
 msgid "Stereo"
 msgstr ""
 
@@ -6112,6 +6124,10 @@ msgstr ""
 
 #: src/app/settings/playback.tsx
 msgid "What the people you watch with say shows for a few seconds. It always stays in the party's chat."
+msgstr ""
+
+#: src/app/settings/audio.tsx
+msgid "What the sound is played for. The Dolby Atmos choices render Atmos and surround sound for this device's own speakers or for headphones; Automatic picks between them from the output in use, and passes through or decodes for HDMI and receivers as before."
 msgstr ""
 
 #: src/app/settings/cache.tsx
