@@ -1,6 +1,7 @@
 //! Messages between the page and the shell.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -157,6 +158,10 @@ pub enum Inbound {
     Fullscreen {
         value: Option<bool>,
     },
+    /// Shrinks the window to the video, over other windows; `None` toggles.
+    Pip {
+        value: Option<bool>,
+    },
     /// The video small over the page, where its mini player leaves room; none fills the window
     /// behind the page again.
     PlayerFrame {
@@ -204,6 +209,11 @@ pub enum Inbound {
     WebError {
         message: String,
     },
+    /// A line the page writes to the app's log.
+    Log {
+        level: PageLogLevel,
+        message: String,
+    },
     /// What Discord shows the user doing; `None` clears it.
     Presence {
         presence: Option<Presence>,
@@ -241,6 +251,44 @@ pub enum Inbound {
     DownloadConfig {
         concurrent: u32,
     },
+}
+
+static REFUSED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// A page message, or `None` for one this version can't read, logged once per type.
+pub fn parse(body: &str) -> Option<Inbound> {
+    let error = match serde_json::from_str(body) {
+        Ok(message) => return Some(message),
+        Err(e) => e.to_string(),
+    };
+    let kind = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["type"].as_str().map(String::from))
+        .unwrap_or_default();
+    if REFUSED.lock().is_ok_and(|mut r| r.insert(kind.clone())) {
+        if error.starts_with("unknown variant") {
+            log::warn!("ignored {kind} messages, which this version doesn't know");
+        } else {
+            log::warn!("ignored a {kind} message: {error}");
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PageLogLevel {
+    Info,
+    Warn,
+}
+
+impl From<PageLogLevel> for log::Level {
+    fn from(level: PageLogLevel) -> Self {
+        match level {
+            PageLogLevel::Info => log::Level::Info,
+            PageLogLevel::Warn => log::Level::Warn,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +344,8 @@ pub enum Outbound {
     YoutubeResolved {
         request: String,
         url: Option<String>,
+        #[serde(rename = "originalLanguage", skip_serializing_if = "Option::is_none")]
+        original_language: Option<String>,
     },
     PlayerState {
         #[serde(flatten)]
@@ -340,6 +390,10 @@ pub enum Outbound {
         gamma: Option<String>,
         primaries: Option<String>,
     },
+    /// For the app's picture-in-picture window; never sent to the page.
+    VideoAspect {
+        aspect: Option<f64>,
+    },
     PlayerEnded {
         reason: &'static str,
         error: Option<String>,
@@ -360,6 +414,9 @@ pub enum Outbound {
         error: Option<String>,
     },
     Fullscreen {
+        value: bool,
+    },
+    Pip {
         value: bool,
     },
     /// A click on the small video (`tap`), a drag of it starting (`grabbed`), where it is as it

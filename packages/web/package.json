@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "preview": "rsbuild preview",
     "lint": "eslint src",
-    "i18n:extract": "lingui extract --clean && lingui extract-template"
+    "i18n:extract": "lingui extract --clean && lingui extract-template",
+    "test": "vitest run --passWithNoTests"
   },
   "browserslist": [
     "chrome >= 94",
@@ -22,7 +23,9 @@
   ],
   "devDependencies": {
     "@aiostreams/core": "workspace:*",
+    "@aiostreams/jassub": "^0.1.0",
     "@aiostreams/ui": "workspace:*",
+    "@aiostreams/webgpu-player": "^0.5.0",
     "@fontsource/inter": "^5.3.0",
     "@jellyfin/sdk": "^1.0.2",
     "@lingui/cli": "^6.10.1",

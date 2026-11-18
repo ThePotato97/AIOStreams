@@ -3,10 +3,10 @@ import { t } from '@lingui/core/macro';
 import { Button } from '@aiostreams/ui/button';
 import { toast } from 'sonner';
 import { copyToClipboard } from '@aiostreams/ui/utils/clipboard';
-import { party, useParty } from '../party/party';
-import { usePartyIdentity } from '../party/actions';
-import { playbackNow } from '../playback/session';
-import { partyItemTitle } from '../party/items';
+import { party, useParty } from '@/lib/party/party';
+import { usePartyIdentity } from '@/lib/party/actions';
+import { playbackNow } from '@/lib/playback/session';
+import { partyItemTitle } from '@/lib/party/items';
 import { GuestApi } from './api';
 
 const active = new Set<string>();
@@ -16,6 +16,10 @@ const links = new Map<string, string>();
  * no entries, so the queue must be published again even if it is unchanged.
  */
 let binding = 0;
+/** One toast for the guest queue, however often publishing fails. */
+const TOAST_ID = 'guest-publish';
+/** How long publishing keeps failing before the host is told. */
+const PERSISTENT_FAILURE_MS = 30_000;
 export function useGuestPublication() {
   const state = useParty();
   const identity = usePartyIdentity();
@@ -31,7 +35,9 @@ export function useGuestPublication() {
     const api = new GuestApi(base, identity.token);
     let stopped = false,
       busy = false,
-      last = '';
+      last = '',
+      failingSince = 0,
+      reported = false;
     const publish = async () => {
       const proof = party.hostProof();
       if (!proof || !active.has(proof.party) || stopped || busy) return;
@@ -58,14 +64,30 @@ export function useGuestPublication() {
       try {
         await api.request('/publish', { ...proof, entries });
         last = serialized;
+        failingSince = 0;
+        reported = false;
       } catch (error) {
-        if ((error as { status?: number }).status === 404) {
+        const status = (error as { status?: number }).status;
+        if (status === 404) {
           // The server lost the binding (disabled elsewhere or restarted).
           active.delete(proof.party);
           links.delete(proof.party);
           last = '';
+          if (!stopped) toast.error((error as Error).message, { id: TOAST_ID });
+          return;
         }
-        if (!stopped) toast.error((error as Error).message);
+        // Retried every tick: a refusal while the party reconnects (coming
+        // back to the app) clears itself, so only one that lasts is shown,
+        // and once.
+        failingSince ||= Date.now();
+        if (
+          !stopped &&
+          !reported &&
+          Date.now() - failingSince >= PERSISTENT_FAILURE_MS
+        ) {
+          reported = true;
+          toast.error((error as Error).message, { id: TOAST_ID });
+        }
       } finally {
         busy = false;
       }

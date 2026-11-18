@@ -1,4 +1,4 @@
-import { blobAddress, type BlobAddress } from '../artwork';
+import { blobAddress, type BlobAddress } from '@/lib/artwork/shrink';
 import type { PlayerEngine, Thumbnail } from './engine';
 
 /** The seek bar's picture: the newest answer to the positions it asks for, cleared when it stops asking. */
@@ -26,7 +26,7 @@ const ROW_KEPT = 16;
 /** How long an ask may still be answered, after the app drops it for a newer one. */
 const ANSWERABLE_MS = 15_000;
 
-type Open = (
+export type Open = (
   onThumbnail: (thumbnail: Thumbnail | null) => void
 ) => ReturnType<NonNullable<PlayerEngine['thumbnails']>>;
 

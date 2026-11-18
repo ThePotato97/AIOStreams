@@ -5,7 +5,6 @@ import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
-import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -15,6 +14,7 @@ import io.github.viren070.aiostreams.exoplayer.subtitles.SampleParser
 import io.github.viren070.aiostreams.exoplayer.subtitles.SubtitleStyle
 import io.github.viren070.aiostreams.exoplayer.subtitles.TextSink
 import io.github.viren070.aiostreams.exoplayer.video.VideoFrames
+import io.github.viren070.aiostreams.logs.AppLog
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
@@ -92,8 +92,8 @@ internal class AssSurface(context: Context, private val frames: VideoFrames, fon
     private val converted = HashSet<String>()
     private val textTracks = HashMap<String, AssTextTrack>()
 
-    /** Each file track's latest lines, which libass gets once the track shows; it holds only the shown one's. */
-    private val recent = HashMap<String, ArrayDeque<AssLine>>()
+    /** The file tracks' latest lines, which libass gets once a track shows; it holds only the shown one's. */
+    private val recent = RecentLines()
     private val fonts = AssFonts()
     private var shown: String? = null
     private var width = 0
@@ -122,7 +122,7 @@ internal class AssSurface(context: Context, private val frames: VideoFrames, fon
     init {
         worker.post {
             handle = AssNative.create(font().path)
-            if (handle == 0L) Log.e(TAG, "libass.so can't be loaded")
+            if (handle == 0L) AppLog.e(TAG, "libass.so can't be loaded")
             // The surface may have come first.
             shower.post(::attachWindow)
         }
@@ -168,7 +168,7 @@ internal class AssSurface(context: Context, private val frames: VideoFrames, fon
             override fun sample(track: String, timeUs: Long, data: ByteArray) = queue(opened) {
                 val text = textTracks[track] ?: return@queue
                 runCatching { text.read(timeUs, data) { addLine(track, it) } }
-                    .onFailure { Log.w(TAG, "couldn't read a subtitle line", it) }
+                    .onFailure { AppLog.w(TAG, "couldn't read a subtitle line", it) }
             }
         }
     }
@@ -216,7 +216,7 @@ internal class AssSurface(context: Context, private val frames: VideoFrames, fon
     fun select(key: String?) = queue {
         if (key != shown) {
             shown?.takeIf { it !in scripts }?.let(tracks::get)?.let(AssNative::flushTrack)
-            tracks[key]?.let { track -> recent[key]?.forEach { AssNative.addLine(track, it.bytes, it.startMs, it.durationMs) } }
+            tracks[key]?.let { track -> recent.forEach(key) { AssNative.addLine(track, it.bytes, it.startMs, it.durationMs) } }
         }
         val restyle = (key in converted) != (shown in converted)
         shown = key
@@ -326,9 +326,7 @@ internal class AssSurface(context: Context, private val frames: VideoFrames, fon
     }
 
     private fun addLine(track: String, line: AssLine) {
-        val lines = recent.getOrPut(track) { ArrayDeque() }
-        lines += line
-        while (lines.isNotEmpty() && lines.first().endMs < frameUs / 1000 - KEPT_MS) lines.removeFirst()
+        recent.add(track, line, frameUs / 1000)
         if (track == shown) tracks[track]?.let {
             AssNative.addLine(it, line.bytes, line.startMs, line.durationMs)
             linesFrom(line.startMs)
@@ -348,7 +346,7 @@ internal class AssSurface(context: Context, private val frames: VideoFrames, fon
         if (giving.isEmpty()) return false
         for (font in giving) {
             runCatching { AssNative.addFont(handle, font.file.name, font.file.readBytes()) }
-                .onFailure { Log.w(TAG, "couldn't read ${font.file.name}", it) }
+                .onFailure { AppLog.w(TAG, "couldn't read ${font.file.name}", it) }
         }
         AssNative.reloadFonts(handle)
         styled = null
@@ -524,8 +522,5 @@ internal class AssSurface(context: Context, private val frames: VideoFrames, fon
 
         /** Frames' times kept from before the one showing, for a seek back. */
         const val KEPT_FRAMES_US = 5_000_000L
-
-        /** Lines a track keeps from before the playhead, for one it shows later; signs can stay up a while. */
-        const val KEPT_MS = 30_000L
     }
 }

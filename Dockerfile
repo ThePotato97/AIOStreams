@@ -4,6 +4,50 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
+# atmos-render's audio decoder packages for the WebGPU player, and the corresponding source FFmpeg's
+# LGPL asks for (services/atmos-render/package/build.sh). WebAssembly, the same on every platform, so
+# built once, on the build machine's. Emscripten 4.0.13 (the engine's) comes from emsdk at that
+# release's commit, which has native amd64 and arm64 toolchains (its Docker image is amd64 only).
+FROM --platform=$BUILDPLATFORM node:24.18.1-bookworm AS atmos-packages
+ARG EMSDK_COMMIT=404dc1ec13f64fce1af1eaf5c007e18212f63527
+ENV RUSTUP_HOME=/rustup CARGO_HOME=/cargo
+RUN git init -q /emsdk \
+  && git -C /emsdk fetch -q --depth 1 https://github.com/emscripten-core/emsdk.git "$EMSDK_COMMIT" \
+  && git -C /emsdk checkout -q FETCH_HEAD \
+  && /emsdk/emsdk install 4.0.13 \
+  && /emsdk/emsdk activate 4.0.13
+ENV EMSDK=/emsdk EM_CONFIG=/emsdk/.emscripten PATH=/cargo/bin:/emsdk:/emsdk/upstream/emscripten:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+    --default-toolchain 1.97.0 --target wasm32-unknown-unknown --target wasm32-unknown-emscripten
+COPY services/atmos-render /atmos-render
+RUN sh /atmos-render/package/build.sh /packages
+
+# The WebGPU player the web app serves: its engine rebuilt from the pinned source with this fork's
+# patch, with the packages above (packages/web/webgpu-player/build.mjs). Also built once. On the
+# packages' stage, whose Rust (rustup) builds the patched Dolby Vision RPU parser with the crate's
+# pinned toolchain.
+FROM atmos-packages AS webgpu-player
+WORKDIR /build
+COPY pnpm-lock.yaml ./
+COPY packages/web/webgpu-player ./packages/web/webgpu-player
+COPY --from=atmos-packages /packages /atmos-packages
+# The published package at the pinned version, which build.mjs checks against pnpm-lock.yaml.
+# The Dolby Vision display management, from the private dovi-dm submodule when the build checked it
+# out (CI does with the DOVI_DM_SSH_KEY secret); without it the player keeps the engine's tone map.
+RUN npm pack --silent --pack-destination /tmp \
+    "@aiostreams/webgpu-player@$(node -p "require('./packages/web/webgpu-player/engine.json').tag.slice(1)")" \
+  && dm="" \
+  && if [ -f packages/web/webgpu-player/dovi-dm/webgpu/build.sh ]; then \
+       sh packages/web/webgpu-player/dovi-dm/webgpu/build.sh /dovi-dm && dm="--dm /dovi-dm"; \
+     fi \
+  && node packages/web/webgpu-player/build.mjs --packages /atmos-packages \
+    --published /tmp/aiostreams-webgpu-player-*.tgz $dm
+
+# The player alone. CI builds this target once and passes it to both platforms' builds as a named
+# build context of the same name, which replaces this stage there; a plain `docker build` builds it.
+FROM scratch AS webgpu-player-dist
+COPY --from=webgpu-player /build/packages/web/webgpu-player/dist /
+
 FROM base AS builder
 
 WORKDIR /build
@@ -46,6 +90,7 @@ COPY packages/web ./packages/web
 COPY packages/crypto ./packages/crypto
 COPY scripts ./scripts
 COPY resources ./resources
+COPY --from=webgpu-player-dist / ./packages/web/webgpu-player/dist
 
 
 # Build the project.

@@ -30,7 +30,7 @@ function Expand-Download($url, $name, $sha, $out, $mode, [string[]]$files) {
 
 $libs = $pin['libs']
 $zip = "libs-windows-$Arch.zip"
-$url = "https://github.com/AIOStreams/libs/releases/download/$libs/$zip"
+$url = "https://github.com/ThePotato97/libs/releases/download/$libs/$zip"
 Expand-Download $url $zip $pin["libs_$Arch"] $vendor x
 Set-Content (Join-Path $vendor 'libmpv.version') $libs
 

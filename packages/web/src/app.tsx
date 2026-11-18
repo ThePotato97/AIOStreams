@@ -1,4 +1,4 @@
-import { GuestPage } from './pages/guest';
+import { GuestPage } from '@/app/guest/page';
 import React from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import { RouterProvider } from '@tanstack/react-router';
@@ -9,17 +9,21 @@ import { ThemeProvider } from 'next-themes';
 import { Toaster } from '@aiostreams/ui/toaster';
 import { DirectionProvider } from '@aiostreams/ui/core/direction';
 import { LoadingOverlay } from '@aiostreams/ui/loading-spinner';
-import { pickerAccount, SessionProvider, useSessionPhase } from './lib/session';
+import {
+  pickerAccount,
+  SessionProvider,
+  useSessionPhase,
+} from './lib/jellyfin/session';
 import { webRouter } from './router';
-import { SignInScreen, Unreachable, UserPicker } from './pages/sign-in';
-import { PageBackground } from './components/layout';
-import { apiBase, JellyfinClient } from './lib/client';
+import { SignInScreen, Unreachable, UserPicker } from './app/sign-in/page';
+import { PageBackground } from './components/shell/layout';
+import { apiBase, JellyfinClient } from './lib/jellyfin/client';
 import { navigate, to } from './lib/paths';
 import {
   NO_SERVER_INFO,
   ServerInfoProvider,
   useServerInfoQuery,
-} from './lib/server-info';
+} from './lib/jellyfin/server-info';
 import {
   currentServer,
   enterServer,
@@ -28,9 +32,9 @@ import {
   savedServers,
   serverAddress,
   type SavedServer,
-} from './lib/servers';
+} from './lib/jellyfin/servers';
 import { holdRemote, sendRemote } from './lib/remote/commands';
-import { ServersPage } from './pages/servers';
+import { ServersPage } from './app/servers/page';
 import { currentHost } from './lib/hosts';
 import { isRtl } from './lib/i18n';
 import { ShellSetup, shellHost, useShellLinks } from './lib/hosts/shell';
@@ -41,10 +45,11 @@ import {
   ConfirmationDialog,
   useConfirmationDialog,
 } from '@aiostreams/ui/shared/confirmation-dialog';
-import { ServerStyles, ThemeStyles } from './components/theme-styles';
-import { WindowControls } from './components/window-controls';
-import { InputSetup } from './components/input-setup';
-import { CrashReportDialog } from './components/crash-report';
+import { ServerStyles, ThemeStyles } from './components/shell/theme-styles';
+import { WindowControls } from './components/shell/window-controls';
+import { InputSetup } from './components/shell/input-setup';
+import { CrashReportDialog } from './components/shell/crash-report';
+import { SplashEnd } from './lib/splash';
 
 /** The web app served at the Jellyfin API's `/web`. */
 export default function JellyfinWebApp() {
@@ -218,6 +223,7 @@ function Standalone() {
           ) : (
             <ServerInfoProvider value={NO_SERVER_INFO}>
               <ServersPage key={linked} onChoose={choose} address={linked} />
+              <SplashEnd />
             </ServerInfoProvider>
           )}
         </motion.div>
@@ -262,6 +268,9 @@ function Session({
     if (ready) currentHost().signedIn?.(ready.client);
   }, [ready]);
 
+  const waiting =
+    phase.kind === 'loading' ||
+    (phase.kind === 'signed-out' && infoQuery.isLoading);
   let screen: React.ReactNode;
   switch (phase.kind) {
     case 'loading':
@@ -338,6 +347,7 @@ function Session({
           transition={{ duration: 0.18 }}
         >
           {screen}
+          {!waiting && <SplashEnd />}
         </motion.div>
       </AnimatePresence>
     </ServerInfoProvider>

@@ -1,0 +1,567 @@
+---
+title: Live TV and a full player in your browser
+description: Live TV with a programme guide and catch-up, a full player in the browser, anime upscaling, trailers that play by themselves, and the apps in 12 more languages.
+date: 2026-11-14
+version: 2.38.0
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+{/* Screenshots go in packages/docs/public/changelog/v2.38/ and are linked as ![Alt](/changelog/v2.38/name.png). Only add the link once the file exists: a missing image fails the docs build. */}
+
+v2.38 brings **Live TV** to every AIOStreams app and makes the app in a browser a **full player**.
+The apps also upscale anime as they play, play trailers by themselves, work properly with any
+Jellyfin server and come in 12 more languages. And AIOStreams has a new home at
+[aiostreams.org](https://aiostreams.org).
+
+What's in it:
+
+- **[Live TV](#live-tv)**: the channels from your IPTV provider or your addons, with a programme
+  guide, catch-up and reminders, and a new **Xtream** addon for your provider's login.
+- **[A full player in your browser](#a-full-player-in-your-browser)**: HEVC, Dolby Vision, TrueHD
+  and DTS, audio tracks, a file's own subtitles, and styled subtitles drawn as their authors made
+  them.
+- **[Anime upscaling](#anime-upscaling)**: sharper lines and cleaner compression, as it plays.
+- **[Trailers that play by themselves](#trailers-that-play-by-themselves)** in cards, the featured
+  title and behind a title's page.
+- **[Any Jellyfin server](#with-any-jellyfin-server)**: transcoding, the server's chapters and seek
+  previews, sorting and filtering.
+- **[12 more languages](#the-apps-in-your-language)**, translated by the community.
+- **[Who gets this](#who-gets-this)** on the configure page: give an addon or catalog to some of
+  your users without writing a variant.
+- **[More in the app](#more-in-the-app)**: a mini player, picture-in-picture, a background from
+  the title's artwork, a rating from each source, chapters with pictures, a pause screen and more.
+- **[Around AIOStreams](#around-aiostreams)**: the docs at aiostreams.org, the app at
+  web.aiostreams.org, and Watch Import for moving from Stremio or Nuvio.
+
+Self-hosters should read [Upgrading](#upgrading): instances now ask search engines not to list
+them, and variants share one work budget in place of six limits.
+
+## Live TV
+
+Live TV puts the channels from every addon in your configuration on one page, grouped, numbered and
+searchable, with a guide of what's on. It's in every AIOStreams app: in a browser, on computers,
+phones and tablets, and on TVs. Once your configuration has channels, **Live TV** shows in the
+navigation.
+
+![Live TV in the desktop app: the programme guide, with the playing channel in a preview above it and its programme's details beside it](/changelog/v2.38/live-tv-guide.webp)
+
+Channels come from addons, like everything else in AIOStreams:
+
+- **Your IPTV provider.** The new **Xtream** addon, in the configure page's marketplace, signs in
+  with the server address, username and password your provider gave you. It brings the provider's
+  channels, their groups and their guide, and earlier programmes where the provider keeps them.
+- **Free channels**, from marketplace addons such as **USA TV** and **Debridio TV**.
+- **Any addon with channels**, added by its URL, such as one that reads an M3U playlist and an XMLTV
+  guide.
+
+On the Live TV page:
+
+- **The guide.** **Guide** and **Channels** switch between the programme guide and a plain list, on
+  screens wide enough for a guide. **Days** step through it: today, tomorrow, and earlier days for
+  channels with catch-up.
+- **Groups.** **Favourites** and **Recent** come first, then **All channels** and the groups your
+  addons send. With many groups, a button opens them in a list you can search.
+- **Channel numbers.** Type a number on a keyboard or remote to go to that channel. Channels keep
+  the numbers their addon gives them, or are numbered in order.
+- **Watching.** A channel plays in a preview at the top of the page, so you can keep looking
+  through the guide. **Full screen** opens the player, where channel up and down, or Page Up and
+  Page Down, change channel and **Previous channel** goes back to the last one. Pause and you fall
+  behind live; **Go live** catches up. A channel that drops is reopened by itself.
+- **Programmes.** Select one for its details: **From the start** plays the programme on now from
+  its beginning, and **Remind me** asks, when a later one starts, whether to switch to it.
+- **Catch-up.** Where a provider keeps the last few days of a channel, its past programmes play
+  from the start, as a recording you can pause and seek.
+- **Favourites** go in their own group, on the **Favourites** page and in a row on Home, and
+  **Start on** under **Settings → Interface** can open the app on Live TV.
+- **Search** finds channels by name or number, next to films and shows.
+
+The page reopens on the channel you were last on. Live channels start without subtitles, and the
+audio and subtitles you pick are kept for each channel.
+
+![Live TV in the Android app on a TV: the channel list beside a card for the focused channel, with the channel playing in its preview](/changelog/v2.38/live-tv-tv.webp)
+
+![Two phones: Live TV's channel list with a channel playing at the top, and Home with a row of favourite channels and the mini player](/changelog/v2.38/live-tv-phones.webp)
+
+The same channels show in Stremio, where the guide fills Stremio's own, and Jellyfin apps get them
+as Live TV too. [Live TV](/apps/live-tv) has the details. The channels shown are made up, playing
+_Sintel_ and _Tears of Steel_, © Blender Foundation, shared under
+[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
+
+## A full player in your browser
+
+The app in a browser, from your instance's `/web` or at [web.aiostreams.org](#around-aiostreams),
+used to play only what the browser decodes itself. MKV files, HEVC video and surround sound often
+failed, there was no way to switch audio tracks, a file's own subtitles didn't show, and styled
+subtitles came out as plain text. Now the player reads and decodes the file itself with the new
+**WebGPU engine**, and draws it with the graphics card, so a browser plays much like the apps:
+
+- **More files play**: HEVC and Dolby Vision video, and AC-3, E-AC-3, TrueHD and DTS sound, in MKV
+  and MP4 files.
+- **Audio tracks.** The audio menu switches between a file's tracks, for another language or a
+  commentary.
+- **The file's own subtitles.** The subtitle tracks inside an MKV or MP4 file show in the subtitle
+  menu: ASS, SRT, WebVTT, MP4's own text subtitles, and PGS, the picture subtitles on Blu-rays.
+- **Styled subtitles as their authors made them.** ASS and SSA subtitles are drawn with libass, the
+  renderer mpv uses, so their styling, positions, signs, karaoke, animations and the fonts attached
+  to the file look as they do in the desktop and Android apps.
+- **Automatic subtitle syncing.** A subtitle from your addons, or a file you add, is synced to the
+  file's own subtitles by itself, and one made for another frame rate is retimed first.
+- **Picture-in-picture** with the player's subtitles and controls. See
+  [Mini player and picture-in-picture](#mini-player-and-picture-in-picture).
+- **Anime upscaling and your own shaders.** See [Anime upscaling](#anime-upscaling).
+- **Live channels and other HLS streams** play in every browser, not only those that play HLS
+  themselves.
+- **A stats panel** on **I**.
+
+None of it needs setting up. On a screen with HDR, turn on **HDR output** under **Settings →
+Playback → Player** to show HDR video in HDR, instead of converted to standard range.
+
+![Sintel playing in a browser with the WebGPU engine: a styled sign reading The Land of the Gatekeepers over the picture, a subtitle line below it, and the audio menu open on the file's AC-3 5.1 and DTS 5.1 tracks](/changelog/v2.38/browser.webp)
+
+### When the browser's own player plays
+
+The WebGPU engine needs a browser with WebGPU, such as Chrome, Edge or Firefox, on a page opened
+over HTTPS. It also needs the file's host to let the browser read the file: streams through
+AIOStreams' proxy or its usenet streaming do, and so does TorBox.
+
+Otherwise, and for live channels and streams that need extra headers, the browser's own player
+plays as before. It still draws styled subtitles with libass, and shows a file's own subtitle tracks
+where the host allows. If the engine can't play a version, as it opens or partway through, the
+browser's player takes over at the same point, with the same audio and subtitles. **Engine** under
+**Settings → Playback → Player** switches to the browser's own player for everything.
+
+## Anime upscaling
+
+The desktop and Android apps, and the [WebGPU engine](#a-full-player-in-your-browser) in a browser,
+can upscale anime as it plays: lines come out sharper and compression cleaner, most of all in older
+and lower-resolution shows. Turn on **Anime upscaling** under **Settings → Playback → Video**.
+
+<CompareSlider
+  before={{
+    src: '/changelog/v2.38/upscaling-before.webp',
+    alt: 'A 480p Naruto frame, scaled up the usual way',
+    label: 'Usual scaling',
+  }}
+  after={{
+    src: '/changelog/v2.38/upscaling-after.webp',
+    alt: "The same frame scaled by the app's anime upscaling, with cleaner, sharper lines",
+    label: 'Anime upscaling',
+  }}
+  width={1440}
+  height={1080}
+  className="my-6"
+/>
+
+- **Only anime.** It applies to the shows and films your catalogs mark as anime, and on other
+  Jellyfin servers to titles with an Anime genre or tag. Everything else plays as it was.
+- **On the graphics processor.** It leaves HDR video, and video about as large as the screen, as
+  they are, and turns itself off for a video the device can't keep up with. On Android it works in
+  both ExoPlayer and mpv, and uses more battery.
+- **Compare it.** In the desktop app and a browser, **U** turns it on and off for what's playing.
+- **Or bring your own.** The Android app's built-in mpv now takes your own shaders, with **Add a
+  shader** under **Settings → Android app**, as the desktop app's mpv folder already does. In a
+  browser, **Shaders** under **Settings → Playback → Player** takes `.wgsl` files; they stay in
+  that browser and apply in name order. mpv's GLSL shaders need converting first.
+
+## Trailers that play by themselves
+
+![Home on a TV, with the Project Hail Mary card in the Popular row opened out to a wide picture, its trailer playing under its logo, scores and synopsis, and the posters after it moved along](/changelog/v2.38/trailer-card.webp)
+
+Rest on a title for a moment and its trailer plays:
+
+- **In cards.** A moment after a card on Home opens out, its trailer plays in it, and its details
+  fade away. Move on and it stops. See [Cards you rest on](#home) for how cards open.
+- **In the featured title.** When the featured title follows the card you're on, or sits in the
+  corner, the card's trailer plays in a wide box at the top of Home. When it rotates, a title's
+  trailer plays once you've gone to it yourself: up from the rows, turning to it, or picking its
+  dot.
+- **Behind a title's page.** Left at the top of a title's page for a few seconds, its trailer plays
+  behind the page. **Up**, **Playback controls** or the page's trailer button shows it whole with
+  the player's controls, carrying on from where it was, and **Back** returns to the page with it
+  still playing.
+
+![Project Hail Mary's page on a TV with its trailer playing behind it, Playing and the trailer's name in the corner, and Press Up for playback controls at the top](/changelog/v2.38/trailer-title.webp)
+
+**Play by themselves** under **Settings → Interface** picks where they play. They're on with a
+mouse and on TVs, and off on phones and tablets. **Sound** beside it plays them with sound, on by
+default only on TVs, and a trailer you open whole always has sound. On Samsung TVs they play by
+themselves only with Sound on. They wait while something plays, during a watch party, and when your
+device asks for reduced motion or your browser is saving data.
+
+## With any Jellyfin server
+
+The AIOStreams app signs in to Jellyfin servers as well as to your configuration, and now works
+properly with Jellyfin's own:
+
+- **Transcoding.** When the player can't play a version, the server converts it. **Quality** under
+  **Settings → Playback**, and a quality menu in the player, set the most a stream may take, for a
+  slow connection. Both show where your account may transcode; AIOStreams itself never transcodes.
+- **Chapters and seek previews** come from the server's chapters and trickplay pictures.
+- **Sorting and filtering.** A Jellyfin server's libraries sort by name, date added, release date,
+  rating or runtime, and filter to what's in progress, watched or a favourite. **Favourites** sorts
+  by date added, name, release date or rating.
+- **Search** finds collections and episodes too.
+- **One version plays at once.** A title with a single version, as most in a Jellyfin library,
+  plays without the version list.
+- **Home** shows each library's newest additions first.
+- **Your account's permissions.** Downloads and settings follow what the server lets your account
+  do.
+
+With [web.aiostreams.org](#around-aiostreams), a browser is all you need to use the app with a
+Jellyfin server.
+
+## The apps in your language
+
+The AIOStreams apps now come in **12 languages besides English**: Chinese (Simplified), French,
+German, Greek, Indonesian, Italian, Malay, Polish, Portuguese, Portuguese (Brazil), Spanish and
+Turkish. Choose yours under **Settings → Interface → Language**, or leave it on **System** to
+follow the device.
+
+A language shows in the apps once at least half of it is translated, so a half-done translation
+doesn't leave you switching between languages. Dutch, Swedish, Norwegian, Finnish, Slovenian and
+Catalan have been started and need help. Translations are made on
+[Hosted Weblate](https://hosted.weblate.org/engage/aiostreams/), with no coding needed, and the
+[translating guide](/guides/translating) explains the rest.
+
+## More in the app
+
+Everything here works in every app, in a browser too, unless it says otherwise.
+
+### Mini player and picture-in-picture
+
+**Mini player** in the player keeps the video going in a corner while you look around the app.
+Select it to open the player again, or set **Back in the player** under **Settings → Playback →
+Player** to open it with **Back**. It's in every app except on TVs, where Live TV's preview is the
+small player.
+
+![Home in the desktop app with Project Hail Mary featured, and the mini player in the bottom corner playing Sintel, with its title, a pause button and a close button below the video](/changelog/v2.38/mini-player.webp)
+
+**Picture-in-picture**, a new button in the player's controls, moves the video into a small window
+that stays over your other apps:
+
+- **In a browser.** In Chrome, Edge and Firefox, the whole player moves into the window, with its
+  subtitles, controls and seek bar. In Chrome and Edge, **Picture-in-picture** under **Settings →
+  Playback → Player** can use the browser's own window of the video alone instead, which is what
+  Safari shows.
+- **In the desktop app on Windows and macOS**, the app's window shrinks to the video, with its own
+  controls, keeps the video's shape as you resize it, and opens where you left it.
+- **In the Android app** on phones and tablets, the button does what leaving the app already did.
+
+### Background from artwork
+
+Turn on **Background from artwork** under **Settings → Theme**, and the artwork of the title you're
+on sits behind the pages, blurred and darkened: a title's page, the featured title on Home, or a
+card you rest on. It stays behind every page, Settings too, until you get to another title, and
+fades from one title's to the next.
+
+![The Rings of Power's page in the desktop app with Background from artwork on: its picture fades into a blurred, darkened brown behind the episodes, and an episode's menu on frosted glass shows the picture under it](/changelog/v2.38/art-background.webp)
+
+- **Panels to match.** Menus, lists, fields and cards over it take their colour from the artwork.
+- **Glass panels.** With **Glass surface** set to frosted or liquid glass, **Glass panels** puts
+  them on that glass instead, so the artwork shows through. Slower devices can feel the extra
+  drawing.
+- **Trailers** playing behind the featured title or a title's page fade into it at their edges.
+- **One colour instead.** [Custom CSS](/reference/web-app-css#one-colour-from-the-artwork) can swap
+  the blurred artwork for its colour alone.
+
+### Home
+
+![Home in the desktop app with Modern Family featured, Play and More info below its summary, and the Severance card in Continue watching grown into a preview with its episode, air date, time left and synopsis](/changelog/v2.38/card-preview.webp)
+
+- **Play for shows too.** The rotating featured title now has **Play** for shows as well as films,
+  where a show used to have only **More info**.
+- **Time on each title**, under **Settings → Interface**, sets how long the featured title stays on
+  each, and a mouse can now drag it along, as a swipe does.
+- **Cards you rest on.** While the featured title rotates, a card you rest on with a remote or the
+  keyboard opens out in its row to a wide picture with its details, and the cards after it slide
+  along. With a mouse it pops out a bigger preview over the row instead, so the cards under the
+  pointer stay put. Cards in grids, such as a catalog's page, pop out too. **Card you rest on**
+  under **Settings → Interface** picks which, or turns them off.
+- **Favourite channels** get a row of their own.
+
+### Ratings from each source
+
+Title pages show a badge for each score your metadata addon sends: IMDb, Rotten Tomatoes' critics
+and audience, Metacritic, Letterboxd, RogerEbert.com, Trakt, TMDB and MyAnimeList. Where room is
+short, as on Home, the first three show. AIOMetadata sends them once its critic ratings are on, and
+[custom CSS](/reference/web-app-css) can hide the ones you don't want.
+
+![Severance's page in the desktop app, with its IMDb, Rotten Tomatoes, Metacritic and Trakt scores beside its age rating, above its summary and Resume](/changelog/v2.38/title.webp)
+
+### Title pages
+
+- **Episodes** show their title first, with their air date and a menu button, and a bar slides to
+  the season that's open.
+- **Unaired episodes** are marked as such. The app asks before playing or downloading one, and
+  passes over them when playing on or downloading a season. **Mark unaired episodes** under
+  **Settings → Playback** turns it off, for shows whose air dates are often wrong.
+- **No spoilers, built in.** Blurring the episodes you haven't started used to take custom CSS. Now
+  **Blur episodes you haven't started**, under **Settings → Interface**, blurs their pictures,
+  titles and descriptions until you're on one.
+- **Every version.** The app lists up to 500 versions of a title, where it used to stop at your
+  configuration's **Versions per item**, which now applies only to Jellyfin apps.
+
+### In the player
+
+- **A pause screen.** Left paused for a few seconds, the player dims and shows what's playing: the
+  title, the episode and its synopsis.
+- **Chapters with pictures.** In the desktop and Android apps, **Chapters** lists a file's chapters
+  in a sheet, each with a picture.
+- **With a TV remote**, a press of left or right skips, and holding it scrubs through a row of
+  pictures of the video. A remote's channel buttons go to the next or previous chapter.
+- **Select** plays or pauses while the controls are hidden. Turn off **Show the controls on pause
+  and skip**, under **Settings → Playback**, to keep them hidden then.
+- **Subtitles glide.** When the controls show, subtitles now slide smoothly up above them and back
+  down after, instead of jumping.
+- **Styled subtitles from addons.** In the desktop and Android apps, ASS subtitles from your addons
+  keep their styling, where before they arrived as plain text.
+- **The time** shows in the player's top bar.
+- **Find versions when a title opens**, under **Settings → Playback**, looks for versions as soon
+  as a title's page opens, so **Play** doesn't wait.
+
+![Sintel paused in the desktop app with the Chapters sheet open beside it, showing a picture for each chapter and Chapter 03 marked as playing](/changelog/v2.38/chapters.webp)
+
+_Sintel_ is © Blender Foundation, shared under
+[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
+
+### On phones
+
+![Three phones: Home with Project Hail Mary centred and Play below it, Severance's page with its scores and a labelled row of actions ending in More, and its second season's episodes, each with its title first and its air date](/changelog/v2.38/phones.webp)
+
+- **Centred.** The featured title and a title's heading sit in the middle of the screen, and what's
+  over the artwork fades as you scroll.
+- **Actions in a row.** Below **Play**, a title's actions have labels: **Trailer**, **Watched**,
+  **Favourite** and the ones that fit, with the rest under **More**.
+- **Opening a title** grows its card into the page.
+- **Back swipe.** In the Android app, Android's back gesture slides the page away under your
+  finger.
+
+### Getting around
+
+- **Tabs along the top.** On a computer or a tablet held sideways, the tabs can run along the top
+  instead of down the side, under **Settings → Interface**. They, and the bar at the bottom of a
+  phone, can show their icons alone.
+- **Start on**, under **Settings → Interface**, picks the page the app opens on.
+- **The bottom bar** slides away while you scroll down, and back as you scroll up.
+- **Liquid glass** now bends what's behind it like a lens, with a lit rim. The navigation's
+  **Background** setting is now **Glass surface**, under **Settings → Theme**.
+
+### LG and Samsung TVs
+
+The TV apps keep the TV's own player, and get the browser's new subtitles:
+
+- **Styled subtitles as their authors made them**, drawn with libass instead of as plain text. Very
+  heavy typesetting can drop frames on a slower TV.
+- **The file's own subtitles.** The subtitle tracks inside an MKV or MP4 file show in the subtitle
+  menu, from any host, PGS included.
+- **Automatic subtitle syncing** to the file's own subtitles, as in the other apps.
+- **Trailers** now play, in the TV's own player, and
+  [by themselves](#trailers-that-play-by-themselves) as in the other apps.
+
+### The Android app
+
+- **Styled text subtitles in ExoPlayer.** ExoPlayer now draws SRT and other text subtitles with
+  libass too, so they look the same in both engines and slide smoothly.
+- **Smoother menus.** On a screen with a high refresh rate, the controls and menus over the video
+  move at its fastest rate, while the video itself keeps its own.
+- **Opening the app** shows its logo until the app is ready, instead of a blank screen.
+- **Fuller reports.** **Report a problem** sends more of the app's log, and after a crash, what the
+  app was doing just before.
+
+### Smaller things
+
+- **Playlists** can **Shuffle**, in a mixed order that stays the same until you turn it off, and
+  **Repeat**, going back to the first title after the last.
+- **Quick Connect.** **Quick Connect** under **Settings → Account** signs another device in as you,
+  with the code it shows.
+- **Time format** under **Settings → Interface** shows times of day, such as the player's clock and
+  the TV guide, in a 12- or 24-hour clock. On **Automatic**, the desktop and Android apps follow the
+  device's own setting.
+- **Faster on TVs.** Rows scroll with less work, artwork loads nearest first, at the size it's
+  drawn, and the player's controls show and hide with about a third of the work they took.
+- **Licences.** **About** lists the open source projects in the app, with their licences.
+- **More to style with custom CSS.** The new pages, the mini player, the player's top bar and
+  chapters, and the episode states have hooks. See [Web app CSS](/reference/web-app-css).
+
+## The configure page
+
+### Who gets this
+
+Giving an addon or catalog to only some of the people who use your configuration used to mean
+writing [variant](/reference/config-expressions) lines by hand. Now the people button beside each
+addon in **My Addons**, and each catalog in **Catalogs**, opens **Who gets this**, with a switch for:
+
+- **Each user** of your media server, such as a separate setup for the kids.
+- **Each variant you install from a link**, and the **base config** for install links without one.
+
+Turn one off and the configure page writes the variant lines for you. They stay yours to read and
+change under **Miscellaneous → Variants**, and
+[who gets an addon or catalog](/reference/config-expressions#who-gets-an-addon-or-catalog) explains
+the lines it writes.
+
+![The Who gets Library dialog on the configure page: switches for the users Alex, the primary user, Jordan, Sam and Kids, with Kids turned off, and for the base config under Install links](/changelog/v2.38/who-gets-this.webp)
+
+### Variants
+
+- **Back-to-back selectors** narrow the same list, so
+  `presets[type=torrentio][options.name*="4K"]` is only the Torrentio instances with 4K in their
+  name.
+- **Moving entries.** `move` reorders a list without writing its entries out, so
+  `move presets[type=comet] before [0]` puts Comet first. An addon or catalog moved this way keeps
+  its options, API keys included, out of the script, where a pasted copy would go stale. See
+  [moving entries](/reference/config-expressions#moving-entries).
+- **One work budget.** The variants on a request share a budget of work in place of six separate
+  limits, and an instance allows 50 variants by default, up from 10. See [Upgrading](#upgrading).
+
+### Also on the configure page
+
+- **The order of users.** Drag users in the **Users** tab into the order Jellyfin apps' sign-in
+  pickers list them in. The primary user stays first.
+- **Your own poster service.** **Custom URL** under **Services → Posters** takes a poster address
+  of your own, with placeholders such as `{imdb_id}` for each title's id.
+- **New in the marketplace**: a **Cinemeta** addon, and **SearchNZB** among the Newznab indexers.
+
+## The media server
+
+For Jellyfin apps signed in to your configuration:
+
+- **Live TV.** The channels, their groups and the guide show as Jellyfin's Live TV, and past
+  programmes with catch-up play from their start.
+- **Ratings.** A title's IMDb score is its community rating and its Rotten Tomatoes score its
+  critic rating, from your addons' [ratings](#ratings-from-each-source).
+- **Played at the right point.** The AIOStreams apps send the length of the file they played, so a
+  title is marked played at the right point even when its runtime from metadata is minutes off.
+
+## For addon developers
+
+- **Live TV.** A catalog of type `tv` or `channel` is a list of channels, with `genre` for their
+  groups, and a guide in Stremio's own format fills the programme guide, in Stremio too. Channel
+  numbers, logos and catch-up are covered in [Live TV](/reference/addon-protocol/live-tv).
+- **Ratings.** `ratings` on a meta lists each source's score, in the order to show them. See
+  [Metadata](/reference/addon-protocol/metadata#ratings).
+- **An addon SDK.** [`@aiostreams/addon-sdk`](https://github.com/AIOStreams/addon-sdk) handles the
+  routing, the configuration in the URL, a configure page built from your settings, and checks of
+  every answer, on Node, Bun, Deno and Cloudflare Workers. The new
+  [addon development guide](/guides/addon-development) walks through building one, trying it in
+  AIOStreams and hosting it.
+- **A tracker to learn from.** [Watch Import](https://github.com/Viren070/watch-import) is a
+  [Watch State](/reference/addon-protocol/watch-state) tracker built with the SDK: it reads your
+  history from Stremio or Nuvio and hands it to AIOStreams.
+
+## Around AIOStreams
+
+- **aiostreams.org.** The docs, this changelog and the app downloads moved from
+  docs.aiostreams.viren070.me to [aiostreams.org](https://aiostreams.org). Old links still work and
+  take you to the same page.
+- **The app at web.aiostreams.org.** [web.aiostreams.org](https://web.aiostreams.org) hosts the
+  AIOStreams app, so you can use it in any browser, even without your instance's own `/web`. Add
+  your configuration's media server or a Jellyfin server and sign in, and install it from the
+  browser to open it like an app. The server needs an `https://` address: a browser won't reach a
+  plain `http://` one from a secure page.
+- **Watch Import.** Coming from Stremio or Nuvio? [Watch Import](https://watch-import.viren070.me)
+  is a tracker addon that brings your watch history, Continue Watching and library into AIOStreams
+  and keeps them up to date. Add it to your configuration like any other addon. Its source is on
+  [GitHub](https://github.com/Viren070/watch-import).
+
+## For self-hosters
+
+### The Xtream addon
+
+The Xtream addon's settings are under **Settings → Built-ins**: how long a request may take
+(`BUILTIN_XTREAM_TIMEOUT`), its user agent (`BUILTIN_XTREAM_USER_AGENT`), how many requests go to
+one provider at once (`BUILTIN_XTREAM_HOST_CONCURRENCY`), how often channel lists and guides are
+fetched again (`BUILTIN_XTREAM_LINEUP_TTL`, `BUILTIN_XTREAM_GUIDE_TTL`), and how much memory each
+may use (`BUILTIN_XTREAM_LINEUP_MEMORY`, `BUILTIN_XTREAM_GUIDE_MEMORY`).
+
+### New settings
+
+- **Allow search engine indexing**, under **Settings → Branding** (`ALLOW_SEARCH_INDEXING`, off).
+  See [Upgrading](#upgrading).
+- **Max variant work per request**, under **Settings → User Limits** (`MAX_VARIANT_WORK`,
+  100000), in place of six variant limits. See [Upgrading](#upgrading).
+- **Max versions in the app**, under **Settings → Media server** (`JELLYFIN_MAX_APP_VERSIONS`,
+  500), how many versions the AIOStreams app lists. **Max versions per item**
+  (`JELLYFIN_MAX_VERSIONS`) now applies only to Jellyfin apps.
+- **Cinemeta**'s address, timeout and user agent, under **Settings → Presets** (`CINEMETA_URL`,
+  `DEFAULT_CINEMETA_TIMEOUT`, `DEFAULT_CINEMETA_USER_AGENT`).
+
+## Upgrading
+
+Nothing in this release changes install URLs or needs a manual migration. A few defaults change.
+
+**Search engines.** Every page an instance serves now asks search engines not to list it, with an
+`X-Robots-Tag: noindex` header, so your configure page drops out of search results over the next
+weeks. For a public instance you want people to find, turn on **Allow search engine indexing**
+under **Settings → Branding** (`ALLOW_SEARCH_INDEXING`).
+
+**Variant limits.** Variants on one request now share a work budget, **Max variant work per
+request** (`MAX_VARIANT_WORK`, 100000), where each instruction costs one plus one for every entry
+it looks through and every value it writes. It replaces `MAX_VARIANT_SCRIPT_LENGTH`,
+`MAX_VARIANT_TOTAL_SCRIPT_CHARACTERS`, `MAX_VARIANT_TOTAL_INSTRUCTIONS`, `MAX_VARIANT_PATH_MATCHES`,
+`MAX_VARIANT_VALUE_DEPTH` and `MAX_VARIANT_PATH_SEGMENTS`, which no longer do anything; scripts have
+no length limit of their own beyond `MAX_JSON_BODY_SIZE`. **Max variants** (`MAX_VARIANTS`) now
+defaults to 50, up from 10.
+
+**Resume points.** **Minimum resume percentage** under **Settings → Watch State**
+(`WATCH_STATE_MIN_RESUME_PERCENT`) now defaults to 0, so every position you stop at is kept. Set it
+back to 5 to leave titles stopped in their first moments out of Continue Watching.
+
+**Unaired episodes in Jellyfin apps.** **Mark unaired episodes**, in the media server's settings
+under **Save & Install**, is now off unless you turned it on. Jellyfin apps list upcoming episodes
+as normal ones, since some hide unaired episodes altogether. The AIOStreams app still marks them and
+asks before playing one.
+
+## Credits
+
+Thanks to everyone who contributed to this release: [@chrisk325](https://github.com/chrisk325),
+[@itscaptainjack](https://github.com/itscaptainjack),
+[@JinbeiStudio](https://github.com/JinbeiStudio), [@kaziqta](https://github.com/kaziqta),
+[@MidnightKittenCat](https://github.com/MidnightKittenCat),
+[@PanagiotisKaraliolios](https://github.com/PanagiotisKaraliolios),
+[@SAY-5](https://github.com/SAY-5),
+[@thomasrtg](https://github.com/thomasrtg), [@Vidhin05](https://github.com/Vidhin05), [@webstreamr](https://github.com/webstreamr), [@WildToastyMop](https://github.com/WildToastyMop)
+and [@yahya637](https://github.com/yahya637).
+
+And to the translators, who put the apps into Italian
+([mochkoli](https://hosted.weblate.org/user/mochkoli/)), Portuguese (Brazil)
+([procopio](https://hosted.weblate.org/user/procopio/),
+[platchuk](https://hosted.weblate.org/user/platchuk/),
+[sterzeck](https://hosted.weblate.org/user/sterzeck/)), Spanish
+([spg76](https://hosted.weblate.org/user/spg76/),
+[njlowe21](https://hosted.weblate.org/user/njlowe21/)), Malay and Indonesian
+([aio-sama](https://hosted.weblate.org/user/aio-sama/),
+[arifpedia](https://hosted.weblate.org/user/arifpedia/)), French
+([dark56100](https://hosted.weblate.org/user/dark56100/)), Turkish
+([toxiccloud](https://hosted.weblate.org/user/toxiccloud/),
+[ardakrt](https://hosted.weblate.org/user/ardakrt/)), Greek
+([screenmax1234](https://hosted.weblate.org/user/screenmax1234/),
+[nosvasedis](https://hosted.weblate.org/user/nosvasedis/)), Portuguese
+([miguelsantiago1102](https://hosted.weblate.org/user/miguelsantiago1102/),
+[thisisito](https://hosted.weblate.org/user/thisisito/)) and Chinese (Simplified)
+([yhh-1213](https://hosted.weblate.org/user/yhh-1213/),
+[h9wrd](https://hosted.weblate.org/user/h9wrd/)), kept German
+([Solilord](https://hosted.weblate.org/user/Solilord/),
+[@hamburgercowgoldfish](https://github.com/hamburgercowgoldfish)) and Polish
+([Krzysiek](https://hosted.weblate.org/user/Krzysiek/)) up to date, and started on Dutch
+([emiel](https://hosted.weblate.org/user/emiel/),
+[dennie](https://hosted.weblate.org/user/dennie/)), Swedish
+([labbe](https://hosted.weblate.org/user/labbe/)), Norwegian
+([lystad93](https://hosted.weblate.org/user/lystad93/)), Finnish
+([merelymaki](https://hosted.weblate.org/user/merelymaki/)), Slovenian
+([glynx](https://hosted.weblate.org/user/glynx/)) and Catalan
+([dcapdevilaniubo](https://hosted.weblate.org/user/dcapdevilaniubo/)).
+
+AIOStreams builds on others' work:
+
+- **[libass](https://github.com/libass/libass)** draws styled subtitles in every app, now in a
+  browser and on TVs through [JASSUB](https://github.com/ThaUnknown/jassub) by ThaUnknown, and in
+  ExoPlayer on Android.
+- **[WebGPU-Player](https://github.com/alchemyyy/WebGPU-Player)** by alchemyyy is the WebGPU engine.
+- **[mpv](https://mpv.io)** and **[FFmpeg](https://ffmpeg.org)** play the video in the desktop and
+  Android apps. FFmpeg also draws the chapter pictures, and its decoders are part of the WebGPU engine.
+
+<Callout type="info">
+  Full commit-level history for this release is in the [GitHub
+  release](https://github.com/Viren070/AIOStreams/releases/tag/v2.38.0).
+</Callout>

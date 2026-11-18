@@ -22,7 +22,6 @@ jobs:
       ref: ${{ steps.resolve.outputs.ref }}
       tag: ${{ steps.resolve.outputs.tag }}
       registry: ${{ steps.resolve.outputs.registry }}
-      transcoder: ${{ steps.transcoder.outputs.present }}
     steps:
       - name: Resolve ref and tag
         id: resolve
@@ -57,19 +56,6 @@ jobs:
           echo "ref=$RESOLVED_REF" >> "$GITHUB_OUTPUT"
           echo "tag=$FINAL_TAG" >> "$GITHUB_OUTPUT"
           echo "registry=ghcr.io/${OWNER,,}" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ steps.resolve.outputs.ref }}
-          sparse-checkout: services/transcoder
-      - name: Check for the transcoder
-        id: transcoder
-        run: |
-          if [[ -f services/transcoder/Dockerfile ]]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::services/transcoder/Dockerfile is not on this ref; skipping the transcoder image"
-          fi
 
   aiostreams:
     name: aiostreams
@@ -85,20 +71,5 @@ jobs:
       tags: ${{ needs.setup.outputs.tag }}
       metadata-channel: dev
       metadata-ref: ${{ needs.setup.outputs.tag }}
-
-  transcoder:
-    name: aiostreams-transcoder
-    needs: setup
-    if: needs.setup.outputs.transcoder == 'true'
-    permissions:
-      packages: write
-      contents: read
-    uses: ./.github/workflows/docker-image.yml
-    with:
-      ref: ${{ needs.setup.outputs.ref }}
-      image: aiostreams-transcoder
-      registry: ${{ needs.setup.outputs.registry }}
-      tags: ${{ needs.setup.outputs.tag }}
-      context: services/transcoder
-      dockerfile: services/transcoder/Dockerfile
-      cache-scope: aiostreams-transcoder-
+    secrets:
+      DOVI_DM_SSH_KEY: ${{ secrets.DOVI_DM_SSH_KEY }}

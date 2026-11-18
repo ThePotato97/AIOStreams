@@ -1,16 +1,21 @@
 import { t } from '@lingui/core/macro';
-import { storage } from '../storage';
-import type { JellyfinClient } from '../client';
+import { storage } from '@/lib/storage';
+import type { JellyfinClient } from '@/lib/jellyfin/client';
 import type { Chapter } from './chapters';
-import type { SubtitleStyle } from '../settings';
-import type { SubtitleLine } from '../subtitles/cues';
-import { subtitleType, type SubtitleFacts } from '../subtitles/tracks';
-import { tagName } from '../languages';
+import type { Live } from '@/lib/live-value';
+import type { SubtitleStyle, VideoFit } from '@/lib/settings';
+import type { SubtitleLine } from '@/lib/subtitles/cues';
+import { subtitleType, type SubtitleFacts } from '@/lib/subtitles/tracks';
+import { tagName } from '@/lib/languages';
 import type { Playhead } from './playhead';
-import type { ThumbnailFeed } from './thumbnails';
-import type { PlannedSkip, VideoFrame } from './engine';
-import type { PlaybackPrefs } from '../user-config';
-import type { BaseItemDto, MediaStream, SourceInfo } from '../types';
+import type { Open, ThumbnailFeed } from './thumbnails';
+import type { PlannedSkip, StatsRow, VideoFrame } from './engine';
+import type { PlaybackPrefs } from '@/lib/jellyfin/user-config';
+import type {
+  BaseItemDto,
+  MediaStream,
+  SourceInfo,
+} from '@/lib/jellyfin/types';
 
 export interface Track {
   id: string;
@@ -43,18 +48,29 @@ export interface PlayerState {
   /** Positive shows subtitles later. */
   subtitleDelayMs: number;
   error: string | null;
-  /** The video plays in a small window of its own, with nothing over it. */
-  pictureInPicture?: boolean;
+  reconnecting?: boolean;
   /** The sound goes out undecoded, which a change of speed can't stretch. */
   passthrough?: boolean;
+  /** The server's conversion that plays in place of the file, which reports name. */
+  stream?: { playSessionId: string | null; liveStreamId?: string };
+  /** In the engine's own picture-in-picture window, not on the page. */
+  pictureInPicture?: boolean;
 }
 
 /** What some players add to what a browser's video can do. */
-export type PlayerFeature = 'audio' | 'chapters' | 'stats' | 'headers';
+/** `anyFormat`: opens any container and codec. */
+export type PlayerFeature =
+  'audio' | 'chapters' | 'stats' | 'headers' | 'upscaling' | 'anyFormat';
 
 /** Engines that list a file's audio tracks let the page's own video switch them. */
 export const browserFeatures: readonly PlayerFeature[] =
   'audioTracks' in HTMLMediaElement.prototype ? ['audio'] : [];
+
+export const webGpuFeatures: readonly PlayerFeature[] = [
+  'audio',
+  'stats',
+  'upscaling',
+];
 
 /** What lining an added subtitle up with the file's own found; `asked` when the user asked for it. */
 export type SyncOutcome = { asked: boolean } & (
@@ -99,22 +115,24 @@ export interface PlayerController {
     status?: SyncStatus;
   };
   /** The subtitle the page draws, for a player that draws none itself. */
-  subtitleText?: string;
+  subtitleText: Live<string | undefined>;
   /** The share `liftSubtitles` last asked for, which the page's own subtitle slides to. */
-  subtitleLift: number;
+  subtitleLift: Live<number>;
   /** Missing where the player has no pictures for the seek bar. */
   thumbnails?: ThumbnailFeed;
   /** Missing where the page always fills the screen. */
   toggleFullscreen?: () => void;
+  togglePictureInPicture?: () => void;
+  setPictureInPicture?: (open: boolean) => void;
   setFrame?: (frame: VideoFrame | null) => void;
   /** The file's chapters, where the player reads them. */
   chapters?: Chapter[];
-  /** Playback statistics over the video, as `text` the page draws for a player that draws none. */
+  /** `rows` are the shown page's, for a player that doesn't draw its own. */
   stats?: {
     pages: Track[];
     page: string | null;
     show(page: string | null): void;
-    text?: string;
+    rows: Live<StatsRow[] | undefined>;
   };
   /** Loads a subtitle file from this device; `types` are the extensions it reads. */
   subtitleFiles?: {
@@ -133,6 +151,8 @@ export interface PlayerController {
   fit?: boolean;
   /** Plays the file again after it failed, from where it stopped or on another engine. */
   retry?: { label: string; run(): void };
+  /** Joins a live source at its edge again, after a pause left it behind. */
+  goLive?: () => void;
   /** Others watch along, so nothing acts on its own, like skipping or speeding up. */
   shared?: boolean;
 }
@@ -165,7 +185,17 @@ export interface PlayerOptions {
   onClosed?: () => void;
   /** That player moved on to what it was given with `queueNext`. */
   onAdvance?: (next: QueuedItem) => void;
+  /** Moves on from a live source that kept failing; false when there is nothing else to play. */
+  onLiveFailed?: () => Promise<boolean>;
   startPaused?: boolean;
+  fit?: VideoFit;
+  /** Kept from the saved volume, which it leaves alone. */
+  muted?: boolean;
+  thumbnails?: boolean;
+  /** The title's chapters, for an engine that reads none from the file. */
+  chapters?: Chapter[];
+  /** Seek bar pictures that need no read of the file, taken over the engine's own. */
+  pictures?: Open | null;
 }
 
 export const VOLUME_KEY = 'aiostreams-web-volume';
@@ -204,7 +234,82 @@ export function trackLabel(stream: MediaStream, n: number): string {
 
 interface RowFacts extends SubtitleFacts {
   lang?: string | null;
+  /** The track's format, as ffprobe (and so Jellyfin) names it, where known. */
+  codec?: string | null;
+  profile?: string | null;
+  channels?: number | null;
+  /** ffprobe's channel layout name ("5.1(side)"), where known. */
+  layout?: string | null;
+  default?: boolean | null;
 }
+
+/* eslint-disable lingui/no-unlocalized-strings -- format names, the same in every language */
+const AUDIO_CODECS: Record<string, string> = {
+  truehd: 'TrueHD',
+  eac3: 'Dolby Digital+',
+  ac3: 'Dolby Digital',
+  dts: 'DTS',
+  aac: 'AAC',
+  flac: 'FLAC',
+  alac: 'ALAC',
+  opus: 'Opus',
+  vorbis: 'Vorbis',
+  mp3: 'MP3',
+  mp2: 'MP2',
+};
+const SUBTITLE_CODECS: Record<string, string> = {
+  subrip: 'SRT',
+  srt: 'SRT',
+  ass: 'ASS',
+  ssa: 'SSA',
+  hdmv_pgs_subtitle: 'PGS',
+  pgssub: 'PGS',
+  dvd_subtitle: 'VobSub',
+  dvdsub: 'VobSub',
+  dvb_subtitle: 'DVB',
+  mov_text: 'MP4 text',
+  webvtt: 'WebVTT',
+  vtt: 'WebVTT',
+};
+/** Layouts by channel count, where the layout's name isn't known. */
+const LAYOUTS: Record<number, string> = {
+  3: '2.1',
+  6: '5.1',
+  7: '6.1',
+  8: '7.1',
+};
+const PCM = 'PCM';
+const ATMOS = ' Atmos';
+/* eslint-enable lingui/no-unlocalized-strings */
+
+/**
+ * An audio track's format as players name it: its codec, with Atmos or the DTS profile (DTS-HD
+ * MA, DTS:X) where ffprobe's profile names one, then its channel layout.
+ */
+export function audioFormat(track: RowFacts): string | undefined {
+  const codec = track.codec?.toLowerCase() ?? '';
+  const profile = track.profile ?? '';
+  const name = codec.startsWith('pcm_')
+    ? PCM
+    : codec === 'dts' && /^DTS/.test(profile)
+      ? profile
+      : AUDIO_CODECS[codec] &&
+        AUDIO_CODECS[codec] + (/atmos/i.test(profile) ? ATMOS : '');
+  const layout = (track.layout ?? '').replace(/\(.*\)$/, '');
+  const count = track.channels;
+  const channels =
+    layout === 'mono' || (!layout && track.channels === 1)
+      ? t`Mono`
+      : layout === 'stereo' || (!layout && track.channels === 2)
+        ? t`Stereo`
+        : layout ||
+          (count ? (LAYOUTS[count] ?? t`${count} channels`) : undefined);
+  return [name, channels].filter(Boolean).join(' ') || undefined;
+}
+
+/** A subtitle track's format: SRT, ASS, PGS and so on. */
+export const subtitleFormat = (track: RowFacts) =>
+  SUBTITLE_CODECS[track.codec?.toLowerCase() ?? ''];
 
 export function trackRow(
   track: RowFacts,
@@ -231,11 +336,17 @@ export function trackRow(
           : type === 'commentary'
             ? t`Commentary`
             : undefined;
+  // The rest of what tells the file's tracks apart, as Jellyfin's own titles do: the title the
+  // file gives it, its format and whether it's the file's default.
+  const format = kind === 'audio' ? audioFormat(track) : subtitleFormat(track);
+  const detail = [own, format, track.default ? t`Default` : undefined]
+    .filter(Boolean)
+    .join(' · ');
   return {
     label: [language ?? t`Unknown language`, typeLabel]
       .filter(Boolean)
       .join(' · '),
-    detail: own ?? (language ? undefined : fallback),
+    detail: detail || (language ? undefined : fallback),
   };
 }
 

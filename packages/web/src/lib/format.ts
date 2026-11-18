@@ -1,9 +1,26 @@
 import { t } from '@lingui/core/macro';
 import { formatLocale } from './i18n';
 import { settings } from './settings';
-import type { BaseItemDto } from './types';
+import { appBridge } from './hosts/shell/bridge';
+import type { BaseItemDto } from './jellyfin/types';
 
 export const TICKS_PER_MS = 10_000;
+
+const dateFormats = new Map<string, Intl.DateTimeFormat>();
+
+/** Made once per locale and options, as making one is far slower than using it. */
+export function dateFormat(
+  options?: Intl.DateTimeFormatOptions
+): Intl.DateTimeFormat {
+  const locale = formatLocale();
+  const key = `${locale} ${JSON.stringify(options)}`;
+  let format = dateFormats.get(key);
+  if (!format) {
+    format = new Intl.DateTimeFormat(locale, options);
+    dateFormats.set(key, format);
+  }
+  return format;
+}
 
 export function ticksToMs(ticks: number | null | undefined): number {
   return ticks ? Math.round(ticks / TICKS_PER_MS) : 0;
@@ -48,7 +65,7 @@ export function relativeTime(at: number | null | undefined): string {
     return format.format(-Math.floor(diff / 3_600_000), 'hour');
   if (diff < 7 * 86_400_000)
     return format.format(-Math.floor(diff / 86_400_000), 'day');
-  return new Date(at).toLocaleDateString(formatLocale());
+  return dateFormat().format(at);
 }
 
 /** `S01E04`, or `E04` for absolute numbering. */
@@ -69,6 +86,10 @@ export function episodeCode(
 
 /** The line under a title: the episode for an episode, the year otherwise. */
 export function itemSubtitle(item: BaseItemDto): string {
+  if (item.Type === 'Program') {
+    const at = item.StartDate ? airTime(item.StartDate) : null;
+    return [item.ChannelName, at].filter(Boolean).join(' · ');
+  }
   if (item.Type === 'Episode') {
     const code = episodeCode(item.ParentIndexNumber, item.IndexNumber);
     return [code, item.Name].filter(Boolean).join(' · ');
@@ -174,11 +195,9 @@ export const markLabel = (mark: EpisodeMark) =>
 
 /** `20 Jan 2008` */
 export function shortDate(iso: string): string {
-  return airDay(iso).toLocaleDateString(formatLocale(), {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
+  return dateFormat({ day: 'numeric', month: 'short', year: 'numeric' }).format(
+    airDay(iso)
+  );
 }
 
 /**
@@ -199,19 +218,30 @@ export function airDay(iso: string): Date {
 
 export function airTime(iso: string): string | null {
   if (dateOnly(iso)) return null;
-  return new Date(iso).toLocaleTimeString(formatLocale(), {
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return clockTime(new Date(iso));
 }
+
+/**
+ * The hours the user picked, or on Automatic the system's own choice where an
+ * app sends it, which a web view's formats ignore.
+ */
+export function hourCycle(): Pick<Intl.DateTimeFormatOptions, 'hourCycle'> {
+  const picked = settings.interface.timeFormat.read();
+  const hours24 = picked === 'auto' ? appBridge()?.hours24 : picked === '24';
+  return hours24 === undefined ? {} : { hourCycle: hours24 ? 'h23' : 'h12' };
+}
+
+/** `7:30 PM` or `19:30` */
+export const clockTime = (at: Date | number) =>
+  dateFormat({ hour: 'numeric', minute: '2-digit', ...hourCycle() }).format(at);
 
 /** `Sun, 28 Sep` */
 export function dayLabel(iso: string): string {
-  return airDay(iso).toLocaleDateString(formatLocale(), {
+  return dateFormat({
     weekday: 'short',
     day: 'numeric',
     month: 'short',
-  });
+  }).format(airDay(iso));
 }
 
 /** `today`, `tomorrow`, `in 6 days` or `in 3 weeks`, counted in calendar days. */

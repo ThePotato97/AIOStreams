@@ -17,7 +17,11 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 base64 = "0.22"
-velopack = "1.2"
+# public-utils exposes the types an update source of its own implements (bundle::Manifest)
+velopack = { version = "1.2", features = ["public-utils"] }
+# The update source's HTTPS, checked against the system's certificates (see updates.rs)
+ureq = { version = "3.4", features = ["platform-verifier"] }
+url = "2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tao.workspace = true
@@ -29,13 +33,17 @@ windows = { version = "0.62", features = [
   "Media",
   "Storage_Streams",
   "Win32_Foundation",
+  "Win32_Media_Audio",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
   "Win32_System_WinRT",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
 ] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Globalization",
   "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_System_DataExchange",

@@ -387,10 +387,10 @@ export function FormatterSelection() {
                 Type <span className="font-mono">{'{debug.jsonf}'}</span> to see
                 all available variables. See the{' '}
                 <a
-                  href="https://docs.aiostreams.viren070.me/reference/custom-formatter"
+                  href="https://aiostreams.org/reference/custom-formatter"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[--brand] hover:text-[--brand]/80 hover:underline"
+                  className="text-[--brand] hover:text-brand-300/80 hover:underline"
                 >
                   docs
                 </a>{' '}

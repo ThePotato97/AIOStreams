@@ -21,15 +21,36 @@ import {
   type PlaybackTarget,
   maskSensitiveInfo,
   onPlay,
+  withPlayPath,
+  probeResolvedLink,
+  USENET_STREAM_PATH_PREFIX,
 } from '@aiostreams/core';
 import { ZodError } from 'zod';
-import {
-  StaticFiles,
-  mapDebridErrorToStaticFile,
-} from '../../utils/static-errors.js';
+import { StaticFiles, sendPlaybackError } from '../../utils/static-errors.js';
 import { corsMiddleware } from '../../middlewares/cors.js';
 const router: Router = Router();
 const logger = createLogger('server');
+
+/**
+ * Links resolved by a playback check from AIOStreams' own apps, by playback
+ * path and client, for the player's request that follows it.
+ */
+interface CheckedPlayback {
+  url: string;
+  played?: { target: PlaybackTarget; url: string };
+  viaProxy: boolean;
+  expires: number;
+}
+const CHECKED_TTL_MS = 2 * 60_000;
+const checked = new Map<string, CheckedPlayback>();
+
+function takeChecked(key: string): CheckedPlayback | undefined {
+  const now = Date.now();
+  for (const [k, v] of checked) if (v.expires <= now) checked.delete(k);
+  const hit = checked.get(key);
+  checked.delete(key);
+  return hit;
+}
 
 router.use(corsMiddleware);
 
@@ -97,6 +118,38 @@ router.get(
       }
 
       const clientIp = req.userIp;
+      // Where this sends a player on, our own routes learn it came from the
+      // Jellyfin path too, so they also answer AIOStreams' apps with real errors.
+      const toPlayPath = (url: string) =>
+        req.query[constants.PLAY_PATH_MARKER] === 'jellyfin'
+          ? withPlayPath(url, 'jellyfin')
+          : url;
+
+      // AIOStreams' own apps ask first, and are answered with the error rather
+      // than an error video; the player's request then takes what they found.
+      const checking = req.query[constants.PLAYBACK_CHECK_MARKER] !== undefined;
+      const checkKey = `${req.path}|${clientIp ?? '-'}`;
+      const found = checking ? undefined : takeChecked(checkKey);
+      if (found) {
+        logger.debug(
+          { url: maskSensitiveInfo(found.url) },
+          'playing the link a playback check resolved'
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        res.redirect(307, toPlayPath(found.url));
+        if (found.played) {
+          void onPlay({
+            path:
+              req.query[constants.PLAY_PATH_MARKER] === 'jellyfin'
+                ? 'jellyfin'
+                : 'stremio',
+            target: found.played.target,
+            resolvedUrl: found.played.url,
+            viaProxy: found.viaProxy,
+          });
+        }
+        return;
+      }
 
       const arrivedViaOurProxy = !!req.query[constants.INTERNAL_PROXY_MARKER];
       const playPath =
@@ -181,13 +234,11 @@ router.get(
               signal
             ),
         },
-        ...fallbacks.map(
-          (f): FailoverAttempt => ({
-            label: describeChainItem(f),
-            rank: f.rank,
-            resolve: resolveTarget(f),
-          })
-        ),
+        ...fallbacks.map((f): FailoverAttempt => ({
+          label: describeChainItem(f),
+          rank: f.rank,
+          resolve: resolveTarget(f),
+        })),
       ];
 
       const runCfg = {
@@ -242,33 +293,80 @@ router.get(
 
       if (result.error) {
         const err = result.error;
+        // A malformed clicked item with no chain to fall back to is a 400,
+        // not a static video.
+        if (
+          err instanceof DebridError &&
+          err.code === 'BAD_REQUEST' &&
+          !hasFailover
+        ) {
+          next(
+            new APIError(
+              constants.ErrorCode.BAD_REQUEST,
+              undefined,
+              err.message
+            )
+          );
+          return;
+        }
         if (err instanceof DebridError) {
-          // A malformed clicked item with no chain to fall back to is a 400,
-          // not a static video.
-          if (err.code === 'BAD_REQUEST' && !hasFailover) {
-            next(
-              new APIError(
-                constants.ErrorCode.BAD_REQUEST,
-                undefined,
-                err.message
-              )
-            );
-            return;
-          }
           logger.error({ err }, `error during debrid resolve: ${err.message}`);
-          res.redirect(307, `/static/${mapDebridErrorToStaticFile(err.code)}`);
+          sendPlaybackError(req, res, { code: err.code, message: err.message });
           return;
         }
         logger.error(
           { err },
           `got unknown error during debrid resolve: ${err.message}`
         );
-        res.redirect(307, `/static/${StaticFiles.INTERNAL_SERVER_ERROR}`);
+        sendPlaybackError(req, res, {
+          code: 'INTERNAL_SERVER_ERROR',
+          message: err.message,
+          file: StaticFiles.INTERNAL_SERVER_ERROR,
+        });
         return;
       }
 
       if (!result.url) {
-        res.redirect(307, `/static/${StaticFiles.DOWNLOADING}`);
+        sendPlaybackError(req, res, {
+          code: 'DOWNLOADING',
+          message: 'Still downloading to the service; try again shortly.',
+          file: StaticFiles.DOWNLOADING,
+        });
+        return;
+      }
+
+      const played = resolvedFrom.get(result.url);
+      if (checking) {
+        // A service can hand back a link that's dead, expired or its own error
+        // clip: the check opens it. Our own routes (usenet engine, proxy) check
+        // their releases themselves.
+        const link = played?.url ?? result.url;
+        const ours =
+          link.includes(USENET_STREAM_PATH_PREFIX) ||
+          link.includes(constants.BUILTIN_PROXY_PATH_PREFIX);
+        const problem = ours
+          ? null
+          : await probeResolvedLink(link, { clientIp });
+        if (problem) {
+          logger.info({ problem }, 'playback check: resolved link won’t play');
+          sendPlaybackError(req, res, {
+            code: 'DOWNLOAD_FAILED',
+            message: `This version can't be played: ${problem}.`,
+          });
+          return;
+        }
+        // The player's own request comes next: it takes this rather than
+        // resolving the release again.
+        checked.set(checkKey, {
+          url: result.url,
+          played,
+          viaProxy:
+            arrivedViaOurProxy ||
+            result.url.includes(constants.BUILTIN_PROXY_PATH_PREFIX),
+          expires: Date.now() + CHECKED_TTL_MS,
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ ok: true });
         return;
       }
 
@@ -282,9 +380,8 @@ router.get(
       );
 
       res.setHeader('Cache-Control', 'no-store');
-      res.redirect(307, result.url);
+      res.redirect(307, toPlayPath(result.url));
 
-      const played = resolvedFrom.get(result.url);
       if (played) {
         void onPlay({
           path: playPath,

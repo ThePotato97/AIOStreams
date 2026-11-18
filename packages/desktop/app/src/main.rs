@@ -28,6 +28,7 @@ use updates::{Command, Updater};
 pub enum UserEvent {
     Emit(String),
     Fullscreen(Option<bool>),
+    Pip(Option<bool>),
     VideoFrame(Option<VideoFrame>),
     Minimize,
     Close,
@@ -39,6 +40,8 @@ pub enum UserEvent {
     ToggleMaximize,
     WindowState,
     WindowButtons(bool),
+    #[cfg(target_os = "macos")]
+    FullscreenLeft,
     Link(String),
     LinksReady,
     ChoosePlayer(external::Kind),
@@ -222,6 +225,8 @@ pub struct Paths {
     downloads: PathBuf,
     /// Where downloads go until the user picks a folder.
     download_folder: PathBuf,
+    /// The upscaling shader, which mpv only reads from a file.
+    upscaling_hook: PathBuf,
 }
 
 pub struct App {
@@ -254,9 +259,14 @@ fn bridge_script() -> String {
             "__PLATFORM__",
             &serde_json::to_string(platform::PLATFORM).unwrap(),
         )
+        .replace("__PIP__", &platform::PIP.to_string())
         .replace(
             "__DEVICE__",
             &serde_json::to_string(&platform::device_name()).unwrap(),
+        )
+        .replace(
+            "__HOURS24__",
+            &platform::hours24().map_or("undefined".into(), |on| on.to_string()),
         )
 }
 
@@ -318,6 +328,7 @@ fn main() {
         subtitles,
         downloads: data_dir.join("downloads.json"),
         download_folder,
+        upscaling_hook: data_dir.join("upscaling.glsl"),
     });
     shell::run(App {
         args,
@@ -334,6 +345,20 @@ pub fn receive_script(message: &Outbound) -> String {
     format!("window.__aiostreamsAppReceive?.({})", message.to_json())
 }
 
+/// Whether mpv.conf sets `name` for every file: an option line (not a comment) of exactly that
+/// name, before any profile section or in `[default]`, as the Android app reads it.
+fn conf_sets(conf: &str, name: &str) -> bool {
+    let mut every_file = true;
+    conf.lines().map(str::trim).any(|line| {
+        if line.starts_with('[') {
+            every_file = line == "[default]";
+            return false;
+        }
+        let option = line.split('=').next().unwrap_or_default().trim();
+        every_file && option.trim_start_matches("--") == name
+    })
+}
+
 fn mpv_config_dir(config_dir: &Path) -> PathBuf {
     let dir = config_dir.join("mpv");
     let _ = std::fs::create_dir_all(&dir);
@@ -345,15 +370,25 @@ fn mpv_config_dir(config_dir: &Path) -> PathBuf {
 }
 
 /// `emit` is called on mpv's event thread.
+static VIDEO_ASPECT: Mutex<Option<f64>> = Mutex::new(None);
+
+#[cfg(not(target_os = "linux"))]
+pub fn video_aspect() -> Option<f64> {
+    VIDEO_ASPECT.lock().ok().and_then(|aspect| *aspect)
+}
+
 pub fn start_player(
     video: &platform::VideoSurface,
-    mpv_dir: &Path,
+    paths: &Paths,
     emit: impl Fn(Outbound) + Send + Sync + 'static,
 ) -> Player {
+    let mpv_dir = &paths.mpv;
     let mut defaults: Vec<(&str, String)> = vec![
         ("config-dir", mpv_dir.to_string_lossy().into_owned()),
         ("config", "yes".into()),
         ("audio-client-name", "AIOStreams".into()),
+        // The stats overlay's text smaller than mpv's 20, so its pages fit the window.
+        ("script-opts", "stats-font_size=14".into()),
         // `%23%` quotes the next 23 characters, whose commas would split the option.
         (
             "stream-lavf-o",
@@ -407,14 +442,34 @@ pub fn start_player(
             platform::update_hdr(gamma, primaries);
             return;
         }
+        if let Outbound::VideoAspect { aspect } = message {
+            if let Ok(mut shown) = VIDEO_ASPECT.lock() {
+                *shown = aspect;
+            }
+            return;
+        }
         now_playing::observe(&message);
         emit(message)
     };
-    let sized = std::fs::read_to_string(mpv_dir.join("mpv.conf"))
-        .is_ok_and(|c| c.contains("demuxer-max-bytes"));
-    let auto_cache = (!sized).then(|| playback::auto_cache(platform::total_memory()));
-    Player::start(library, &defaults, &required, auto_cache, Arc::new(emit))
-        .unwrap_or_else(|e| platform::fatal(&format!("mpv failed to start: {e}")))
+    let conf = std::fs::read_to_string(mpv_dir.join("mpv.conf")).unwrap_or_default();
+    let auto_cache = (!conf.contains("demuxer-max-bytes"))
+        .then(|| playback::auto_cache(platform::total_memory()));
+    let choices = aiostreams_desktop_core::player::Playback {
+        // A tone mapping the user's mpv.conf chooses holds for Dolby Vision too.
+        dolby_vision_dm: !conf_sets(&conf, "tone-mapping") && !conf_sets(&conf, "libplacebo-opts"),
+        // Atmos objects to the platform's spatial audio, unless the user's mpv.conf picks decoders.
+        spatial: platform::spatial_check().filter(|_| !conf_sets(&conf, "ad")),
+    };
+    Player::start(
+        library,
+        &defaults,
+        &required,
+        auto_cache,
+        choices,
+        paths.upscaling_hook.clone(),
+        Arc::new(emit),
+    )
+    .unwrap_or_else(|e| platform::fatal(&format!("mpv failed to start: {e}")))
 }
 
 /// `emit` is called on the player's own threads.
@@ -435,6 +490,7 @@ pub fn start_downloads(paths: &Paths, emit: impl Fn(Outbound) + Send + 'static) 
 
 const SUBTITLE_TYPES: &[&str] = &["srt", "vtt", "ass", "ssa", "sub", "sup"];
 const MAX_SUBTITLE_BYTES: usize = 10 << 20;
+const MAX_PAGE_TEXT: usize = 4000;
 
 /// The page never names a path for mpv to open, so the app writes the file itself.
 fn save_subtitle(dir: &Path, name: &str, data: &str) -> Result<PathBuf, String> {
@@ -664,6 +720,7 @@ pub fn handle(
         },
         Inbound::ExternalClose => external.close(),
         Inbound::Fullscreen { value } => send(UserEvent::Fullscreen(value)),
+        Inbound::Pip { value } => send(UserEvent::Pip(value)),
         Inbound::PlayerFrame { frame } => {
             if let Some(p) = player.as_ref() {
                 let shown = frame.is_none_or(|frame| frame.subtitles);
@@ -768,9 +825,34 @@ pub fn handle(
         Inbound::DownloadConfig { concurrent } => {
             downloads.send(downloads::Command::SetConcurrent(concurrent))
         }
-        Inbound::WebError { message } => {
-            let message: String = message.chars().take(4000).collect();
-            log::error!(target: "web", "{message}");
+        Inbound::WebError { message } => log::error!(target: "web", "{}", page_text(&message)),
+        Inbound::Log { level, message } => {
+            log::log!(target: "web", log::Level::from(level), "{}", page_text(&message))
         }
+    }
+}
+
+fn page_text(message: &str) -> String {
+    message.chars().take(MAX_PAGE_TEXT).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conf_sets;
+
+    #[test]
+    fn conf_sets_reads_option_names() {
+        assert!(conf_sets("tone-mapping=bt.2390\n", "tone-mapping"));
+        assert!(conf_sets(
+            "--libplacebo-opts=tone_mapping=spline",
+            "libplacebo-opts"
+        ));
+        assert!(conf_sets("[default]\ntone-mapping=spline", "tone-mapping"));
+        assert!(!conf_sets("#tone-mapping=bt.2390", "tone-mapping"));
+        assert!(!conf_sets(
+            "tone-mapping-param=0.5\ninverse-tone-mapping=yes",
+            "tone-mapping"
+        ));
+        assert!(!conf_sets("[hdr]\ntone-mapping=bt.2390", "tone-mapping"));
     }
 }

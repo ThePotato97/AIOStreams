@@ -19,6 +19,7 @@ import usersRouter from './users.js';
 import quickConnectRouter from './quickconnect.js';
 import segmentsRouter from './segments.js';
 import stubsRouter from './stubs.js';
+import liveTvRouter from './livetv.js';
 import syncPlayRouter from './syncplay.js';
 import remoteRouter from './remote.js';
 import libraryRouter from './library.js';
@@ -28,37 +29,11 @@ import imagesRouter from './images.js';
 import playstateRouter from './playstate.js';
 import playlistsRouter from './playlists.js';
 import webRouter from './web.js';
+import simklRouter from './simkl.js';
 import { jellyfinWebRoot } from '../../app.js';
 
-export const jellyfinCors: express.RequestHandler = (req, res, next) => {
-  // The global middleware sets Allow-Credentials, which browsers reject
-  // alongside a wildcard origin, so echo the caller's origin when it has one.
-  const origin = req.headers.origin;
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-  res.setHeader(
-    'Access-Control-Allow-Methods',
-    'GET, POST, PUT, DELETE, HEAD, OPTIONS'
-  );
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Emby-Authorization, X-Emby-Token, X-MediaBrowser-Token, Range, X-AIOStreams-Client, X-AIOStreams-Device, X-AIOStreams-Platform, X-AIOStreams-Network, X-AIOStreams-Purpose'
-  );
-  res.setHeader(
-    'Access-Control-Expose-Headers',
-    'Content-Length, Content-Range, Retry-After'
-  );
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Max-Age', '86400');
-    res.status(204).end();
-    return;
-  }
-  next();
-};
+import { jellyfinCors } from './cors.js';
+export { jellyfinCors };
 
 const UNLIMITED = /^\/system\/info\/public$/i;
 const LOGIN_LIKE =
@@ -206,6 +181,7 @@ export function createJellyfinRouter(): Router {
 
   router.use(jellyfinContext);
   router.use(webRouter);
+  router.use(simklRouter);
   router.use(systemRouter);
   router.use(syncPlayRouter);
   router.use(remoteRouter);
@@ -218,6 +194,7 @@ export function createJellyfinRouter(): Router {
   router.use(playlistsRouter);
   router.use(libraryRouter);
   router.use(segmentsRouter);
+  router.use(liveTvRouter);
   router.use(stubsRouter);
   router.use((req, res) => {
     res.status(404).json({

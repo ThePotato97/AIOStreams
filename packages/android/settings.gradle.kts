@@ -1,6 +1,8 @@
 pluginManagement {
     includeBuild("build-logic")
     repositories {
+        // Google's mirror of Maven Central first: Central rate-limits CI runners (429).
+        maven("https://maven-central.storage-download.googleapis.com/maven2/")
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -10,6 +12,8 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // Google's mirror of Maven Central first: Central rate-limits CI runners (429).
+        maven("https://maven-central.storage-download.googleapis.com/maven2/")
         google()
         mavenCentral()
     }
@@ -19,6 +23,7 @@ rootProject.name = "aiostreams-android"
 
 include(":app")
 include(":bridge")
+include(":logs")
 include(":playback")
 include(":libs")
 include(":mpv")

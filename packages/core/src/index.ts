@@ -24,6 +24,7 @@ export * from './app-reports/index.js';
 export * from './watch-state/index.js';
 export * from './jellyfin/index.js';
 export * from './sync/index.js';
+export * from './simkl/index.js';
 export { requestTitleMetadata } from './media-info/lookup.js';
 export {
   onPlay,
@@ -72,6 +73,7 @@ export {
   type EasynewsNzbParams,
   SeaDexDataset,
   LibraryAddon,
+  XtreamAddon,
   preWarmLibraryCaches,
   refreshLibraryCacheForService,
   testNabEndpoint,
@@ -95,6 +97,7 @@ export {
   runPlayChain,
   resolvePlaybackTarget,
   resolveExternalTarget,
+  probeResolvedLink,
   parsePlaybackUrl,
   decodeFileInfo,
 } from './main/failover.js';
@@ -105,10 +108,4 @@ export type {
   RunPlayChainResult,
 } from './main/failover.js';
 
-export type {
-  GuestTrack,
-  GuestMedia,
-  GuestCapabilities,
-  GuestPlaybackRequest,
-  GuestPlayback,
-} from './guest.js';
+export type { GuestFile, GuestArtwork, GuestSegment } from './guest.js';

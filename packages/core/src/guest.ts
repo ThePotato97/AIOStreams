@@ -1,52 +1,33 @@
-/** Guest playback contract; no upstream addresses or configuration credentials. */
-export interface GuestTrack {
-  index: number;
-  type: 'video' | 'audio' | 'subtitle';
-  codec: string;
-  profile?: string;
-  level?: number;
-  width?: number;
-  height?: number;
-  frameRate?: number;
-  bitrate?: number;
-  channels?: number;
-  sampleRate?: number;
-  hdr?: boolean;
-  title: string;
-  language?: string;
-  default?: boolean;
+/**
+ * Guest playback contract; no upstream addresses or configuration credentials. A guest's browser
+ * plays the host's file directly, so the server describes only what the page needs before the
+ * player reads the file itself.
+ */
+/** The file the party plays, as far as the server knows it without reading it. */
+export interface GuestFile {
+  /** Its container, from the file's name ("mkv", "mp4", ...), which the player's own subtitle reading needs; null where unknown. */
+  container: string | null;
+  /** Its length, from the party's entry; null where unknown, as the player finds it in the file. */
+  durationMs: number | null;
 }
-export interface GuestMedia {
-  durationMs: number;
-  container: string;
-  bitrate: number;
-  tracks: GuestTrack[];
-  chapters: { title: string; startMs: number }[];
+/**
+ * The host's artwork for the title playing, as the host's item has it: Jellyfin image tags, which
+ * carry each image's address, so the image route serves them without a session.
+ */
+export interface GuestArtwork {
+  ImageTags?: Record<string, string>;
+  BackdropImageTags?: string[];
+  ParentLogoItemId?: string;
+  ParentLogoImageTag?: string;
+  ParentBackdropItemId?: string;
+  ParentBackdropImageTags?: string[];
+  ParentThumbItemId?: string;
+  ParentThumbImageTag?: string;
+  Overview?: string;
 }
-export interface GuestCapabilities {
-  video: boolean;
-  audio: boolean;
-  container: boolean;
-  hdr: boolean;
-}
-export interface GuestPlaybackRequest {
-  revision: string;
-  capabilities: GuestCapabilities;
-  quality: 'original' | '1080p' | '720p';
-  audio?: number;
-  subtitle?: number;
-  positionMs: number;
-  force?: boolean;
-}
-export interface GuestPlayback {
-  lease: string;
-  revision: string;
-  playlistItemId: string;
-  itemId: string;
-  title: string;
-  media: GuestMedia;
-  mode: 'direct' | 'remux' | 'audio' | 'video';
-  url: string;
-  offsetMs: number;
-  subtitleUrl?: string;
+/** An intro, recap or credits, as the host's segment providers have it. */
+export interface GuestSegment {
+  Type: 'Intro' | 'Recap' | 'Outro';
+  StartTicks: number;
+  EndTicks: number;
 }

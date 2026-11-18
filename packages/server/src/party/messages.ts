@@ -209,7 +209,12 @@ export function parseMessage(text: string): PartyClientMessage | null {
       const state = resumeState(v.state);
       const host = v.host === undefined ? undefined : hostClaim(v.host);
       if (!state || host === null) return null;
-      return { t: 'resume', ...h, ticket: v.ticket, state, host };
+      if (
+        v.code !== undefined &&
+        !(typeof v.code === 'string' && CODE.test(v.code))
+      )
+        return null;
+      return { t: 'resume', ...h, ticket: v.ticket, state, host, code: v.code };
     }
     case 'peek':
       if (!isInt(v.v, 1e6) || !isKey(v.party)) return null;

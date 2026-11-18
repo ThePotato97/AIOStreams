@@ -1,13 +1,13 @@
-import type { BaseItemDto } from '../types';
+import type { BaseItemDto } from '@/lib/jellyfin/types';
 import type { Host } from '.';
 import { nativeShellParts } from './native-shell';
-import { ofType, trackLabel } from '../playback/controller';
+import { ofType, trackLabel } from '@/lib/playback/controller';
 import type {
   EngineFactory,
   EngineFile,
   EngineState,
   EngineTrack,
-} from '../playback/engine';
+} from '@/lib/playback/engine';
 
 const EMBEDDED = 'embedded:';
 
@@ -269,7 +269,7 @@ export function jellyfinDesktopHost(): Host | null {
     ...(window.NativeShell && nativeShellParts(window.NativeShell)),
     name: 'jellyfin-desktop',
     player: jmpEngine,
-    playerFeatures: ['audio'],
+    playerFeatures: ['audio', 'anyFormat'],
   };
   return host;
 }

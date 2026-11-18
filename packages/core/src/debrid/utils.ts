@@ -1080,6 +1080,10 @@ export function generatePlaybackUrl(
 
 /** Marker that prefixes the path of a playback URL we generated. */
 export const PLAYBACK_PATH_PREFIX = '/api/v1/debrid/playback/';
+/** The built-in usenet engine's stream route, which a playback URL resolves to. */
+export const USENET_STREAM_PATH_PREFIX = '/api/v1/usenet/stream/';
+/** The library's "refresh" entry, an action rather than a stream. */
+export const LIBRARY_REFRESH_PATH_PREFIX = '/builtins/library/refresh/';
 
 /** The raw, URL-borne pieces needed to resolve one owned playback item. */
 export interface PlaybackTarget {
@@ -1107,6 +1111,28 @@ export function parsePlaybackUrl(url: string): PlaybackTarget | undefined {
   };
 }
 
+/**
+ * Where AIOStreams' own apps ask whether an owned playback URL will play, which
+ * answers with the error (as JSON) instead of an error video. A proxied one is
+ * checked at the playback URL the proxy fetches. None for any other URL, which
+ * has no such check.
+ */
+export function playbackCheckUrl(url: string): string | undefined {
+  const target = unwrapProxyUrl(url);
+  if (
+    !parsePlaybackUrl(target) &&
+    !target.includes(LIBRARY_REFRESH_PATH_PREFIX)
+  )
+    return undefined;
+  try {
+    const u = new URL(target);
+    u.searchParams.set(constants.PLAYBACK_CHECK_MARKER, '1');
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Our playback and proxy URLs carry the client path they were listed for. */
 export function withPlayPath(
   url: string,
@@ -1114,7 +1140,9 @@ export function withPlayPath(
 ): string {
   if (
     !url.includes(PLAYBACK_PATH_PREFIX) &&
-    !url.includes(constants.BUILTIN_PROXY_PATH_PREFIX)
+    !url.includes(constants.BUILTIN_PROXY_PATH_PREFIX) &&
+    !url.includes(USENET_STREAM_PATH_PREFIX) &&
+    !url.includes(LIBRARY_REFRESH_PATH_PREFIX)
   ) {
     return url;
   }

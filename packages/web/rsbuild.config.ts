@@ -1,5 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { formatter } from '@lingui/format-po';
 import { defineConfig, loadEnv, type RsbuildConfig } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
@@ -9,7 +12,8 @@ const { parsed } = loadEnv({ prefixes: ['PUBLIC_'] });
 
 /**
  * The commit this build comes from, e.g. `a1b2c3d4 (2026-09-25)`: from git, or
- * from the metadata CI writes where there is none, as in the Docker build.
+ * where there is none, as in the Docker build, from `SOURCE_COMMIT` or the
+ * metadata CI writes.
  */
 function buildCommit(): string {
   try {
@@ -22,6 +26,8 @@ function buildCommit(): string {
       .split('\n');
     if (hash) return `${hash} (${date})`;
   } catch {}
+  const sourceCommit = process.env.SOURCE_COMMIT;
+  if (sourceCommit) return sourceCommit.slice(0, 8);
   try {
     const { commitHash, commitTime } = JSON.parse(
       readFileSync(
@@ -85,12 +91,65 @@ const BUNDLED_ICONS = [
   'apple-icon.png',
 ].map((name) => ({ from: `../frontend/public/${name}`, to: name }));
 
+/** What a browser installs the page from; a server serves its own manifest. */
+const WEB_APP_FILES = [
+  { from: './manifest.json', to: 'manifest.json' },
+  ...['web-app-manifest-192x192.png', 'web-app-manifest-512x512.png'].map(
+    (name) => ({ from: `../frontend/public/${name}`, to: name })
+  ),
+];
+
+/** Under its version, as the server caches its static files for a year. */
+function webGpuPlayer() {
+  const manifest = createRequire(import.meta.url).resolve(
+    '@aiostreams/webgpu-player/package.json'
+  );
+  let { version } = JSON.parse(readFileSync(manifest, 'utf8')) as {
+    version: string;
+  };
+  let from = join(dirname(manifest), 'libraries');
+  // The fork's build of it, with our audio packages, where webgpu-player/build.mjs made one.
+  const built = new URL('./webgpu-player/dist/', import.meta.url);
+  if (existsSync(new URL('version.json', built))) {
+    const { assetKey } = JSON.parse(
+      readFileSync(new URL('version.json', built), 'utf8')
+    ) as { assetKey: string };
+    version = `${version}-${assetKey}`;
+    from = fileURLToPath(new URL('libraries', built));
+  } else {
+    console.warn(
+      'webgpu-player: serving the published engine, without the AIOStreams audio packages or engine patch. ' +
+        'Build them first: services/atmos-render/package/build.sh <dir>, then ' +
+        'node packages/web/webgpu-player/build.mjs --packages <dir> (the Docker build does both).'
+    );
+  }
+  const libraries = `static/webgpu-player/${version}/libraries`;
+  return {
+    // Served as built: the engine's own build minified it.
+    copy: {
+      from,
+      to: libraries,
+      info: { minimized: true },
+    },
+    module: `${libraries}/webgpu-player/EmbeddedPlayer.js`,
+    root: dirname(manifest),
+  };
+}
+
+/** Set by the apps' release builds only, so forks and local builds send nothing. */
+function usageStats(standalone: boolean) {
+  const appKey = process.env.APTABASE_APP_KEY;
+  const host = process.env.APTABASE_HOST;
+  return standalone && appKey && host ? { appKey, host } : null;
+}
+
 /**
  * `--env-mode standalone` builds the app on its own, with a server list,
  * instead of the copy each server hosts at `/web`.
  */
 export default defineConfig(async ({ envMode }) => {
   const standalone = envMode === 'standalone';
+  const engine = webGpuPlayer();
   const define = {
     // Read by @aiostreams/ui components.
     'process.env.NEXT_PUBLIC_PLATFORM': JSON.stringify(''),
@@ -98,7 +157,12 @@ export default defineConfig(async ({ envMode }) => {
     __APP_COMMIT__: JSON.stringify(buildCommit()),
     __UNFINISHED_LOCALES__: JSON.stringify(await unfinishedLocales()),
     __LICENSES_FILE__: JSON.stringify(LICENSES_FILE),
+    __WEBGPU_PLAYER_MODULE__: JSON.stringify(engine.module),
+    __USAGE_STATS__: JSON.stringify(usageStats(standalone)),
+    // Set by the TV apps' build: they have no bridge to tell the page.
+    __APP_VERSION__: JSON.stringify(process.env.APP_VERSION || null),
   };
+  const pageIcons = process.env.PAGE_ICONS === 'true';
   const source = {
     entry: { index: './src/main.tsx' },
     define,
@@ -109,36 +173,50 @@ export default defineConfig(async ({ envMode }) => {
   const tools: RsbuildConfig['tools'] = {
     swc: { jsc: { experimental: { plugins: [['@lingui/swc-plugin', {}]] } } },
     rspack: {
-      module: { rules: [{ test: /\.po$/, use: '@lingui/loader' }] },
+      module: {
+        rules: [
+          { test: /\.po$/, use: '@lingui/loader' },
+          { test: /\.wgsl$/, type: 'asset/source' },
+          // Its worker imports libass's loader from a URL, and its build drops the webpackIgnore comment.
+          {
+            test: /[\\/]jassub[\\/]dist[\\/]worker[\\/]worker\.js$/,
+            parser: { importDynamic: false },
+          },
+        ],
+      },
     },
   };
   if (standalone) {
     return {
-      plugins: [pluginReact(), pluginLicenses()],
+      plugins: [pluginReact(), pluginLicenses([engine.root])],
       source,
       tools,
       html: {
         template: './index.html',
-        templateParameters: { root: './', icons: false },
+        templateParameters: { root: './', icons: pageIcons, splash: true },
       },
       output: {
         distPath: { root: 'dist-standalone' },
         // Relative, since the TV apps load it from their package's files.
         assetPrefix: 'auto',
-        copy: BUNDLED_ICONS,
+        copy: [
+          ...BUNDLED_ICONS,
+          ...(pageIcons ? WEB_APP_FILES : []),
+          engine.copy,
+        ],
       },
       server: { port: devServerPort + 1 },
     };
   }
   return {
-    plugins: [pluginReact(), pluginLicenses()],
+    plugins: [pluginReact(), pluginLicenses([engine.root])],
     source,
     tools,
     html: {
       template: './index.html',
-      templateParameters: { root: '/', icons: true },
+      templateParameters: { root: '/', icons: true, splash: false },
     },
-    output: { assetPrefix: ASSET_PREFIX },
+    output: { assetPrefix: ASSET_PREFIX, copy: [engine.copy] },
     dev: { assetPrefix: ASSET_PREFIX },
     server: {
       port: devServerPort,

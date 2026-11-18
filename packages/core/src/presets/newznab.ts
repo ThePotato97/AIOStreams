@@ -166,6 +166,11 @@ export const NEWZNAB_INDEXERS: {
     remuxDbIndexer: 'pourcesoir',
   },
   {
+    label: 'SearchNZB',
+    value: 'https://api.searchnzb.com/api',
+    apiKeyUrl: 'https://searchnzb.com/account',
+  },
+  {
     label: 'SquareEyed',
     value: 'https://squareeyed.org/api',
     apiKeyUrl: 'https://squareeyed.org/profile',
@@ -239,7 +244,7 @@ export class NewznabPreset extends BuiltinAddonPreset {
             id: 'url',
             name: 'Newznab URL',
             description:
-              'Pick an indexer, or choose `Custom` to enter the full URL of the Newznab API endpoint (including the path, usually `/api`). New to Usenet indexers? Compare options at [nzb-sources](https://hampelmen.github.io/nzb-sources/).',
+              'Pick an indexer, or choose `Custom` to enter the full URL of the Newznab API endpoint (including the path, usually `/api`). New to Usenet indexers? Compare options at [Usenet Almanac](https://usenetalmanac.com/indexers/) or [nzb-sources](https://hampelmen.github.io/nzb-sources/).',
             type: 'select-with-custom',
             required: true,
             options: NEWZNAB_INDEXERS,

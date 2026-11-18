@@ -1,0 +1,104 @@
+//! atmos-render: reads a raw TrueHD, E-AC-3, AC-3 or DTS elementary stream on stdin and
+//! writes binaural stereo, 48 kHz 32-bit float little-endian interleaved, on stdout; the output
+//! has the input's length and timing.
+//!
+//!   ffmpeg -i film.mkv -map 0:a:0 -c copy -f truehd - | atmos-render --format truehd > out.f32
+//!
+//! `--format` is `truehd`, `eac3`, `ac3` or `dts` (FFmpeg's raw formats); E-AC-3, AC-3 and DTS are
+//! decoded by an FFmpeg child (`--ffmpeg`, default `ffmpeg`). DTS (and its DTS-HD extensions) is
+//! channels only, decoded with FFmpeg's defaults (`decoded_in.rs`).
+//!
+//! `--modes stream` (default) renders each element in the stream's own headphone mode (Off,
+//! Near, Mid, Far; Mid where it has none), as Dolby's Reference Player does; `--modes windows`
+//! renders everything Near, as Windows does; `--modes far` renders everything Far (no Dolby
+//! product does: a listener's choice).
+//!
+//! `--output speakers` renders for two built-in speakers instead of headphones, as Dolby Atmos for
+//! built-in speakers does on Windows (DAP-VR output mode 11, Dolby Access's settings).
+//!
+//! `--loudness reference` (default) decodes as the Reference Player does: DD+ in LINE mode, TrueHD
+//! with its dialnorm, dialogue at -31 dBFS in both. `--loudness windows` decodes DD+ as Windows does
+//! (RF mode: dialogue at -20 dBFS on frames carrying compr, heavy compression); TrueHD keeps the
+//! Reference Player's dialnorm (Windows doesn't decode TrueHD).
+
+use std::io::{BufWriter, Read, Write};
+
+use anyhow::{Result, bail};
+use atmos_render::decoded_in::Decoded;
+use atmos_render::eac3_in::Eac3;
+use atmos_render::input::{Feed, Output, Pipeline};
+use atmos_render::loudness::Loudness;
+use atmos_render::objects::Modes;
+use atmos_render::truehd_in::TrueHd;
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str);
+    let modes = match value("--modes") {
+        Some("stream") | None => Modes::Stream,
+        Some("windows") => Modes::Windows,
+        Some("far") => Modes::Far,
+        Some(other) => bail!("unsupported --modes {other} (stream, windows or far)"),
+    };
+    let loudness = match value("--loudness") {
+        Some("reference") | None => Loudness::Reference,
+        Some("windows") => Loudness::Windows,
+        Some(other) => bail!("unsupported --loudness {other} (windows or reference)"),
+    };
+    let mut feed: Box<dyn Feed> = match value("--format") {
+        Some("truehd") | None => Box::new(TrueHd::new(modes)),
+        Some(f @ ("eac3" | "ac3")) => Box::new(Eac3::new(value("--ffmpeg").unwrap_or("ffmpeg"), f, modes, loudness)?),
+        Some("dts") => Box::new(Decoded::new(value("--ffmpeg").unwrap_or("ffmpeg"), "dts", modes)?),
+        Some(other) => bail!("unsupported --format {other}"),
+    };
+    let output = match value("--output") {
+        Some("binaural") | None => Output::Binaural,
+        Some("speakers") => Output::Speakers,
+        Some(other) => bail!("unsupported --output {other} (binaural or speakers)"),
+    };
+    feed.set_speakers(output == Output::Speakers);
+    let mut pipeline = Pipeline::with_output(output)?;
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut out = BufWriter::with_capacity(1 << 16, std::io::stdout().lock());
+    let mut buf = vec![0u8; 1 << 16];
+    let mut failed: Option<std::io::Error> = None;
+    let mut emit = |l: &[f32], r: &[f32]| {
+        if failed.is_some() {
+            return;
+        }
+        for (a, b) in l.iter().zip(r) {
+            if let Err(e) = out.write_all(&a.to_le_bytes()).and_then(|_| out.write_all(&b.to_le_bytes())) {
+                failed = Some(e);
+                return;
+            }
+        }
+    };
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let mut blocks = Vec::new();
+        feed.push(&buf[..n], &mut |b| blocks.push(b));
+        for b in blocks {
+            pipeline.take(feed.as_mut(), b, &mut emit);
+        }
+    }
+    let mut blocks = Vec::new();
+    feed.end(&mut |b| blocks.push(b));
+    for b in blocks {
+        pipeline.take(feed.as_mut(), b, &mut emit);
+    }
+    pipeline.finish(feed.as_mut(), &mut emit);
+    drop(emit);
+    if let Some(e) = failed {
+        // the reader went away (the transcoder stopped): not an error of ours
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok(());
+        }
+        return Err(e.into());
+    }
+    out.flush()?;
+    Ok(())
+}

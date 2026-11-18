@@ -7,3 +7,6 @@
 **/data
 .env
 .git
+# atmos-render compiles its tables in (data/); its build output stays out
+!services/atmos-render/data
+services/atmos-render/target

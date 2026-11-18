@@ -1,0 +1,5 @@
+[submodule "packages/web/webgpu-player/dovi-dm"]
+	path = packages/web/webgpu-player/dovi-dm
+	url = https://github.com/ThePotato97/Libplacebo.git
+	branch = webgpu-dm
+	shallow = true

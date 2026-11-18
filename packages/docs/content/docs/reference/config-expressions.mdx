@@ -193,7 +193,7 @@ Several variants can apply to one request: every one you selected, and every one
 1. Variants whose **condition matched**, in the order they are listed in **Miscellaneous → Variants**.
 2. Variants **named in the URL**, left to right.
 
-Inside a script, instructions run top to bottom, and `use variant` runs that variant's instructions at the point it appears. The last write to a field wins, so `set` replaces whatever an earlier variant put there, while `add`, `remove` and `insert` build on it. Prefer those in a variant meant to combine with others.
+Inside a script, instructions run top to bottom, and `use variant` runs that variant's instructions at the point it appears. The last write to a field wins, so `set` replaces whatever an earlier variant put there, while `add`, `remove`, `insert` and `move` build on it. Prefer those in a variant meant to combine with others.
 
 | Request                                       | Applies                                   |
 | --------------------------------------------- | ----------------------------------------- |
@@ -202,9 +202,34 @@ Inside a script, instructions run top to bottom, and `use variant` runs that var
 | `/v/no-dv` while `rd-down` matches            | `rd-down`, then `no-dv`                   |
 | `/v/rd-down` while `rd-down` also matches     | once only, in its position in the URL     |
 
-A request may run 5000 instructions across everything it applies, including those `use variant` reaches. One that runs out stops there and says so.
+The variants on one request share a work budget. Each instruction costs one, plus one for every entry its path looks through and every value it writes, `use variant` included. Naming an entry by `[key=value]` is a lookup rather than a search, so it stays cheap however long the list. A request that runs out stops there and says so.
 
 A variant that `use variant` pulls in runs again even if it already applied on its own. Most instructions land the same way twice, so this is usually invisible.
+
+---
+
+## Who gets an addon or catalog
+
+Giving an addon or catalog to some people only needs no script. On the configure page, the people button beside each addon in **My Addons** and each catalog in **Catalogs**, and **Choose who gets them…** in their **Actions** menus, list who could get it:
+
+- the base config, which is what an install link without a variant serves;
+- each variant you install from a link, one with no activation condition that no user picks;
+- on a [media server](/apps/media-server#users-and-pins), the primary user and each other user.
+
+Ticking or unticking a row changes only that row. Behind it, the picker writes ordinary instructions:
+
+- **The base config** gets the item's own on/off switch.
+- **A variant you install from a link** gets an `enable` or `disable` line at its end.
+- **A user** gets the same line in a variant of their own, which has the user's id, or `primary` for the primary user. It is created and added to the end of their variant list the first time, and removed again once it holds nothing.
+
+```
+enable presets[instanceId="8ae"] # Torrentio
+disable catalogModifications[id="8ae1a2b.top"][type="movie"] # Popular
+```
+
+A line is only written where a row would otherwise come out wrong, and dropped once it changes nothing. The picker reads each row by applying that row's variants, so lines you wrote yourself count: a `disable presets[type=torrentio]` in a user's variants shows them without Torrentio. Only `enable` and `disable` lines naming that exact item are rewritten.
+
+Some rows can't be changed there: a user whose list puts another variant after their own, when that variant also turns the item on or off, and a user whose id another variant already has. The picker says which. Variants with an activation condition have no row, as they depend on the request, but the picker names any that change the item. Deleting an addon removes its lines, and those of its catalogs, from every variant, and removing a user removes their own variant unless something else uses it.
 
 ---
 
@@ -235,6 +260,8 @@ merge deduplicator = {
 | `insert <path> = <value>, ...`      | Insert at the position the path names. The value lands there and the rest shift down.                  |
 | `insert after <path> = <value>`     | The same, placed just past the addressed entry. `insert before` spells out the default.                |
 | `insert <n> after <path> = <value>` | `n` places from the addressed entry: `2 after` leaves one entry in between. `before` counts backwards. |
+| `move <path> before <anchor>`       | Move the entries the path selects next to the anchor, a position or selector in the same list.         |
+| `move <path> <n> after <anchor>`    | `after` lands past the anchor. A count works as it does for `insert`.                                  |
 | `remove <path> <value>, ...`        | Remove matching values from a list.                                                                    |
 | `remove <path>`                     | With no values, the path itself selects the elements to remove.                                        |
 | `enable <path>` / `disable <path>`  | Shorthand for `set <path>.enabled = true` / `false`.                                                   |
@@ -275,6 +302,8 @@ A path starts with a configuration field and drills in.
 
 A selector may match several elements, in which case the instruction applies to all of them: `disable presets[type=torrentio]` disables every Torrentio instance.
 
+Selectors written back to back narrow the same list, so an element has to match all of them: `presets[type=torrentio][options.name*="4K"]` is only the Torrentio instances with 4K in their name.
+
 `[*]` is the one segment that also walks an object, which is how a single instruction reaches all twelve sort lists: `add sortCriteria[*] { "key": "resolution", "direction": "desc" }` appends the same criterion to every one you have defined. The `[key=value]` selectors stay list-only, since an object's members are addressed by name.
 
 `=` and `!=` are exact and case-sensitive. `*=` and `!*=` are substring matches that ignore case.
@@ -311,6 +340,12 @@ disable presets[instanceId=8ae]                  # one exact instance
 ```
 
 The editor autocompletes real instance ids after `presets[instanceId=`, annotated with each addon's name.
+
+**Catalogs** are keyed by `id` and `type` together, since one addon can offer the same catalog for movies and for series. Their ids start with the addon's instance id:
+
+```
+disable catalogModifications[id="8ae1a2b.top"][type=movie]
+```
 
 **Ranked regex patterns and regex overrides** carry a `name`:
 
@@ -371,16 +406,31 @@ insert excludedKeywords[0] = "cam"          # the front, where prepend puts it
 insert after excludedKeywords[-1] = "cam"   # the end, where add puts it
 ```
 
-Several values at once keep their order. Unlike `add`, nothing is skipped for being already present, which is what makes moving an entry work:
-
-```
-unset excludedKeywords[="cam"]
-insert excludedKeywords[0] = "cam"
-```
+Several values at once keep their order. Unlike `add`, nothing is skipped for being already present. To reorder entries the list already has, use [`move`](#moving-entries).
 
 <Callout type="info">
 An insert names one place per list. A path that reaches several lists, such as `presets[*].options.<list>`, writes one value into each of them, the way `add` does. Within a list, a selector that matches several entries uses the first and says so in the editor preview. A position that falls outside a list is skipped rather than clamped, and a trailing `[*]` is rejected.
 </Callout>
+
+---
+
+## Moving entries
+
+`move` reorders a list without writing its entries out. That matters most for services, addons and catalogs, whose entries carry all their options: a copy pasted into a script would include your API keys and go stale the next time you change them. The path picks the entries, and `before` or `after` an anchor says where they go:
+
+```
+move services[id=torbox] before [0]
+move presets[type=comet] before [0]
+move catalogModifications[id*="anime"] after [id="8ae1a2b.top"][type=movie]
+move sortCriteria[*][key=resolution] before [key=cached]
+```
+
+The anchor is a position or selectors, like the last part of a path, and it always means an entry of the same list. It is read once the moving entries are out of the list, so `before [0]` is the front and `after [-1]` the end wherever they started.
+
+- **Several entries move together**, in the order they already had. The second example gathers every anime catalog after that one.
+- **A count works as it does for `insert`.** `move presets[type=comet] 2 after [type=torrentio]` leaves one addon in between.
+- **`[*]` earlier in the path moves within each list it reaches.** The third example puts resolution above cache status in every sort list that has both, and leaves the others alone.
+- **An anchor that matches several entries uses the first**, and the editor preview says so. A move whose path or anchor matches nothing is skipped.
 
 ---
 
@@ -461,10 +511,10 @@ set sortCriteria.global = [
 ]
 ```
 
-Or slot one criterion into second place in every sort list you have defined, leaving the rest of each list alone:
+Or move one criterion above another in every sort list you have defined, leaving the rest of each list alone:
 
 ```
-insert sortCriteria[*][1] = { "key": "resolution", "direction": "desc" }
+move sortCriteria[*][key=resolution] before [key=cached]
 ```
 
 **Layering.** Either reference one variant from another:
@@ -480,22 +530,19 @@ or keep them independent and combine at install time with `/v/phone,no3d`. Eithe
 
 ## Limits
 
-Operators can tune these; defaults shown.
+Operators can tune these; defaults shown. Scripts have no length limit of their own: the configuration as a whole is capped by `MAX_JSON_BODY_SIZE`.
 
-| Limit                           | Default  | Environment variable                             |
-| ------------------------------- | -------- | ------------------------------------------------ |
-| Availability                    | everyone | `VARIANT_ACCESS` (`all`, `trusted`, `none`)      |
-| Variants per config             | 10       | `MAX_VARIANTS`                                   |
-| Characters per script           | 4000     | `MAX_VARIANT_SCRIPT_LENGTH`                      |
-| Characters across all scripts   | 20000    | `MAX_VARIANT_TOTAL_SCRIPT_CHARACTERS`            |
-| Instructions run per request    | 5000     | `MAX_VARIANT_TOTAL_INSTRUCTIONS`                 |
-| Elements one instruction writes | 200      | `MAX_VARIANT_PATH_MATCHES`                       |
-| Health checks: availability     | everyone | `HEALTH_CHECK_ACCESS` (`all`, `trusted`, `none`) |
-| Health checks per config        | 5        | `MAX_HEALTH_CHECKS`                              |
-| Shortest health check interval  | 60s      | `HEALTH_CHECK_MIN_TTL`                           |
-| Longest health check timeout    | 10000ms  | `HEALTH_CHECK_MAX_TIMEOUT`                       |
-| Health check response read      | 64KB     | `HEALTH_CHECK_MAX_BYTES`                         |
-| Private health check URLs       | allowed  | `ALLOW_PRIVATE_URLS`                             |
+| Limit                          | Default  | Environment variable                             |
+| ------------------------------ | -------- | ------------------------------------------------ |
+| Availability                   | everyone | `VARIANT_ACCESS` (`all`, `trusted`, `none`)      |
+| Variants per config            | 50       | `MAX_VARIANTS`                                   |
+| Work per request               | 100000   | `MAX_VARIANT_WORK`                               |
+| Health checks: availability    | everyone | `HEALTH_CHECK_ACCESS` (`all`, `trusted`, `none`) |
+| Health checks per config       | 5        | `MAX_HEALTH_CHECKS`                              |
+| Shortest health check interval | 60s      | `HEALTH_CHECK_MIN_TTL`                           |
+| Longest health check timeout   | 10000ms  | `HEALTH_CHECK_MAX_TIMEOUT`                       |
+| Health check response read     | 64KB     | `HEALTH_CHECK_MAX_BYTES`                         |
+| Private health check URLs      | allowed  | `ALLOW_PRIVATE_URLS`                             |
 
 ---
 

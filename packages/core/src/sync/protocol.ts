@@ -92,6 +92,12 @@ export type PartyClientMessage =
       token?: string;
       /** The host's ticket, which makes it host again, with its locks. */
       host?: { ticket: string; lock: PartyLock };
+      /**
+       * With the host's ticket and sign-in: the invite code its party was
+       * started under, so the party comes back as that account's (guest links
+       * need it).
+       */
+      code?: string;
     }
   /** Before joining: answered with a preview, then closed. */
   | { t: 'peek'; v: number; party: string; token?: string }

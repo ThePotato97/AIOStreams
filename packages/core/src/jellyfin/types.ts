@@ -15,7 +15,12 @@ export type JellyfinDescriptor =
   | { k: 'season'; t: string; i: string; s: number }
   | { k: 'episode'; t: string; i: string; s: number; e: number; v: string }
   | { k: 'person'; n: string; i?: string }
-  | { k: 'source'; h: string };
+  | { k: 'source'; h: string }
+  | { k: 'livetv' }
+  /** A channel's programme by its start, in epoch milliseconds. */
+  | { k: 'program'; t: string; i: string; at: number };
+
+export type ProgramDescriptor = Extract<JellyfinDescriptor, { k: 'program' }>;
 
 export type PersonDescriptor = Extract<JellyfinDescriptor, { k: 'person' }>;
 
@@ -40,6 +45,8 @@ export interface AiostreamsSourceExtension {
   description: string;
   addon: string;
   service?: string;
+  /** Opaque, and the same from every addon that lists the file. */
+  release?: string;
   cached?: boolean;
   proxied?: boolean;
   resolution?: string;
@@ -67,6 +74,12 @@ export interface AiostreamsSourceExtension {
   externalUrl?: string;
   /** A YouTube video, which the client opens itself. */
   ytId?: string;
+  /**
+   * Where the client asks whether this version will play before opening it:
+   * 200 when it will, an error as JSON when not. Only versions that resolve
+   * through AIOStreams' playback route have one. Set when sent.
+   */
+  checkUrl?: string;
   type: string;
   /** Stremio's: the next episode's version with the same group plays on. */
   bingeGroup?: string;
@@ -116,6 +129,8 @@ export interface PlaybackMemo {
   videoId: string;
   psid: string;
   sources: MediaSourceRecord[];
+  /** How many versions past the version limit the run found. */
+  more?: number;
   addonSubtitles: SubtitleTrack[];
   /** The requested title, for its original language and a pack's probed files. */
   titleMetadata?: TitleMetadata;

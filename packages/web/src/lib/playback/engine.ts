@@ -1,7 +1,11 @@
-import type { SubtitleStyle, VideoFit } from '../settings';
-import type { Span } from '../subtitles/align';
-import type { BaseItemDto, MediaStream, SourceInfo } from '../types';
-import type { PlaybackPrefs } from '../user-config';
+import type { SubtitleStyle, VideoFit } from '@/lib/settings';
+import type { Span } from '@/lib/subtitles/align';
+import type {
+  BaseItemDto,
+  MediaStream,
+  SourceInfo,
+} from '@/lib/jellyfin/types';
+import type { PlaybackPrefs } from '@/lib/jellyfin/user-config';
 import type { Chapter } from './chapters';
 import type { PlayerState, QueuedItem, Track } from './controller';
 import type { TimeRange } from './playhead';
@@ -10,12 +14,18 @@ import type { TimeRange } from './playhead';
 export interface ServerSubtitle extends Track {
   url: string;
   stream: MediaStream;
+  /** A styled script's own address, for an engine that draws ASS itself. */
+  assUrl?: string;
 }
 
 export interface EngineTrack extends Track {
   type: 'audio' | 'subtitle';
   title?: string;
   codec?: string;
+  /** ffprobe's profile (Atmos, DTS-HD MA), channels and channel layout, where known. */
+  profile?: string;
+  channels?: number;
+  layout?: string;
   forced?: boolean;
   hearingImpaired?: boolean;
   visualImpaired?: boolean;
@@ -64,8 +74,9 @@ export type EngineState = Partial<
     | 'fullscreen'
     | 'audio'
     | 'subtitle'
-    | 'pictureInPicture'
     | 'passthrough'
+    | 'stream'
+    | 'pictureInPicture'
   >
 >;
 
@@ -77,12 +88,33 @@ export type EngineEvent =
   /** The file's tracks are listed, so the user's picks can apply. */
   | { type: 'loaded' }
   | { type: 'ended' }
-  | { type: 'failed'; error: string; retry?: { label: string; run(): void } }
+  | {
+      type: 'failed';
+      error: string;
+      retry?: { label: string; run(): void };
+      /** The engine can't read this version, however often it's opened. */
+      unsupported?: boolean;
+    }
+  /** The next engine plays the version, from `positionMs` where this one stopped. */
+  | { type: 'unplayable'; reason: string; positionMs?: number }
   | { type: 'advanced'; next: QueuedItem }
   /** The user closed the player's own window. */
   | { type: 'closed' }
-  | { type: 'subtitle-text'; text: string }
-  | { type: 'stats-text'; text: string | undefined };
+  | { type: 'subtitle-text'; text: string };
+
+export interface StatsRow {
+  label: string;
+  value: string;
+}
+
+/** Pages of playback statistics. */
+export interface EngineStats {
+  pages: Track[];
+  /** For an engine that draws a page over the video itself; null hides it. */
+  draw?(page: string | null): void;
+  /** For an engine whose pages the page draws, which asks for them while one shows. */
+  read?(page: string): Promise<StatsRow[]>;
+}
 
 /** A picture of the keyframe at `positionMs`, for the seek bar. */
 export interface Thumbnail {
@@ -137,6 +169,10 @@ export interface PlayerEngine {
   /** Draws the video in `frame` over the page, or back behind it filling the window. */
   setFrame?(frame: VideoFrame | null): void;
   toggleFullscreen?(): void;
+  /** Opens or closes a picture-in-picture window of its own. */
+  togglePictureInPicture?(): void;
+  /** The page's own window shows the video, which a hidden page may still be painted for. */
+  setPictureInPicture?(open: boolean): void;
   /** The text of a subtitle file it was given, null for one it can't read; server ones are read from their address. */
   ownText?(id: string): string | null;
   /** Reports when the lines of one of the file's own subtitles show, as it reads them, until stopped. */
@@ -154,7 +190,7 @@ export interface PlayerEngine {
     stop(): void;
   };
   subtitleFiles?: { types: readonly string[]; add(file: File): Promise<void> };
-  stats?: { pages: Track[]; show(page: string | null): void };
+  stats?: EngineStats;
   /** Picks tracks from the user's settings as the file opens. */
   picksTracks?: boolean;
   /** Lists the file's own subtitles, so the server's copies of them are left out. */

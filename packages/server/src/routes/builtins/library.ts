@@ -11,7 +11,11 @@ import {
   getSimpleTextHash,
 } from '@aiostreams/core';
 import { createLogger } from '@aiostreams/core';
-import { StaticFiles } from '../../utils/static-errors.js';
+import {
+  StaticFiles,
+  sendPlaybackError,
+  wantsRealErrors,
+} from '../../utils/static-errors.js';
 import { rawExtras } from '../../utils/extras.js';
 const router: Router = Router();
 
@@ -165,11 +169,25 @@ router.get(
     next: NextFunction
   ) => {
     const { serviceId, encryptedCredential } = req.params;
+    // A Stremio player is shown a video saying how it went; AIOStreams' own
+    // apps are told, and play nothing.
+    const done = (message: string) => {
+      if (!wantsRealErrors(req))
+        return res.redirect(307, `/static/${StaticFiles.OK}`);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ ok: true, action: true, message });
+    };
+    const failed = (code: string, message: string, file: StaticFiles) =>
+      sendPlaybackError(req, res, { code, message, file });
 
     try {
       const decrypted = decryptString(decodeURIComponent(encryptedCredential));
       if (!decrypted.data) {
-        return res.redirect(307, `/static/${StaticFiles.UNAUTHORIZED}`);
+        return failed(
+          'UNAUTHORIZED',
+          'This library refresh link is no longer valid.',
+          StaticFiles.UNAUTHORIZED
+        );
       }
 
       const parsed = JSON.parse(decrypted.data);
@@ -181,7 +199,11 @@ router.get(
         svcId !== serviceId ||
         !constants.BUILTIN_SUPPORTED_SERVICES.includes(svcId as any)
       ) {
-        return res.redirect(307, `/static/${StaticFiles.UNAUTHORIZED}`);
+        return failed(
+          'UNAUTHORIZED',
+          'This library refresh link is no longer valid.',
+          StaticFiles.UNAUTHORIZED
+        );
       }
 
       // Rate limit: max once per 5 minutes per service+credential
@@ -197,9 +219,13 @@ router.get(
           `Refresh rate limited for ${svcId}, ${remaining}s remaining`
         );
         if (timeElapsed < 30) {
-          return res.redirect(307, `/static/${StaticFiles.OK}`);
+          return done('The library is already refreshing.');
         }
-        return res.redirect(307, `/static/${StaticFiles.TOO_MANY_REQUESTS}`);
+        return failed(
+          'TOO_MANY_REQUESTS',
+          `The library was refreshed recently; try again in ${remaining} s.`,
+          StaticFiles.TOO_MANY_REQUESTS
+        );
       }
 
       await lastRefreshMap.set(rateKey, now, REFRESH_COOLDOWN_MS);
@@ -217,10 +243,14 @@ router.get(
         })
       );
 
-      return res.redirect(307, `/static/${StaticFiles.OK}`);
+      return done('Refreshing the library.');
     } catch (error) {
       logger.error('Refresh endpoint error', { error });
-      return res.redirect(307, `/static/${StaticFiles.INTERNAL_SERVER_ERROR}`);
+      return failed(
+        'INTERNAL_SERVER_ERROR',
+        'The library refresh failed.',
+        StaticFiles.INTERNAL_SERVER_ERROR
+      );
     }
   }
 );

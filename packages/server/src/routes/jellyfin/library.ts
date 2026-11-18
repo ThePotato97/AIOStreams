@@ -27,6 +27,9 @@ import {
   knownCatalogKinds,
   latestSpellings,
   listResult,
+  listChannels,
+  searchChannels,
+  liveCatalogs,
   listViews,
   requiresGenre,
   searchCatalogs,
@@ -56,6 +59,7 @@ import {
 import {
   attachUserData,
   boxSetChildren,
+  channelListItems,
   caughtUpOn,
   decodeForRequest,
   decodeItemForRequest,
@@ -294,6 +298,51 @@ function applySort(req: Request, items: JellyfinItem[]): JellyfinItem[] {
   return out;
 }
 
+/** What a watch-state list sorts by, for Jellyfin's sorts its rows can't answer. */
+const ITEM_SORTS: Record<string, (item: JellyfinItem) => string | number> = {
+  sortname: (i) => String(i.SortName ?? i.Name).toLowerCase(),
+  name: (i) => String(i.Name).toLowerCase(),
+  premieredate: (i) => String(i.PremiereDate ?? i.ProductionYear ?? ''),
+  productionyear: (i) => Number(i.ProductionYear ?? 0),
+  communityrating: (i) => Number(i.CommunityRating ?? 0),
+  runtime: (i) => Number(i.RunTimeTicks ?? 0),
+};
+
+/**
+ * A watch-state list in the request's sort. Its own order is newest first,
+ * which a date sort keeps or turns round; a name sort reads the rows' names
+ * where all have one; other sorts build every title to read it.
+ */
+async function sortRows(
+  req: Request,
+  ctx: JellyfinRequestContext,
+  rows: WatchStateRow[],
+  types: Set<string> | null
+): Promise<{ rows: WatchStateRow[] } | { items: JellyfinItem[] }> {
+  const key = qlist(req, 'SortBy')[0]?.toLowerCase() ?? '';
+  const sign = sortDescending(req) ? -1 : 1;
+  const compare = (a: string | number, b: string | number) =>
+    (a < b ? -1 : a > b ? 1 : 0) * sign;
+  if (/^date/.test(key))
+    return { rows: sortDescending(req) === false ? [...rows].reverse() : rows };
+  const read = ITEM_SORTS[key];
+  if (!read) return { rows };
+  if (
+    (key === 'sortname' || key === 'name') &&
+    rows.every((row) => row.snapshot?.name)
+  )
+    return {
+      rows: [...rows].sort((a, b) =>
+        compare(
+          a.snapshot!.name!.toLowerCase(),
+          b.snapshot!.name!.toLowerCase()
+        )
+      ),
+    };
+  const items = filterByType(await itemsFromRows(ctx, rows), types);
+  return { items: items.sort((a, b) => compare(read(a), read(b))) };
+}
+
 /**
  * Jellyfin skips the count when a client opts out and answers with the page
  * length instead, so a client that never reads the total does not make us walk
@@ -311,7 +360,7 @@ function browseLimit(req: Request): number {
   return Math.min(Math.max(1, qi(req, 'Limit', 100)), cap);
 }
 
-function send(
+export function send(
   req: Request,
   res: Response,
   items: JellyfinItem[],
@@ -321,6 +370,14 @@ function send(
   if (req.jf) rememberListMarkers(req.jf, items);
   const out = items.map(stripInternal);
   res.json(listResult(out, wantsTotal(req) ? total : out.length, startIndex));
+}
+
+function untilClosed(res: Response): AbortSignal {
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  return controller.signal;
 }
 
 /** Rows in flight while building a shelf; each one costs a meta lookup. */
@@ -474,6 +531,16 @@ async function handleItems(
   const parent = parentId ? await decodeForRequest(ctx, parentId) : null;
   const pd = parent?.kind === 'descriptor' ? parent.descriptor : null;
 
+  if (pd?.k === 'livetv') {
+    const { channels, total } = await listChannels(engine, ctx.scope(), {
+      startIndex,
+      limit,
+      genre,
+    });
+    send(req, res, await channelListItems(ctx, channels), total, startIndex);
+    return;
+  }
+
   // A collection meta is a BoxSet whatever type it is served as.
   const collectionParent =
     pd?.k === 'series'
@@ -534,6 +601,7 @@ async function handleItems(
         select: pageFilter(req, ctx, types, { parentId }),
         kinds: searchKindsFor(types),
         collectionsOnly: isBoxsetOnly(types),
+        signal: untilClosed(res),
       });
       const items = await itemsFromPreviews(ctx, page.items, { parentId });
       send(req, res, applySort(req, items), page.total, startIndex);
@@ -629,10 +697,21 @@ async function handleItems(
             )
           )
         : await provider.listPlayed(ctx.watch, kinds);
+    const sorted = await sortRows(req, ctx, rows, types);
+    if ('items' in sorted) {
+      send(
+        req,
+        res,
+        sorted.items.slice(startIndex, startIndex + limit),
+        sorted.items.length,
+        startIndex
+      );
+      return;
+    }
     const items = applySort(
       req,
       filterByType(
-        await itemsFromRows(ctx, rows.slice(0, startIndex + limit)),
+        await itemsFromRows(ctx, sorted.rows.slice(0, startIndex + limit)),
         types
       )
     );
@@ -706,6 +785,7 @@ async function handleItems(
       exactTotal: isKodi(ctx) && wantsTotal(req),
       cursorKey: `${ctx.scope()}|${filterShape(req, types)}`,
       select: pageFilter(req, ctx, types, { parentId, catalog }),
+      signal: untilClosed(res),
     });
     const items = await itemsFromPreviews(ctx, page.items, {
       parentId,
@@ -716,7 +796,7 @@ async function handleItems(
   }
 
   if (searchTerm) {
-    const [previews, people] = await Promise.all([
+    const [previews, people, channels] = await Promise.all([
       searchCatalogs(
         engine,
         searchTerm,
@@ -727,10 +807,14 @@ async function handleItems(
       types?.has('person')
         ? personResults(ctx, searchTerm, startIndex + limit)
         : [],
+      types?.has('tvchannel')
+        ? searchChannels(engine, ctx.scope(), searchTerm, startIndex + limit)
+        : [],
     ]);
     const items = [
       ...filterByType(await itemsFromPreviews(ctx, previews), types),
       ...people,
+      ...(await channelListItems(ctx, channels)),
     ];
     send(
       req,
@@ -908,6 +992,12 @@ function withShowWatchedAt(
   };
 }
 
+function availableAt(item: JellyfinItem, row: WatchStateRow): number {
+  const aired =
+    typeof item.PremiereDate === 'string' ? Date.parse(item.PremiereDate) : 0;
+  return Math.max(row.sortAt, Math.min(aired || 0, Date.now()));
+}
+
 /** How many of the most recently watched shows Next Up looks through. */
 const NEXT_UP_SHOWS = 200;
 
@@ -958,13 +1048,26 @@ router.get(
         // A part-played anchor can still come back to resume.
         if (row.played && (await caughtUpOn(ctx, d).catch(() => false)))
           return null;
-        return nextUpForSeries(ctx, d, row, { includeResumable }).then(
-          (item) => item && withShowWatchedAt(item, row),
-          () => null
+        const item = await nextUpForSeries(ctx, d, row, {
+          includeResumable,
+        }).catch(() => null);
+        return (
+          item && {
+            item: withShowWatchedAt(item, row),
+            at: availableAt(item, row),
+          }
         );
       };
+      const found: NonNullable<Awaited<ReturnType<typeof check>>>[] = [];
+      const take = (next: Awaited<ReturnType<typeof check>>) => {
+        if (!next || (next.item.UserData as { Played: boolean }).Played) return;
+        const series = String(next.item.SeriesId ?? next.item.Id);
+        if (shown.has(series)) return;
+        shown.add(series);
+        found.push(next);
+      };
       // A new check starts as each one ends, and answers are taken in the shows' order.
-      const running: Promise<JellyfinItem | null>[] = [];
+      const running: ReturnType<typeof check>[] = [];
       let started = 0;
       const fill = async () => {
         while (running.length < ROW_CONCURRENCY && started < NEXT_UP_SHOWS) {
@@ -975,15 +1078,15 @@ router.get(
         }
       };
       await fill();
-      while (running.length && items.length < limit) {
+      while (running.length && found.length < limit) {
         const next = await running.shift()!;
         await fill();
-        if (!next || (next.UserData as { Played: boolean }).Played) continue;
-        const series = String(next.SeriesId ?? next.Id);
-        if (shown.has(series)) continue;
-        shown.add(series);
-        items.push(next);
+        take(next);
       }
+      // Checks already started cost nothing more, and may find an episode out since.
+      for (const next of await Promise.all(running)) take(next);
+      found.sort((a, b) => b.at - a.at);
+      items.push(...found.slice(0, limit).map((f) => f.item));
     }
     send(req, res, items, items.length, 0);
   })
@@ -1420,33 +1523,27 @@ router.get(
   })
 );
 
-async function genreEntries(
-  ctx: JellyfinRequestContext,
-  parentId: string | undefined
-) {
+/** Genres of the libraries, or of the live catalogs for Live TV or its channels, which are its groups. */
+async function genreEntries(ctx: JellyfinRequestContext, req: Request) {
   const engine = await ctx.engine();
-  let views = await ctx.views();
-  if (parentId) {
-    const d = await decodeForRequest(ctx, parentId);
-    if (d?.kind === 'descriptor' && d.descriptor.k === 'view') {
-      const pd = d.descriptor;
-      views = views.filter(
-        (v) => v.catalog.type === pd.t && v.catalog.id === pd.c
-      );
-    }
-  }
+  const parentId = qs(req, 'ParentId');
+  const d = parentId ? await decodeForRequest(ctx, parentId) : null;
+  const pd = d?.kind === 'descriptor' ? d.descriptor : null;
+  const live = pd?.k === 'livetv' || !!typeFilter(req)?.has('tvchannel');
+  const catalogs = live
+    ? liveCatalogs(engine)
+    : (await ctx.views())
+        .map((v) => v.catalog)
+        .filter((c) => pd?.k !== 'view' || (c.type === pd.t && c.id === pd.c));
   const out: { type: string; catalogId: string; genre: string }[] = [];
   const seen = new Set<string>();
-  for (const view of views) {
-    for (const g of genreOptions(view.catalog)) {
-      const key = `${view.catalog.type}|${g}`;
+  for (const catalog of catalogs) {
+    for (const g of genreOptions(catalog)) {
+      // Live TV's groups are shared across its addons by name.
+      const key = live ? g : `${catalog.type}|${g}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({
-        type: view.catalog.type,
-        catalogId: view.catalog.id,
-        genre: g,
-      });
+      out.push({ type: catalog.type, catalogId: catalog.id, genre: g });
     }
   }
   return out;
@@ -1455,7 +1552,7 @@ async function genreEntries(
 router.get(
   '/Genres',
   jf(async (req, res, ctx) => {
-    const entries = await genreEntries(ctx, qs(req, 'ParentId'));
+    const entries = await genreEntries(ctx, req);
     const items = entries.map((e) =>
       buildGenre(ctx.build, e.type, e.catalogId, e.genre)
     );
@@ -1466,7 +1563,7 @@ router.get(
   '/Genres/:name',
   jf(async (req, res, ctx) => {
     const name = decodeURIComponent(param(req, 'name'));
-    const entry = (await genreEntries(ctx, undefined)).find(
+    const entry = (await genreEntries(ctx, req)).find(
       (e) => e.genre.toLowerCase() === name.toLowerCase()
     );
     res.json(
@@ -1485,7 +1582,7 @@ router.get(
 router.get(
   ['/Items/Filters', '/Items/Filters2'],
   jf(async (req, res, ctx) => {
-    const entries = await genreEntries(ctx, qs(req, 'ParentId'));
+    const entries = await genreEntries(ctx, req);
     const seen = new Set<string>();
     const genres = entries.filter((e) =>
       seen.has(e.genre) ? false : (seen.add(e.genre), true)

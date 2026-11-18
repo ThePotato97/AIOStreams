@@ -1,3 +1,6 @@
+import type { Request, Response } from 'express';
+import { constants } from '@aiostreams/core';
+
 export enum StaticFiles {
   DOWNLOAD_FAILED = 'download_failed.mp4',
   DOWNLOADING = 'downloading.mp4',
@@ -49,4 +52,71 @@ export function mapDebridErrorToStaticFile(code: string | undefined): string {
     default:
       return StaticFiles.INTERNAL_SERVER_ERROR;
   }
+}
+
+/**
+ * Whether the request is from AIOStreams' own apps: a playback check, or a
+ * link listed for the Jellyfin path, which the apps play through. These get a
+ * real error rather than a video, which only a Stremio player needs.
+ */
+export function wantsRealErrors(req: Request<any>): boolean {
+  return (
+    req.query[constants.PLAYBACK_CHECK_MARKER] !== undefined ||
+    req.query[constants.PLAY_PATH_MARKER] === 'jellyfin'
+  );
+}
+
+/** HTTP status for a DebridError code, answered as a real error. */
+export function statusForDebridError(code: string | undefined): number {
+  switch (code) {
+    case 'UNAVAILABLE_FOR_LEGAL_REASONS':
+      return 451;
+    case 'PAYMENT_REQUIRED':
+      return 402;
+    case 'TOO_MANY_ACTIVE_CONNECTIONS':
+    case 'TOO_MANY_REQUESTS':
+      return 429;
+    case 'FORBIDDEN':
+      return 403;
+    case 'UNAUTHORIZED':
+      return 401;
+    case 'NO_MATCHING_FILE':
+      return 404;
+    case 'GONE':
+      return 410;
+    case 'SERVICE_UNAVAILABLE':
+      return 503;
+    case 'TIMEOUT':
+    case 'DOWNLOADING':
+      return 409;
+    case 'INTERNAL_SERVER_ERROR':
+      return 500;
+    default:
+      return 422;
+  }
+}
+
+/**
+ * A playback failure: for AIOStreams' own apps the error as JSON
+ * (`{ ok: false, error: { code, message } }`), for anyone else the video that
+ * stands in for it.
+ */
+export function sendPlaybackError(
+  req: Request<any>,
+  res: Response,
+  error: { code?: string; message: string; file?: string },
+  redirectStatus: 302 | 307 = 307
+): void {
+  res.setHeader('Cache-Control', 'no-store');
+  if (wantsRealErrors(req)) {
+    res.status(statusForDebridError(error.code)).json({
+      ok: false,
+      error: { code: error.code, message: error.message },
+    });
+    return;
+  }
+  res.redirect(
+    redirectStatus,
+    `/static/${error.file ?? mapDebridErrorToStaticFile(error.code)}`
+  );
 }

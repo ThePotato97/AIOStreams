@@ -66,6 +66,19 @@ android {
                 keyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").get()
             }
         }
+        // One debug key for every CI build, so each debug APK installs over the last; a
+        // runner's own debug key is new every run. The usual debug keystore's passwords
+        // and alias unless set.
+        create("fixedDebug") {
+            providers.environmentVariable("ANDROID_DEBUG_KEYSTORE").orNull?.let { keystore ->
+                storeFile = file(keystore)
+                storePassword =
+                    providers.environmentVariable("ANDROID_DEBUG_KEYSTORE_PASSWORD").getOrElse("android")
+                keyAlias = providers.environmentVariable("ANDROID_DEBUG_KEY_ALIAS").getOrElse("androiddebugkey")
+                keyPassword =
+                    providers.environmentVariable("ANDROID_DEBUG_KEY_PASSWORD").getOrElse("android")
+            }
+        }
     }
 
     buildTypes {
@@ -73,13 +86,16 @@ android {
             // Beside a released copy, which a differently signed build can't replace.
             applicationIdSuffix = ".debug"
             resValue("string", "app_name", "AIOStreams Debug")
+            signingConfigs.getByName("fixedDebug").takeIf { it.storeFile != null }?.let {
+                signingConfig = it
+            }
             val webUrl = providers.gradleProperty("aiostreams.webUrl").getOrElse("")
             buildConfigField("String", "WEB_URL", "\"$webUrl\"")
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
         }
     }
@@ -98,6 +114,7 @@ androidComponents {
 
 dependencies {
     implementation(project(":bridge"))
+    implementation(project(":logs"))
     implementation(project(":playback"))
     implementation(project(":mpv"))
     implementation(project(":exoplayer"))

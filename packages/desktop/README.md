@@ -3,7 +3,7 @@
 The AIOStreams app (`packages/web`) in a native window, playing through mpv. It
 runs on Windows, Linux and macOS, with downloads for each, and is in alpha. This file
 covers building it and how it works; using it is in the docs'
-[Desktop app guide](https://docs.aiostreams.viren070.me/apps/desktop).
+[Desktop app guide](https://aiostreams.org/apps/desktop).
 
 The window shows the web app's standalone build, which picks its own server: any Jellyfin server
 works, and AIOStreams servers get the extras. Switching servers happens in the page.
@@ -104,7 +104,8 @@ The app looks for `libmpv.so.2` next to the binary, then in the system library f
 
 The download is a Flatpak, which `scripts/make-flatpak.sh` builds from `linux/io.github.viren070.aiostreams.yml`
 after the page: the GNOME 51 runtime, with libmpv and the libraries it needs built in. It needs
-`flatpak`, `flatpak-builder`, `python3-aiohttp`, `python3-tomlkit` and the Flathub remote. Under
+`flatpak` 1.15.6 or newer, `flatpak-builder`, `python3-aiohttp`, `python3-tomlkit` and the Flathub
+remote. Ubuntu 24.04's Flatpak is older; `ppa:flatpak/stable` has a newer one. Under
 WSL, point `FLATPAK_WORK` at a folder on the Linux filesystem, since the builder's state cannot live
 on a Windows drive. Install the bundle it prints with `flatpak install --user`.
 
