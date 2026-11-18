@@ -29,7 +29,9 @@ pub mod spkvirt;
 pub mod spkvirt_tables;
 pub mod truehd_in;
 pub mod tuning;
-#[cfg(all(target_arch = "wasm32", not(feature = "package")))]
+/// The renderer through a plain C interface (`ar_*`, include/atmos_render.h): the browser's
+/// WebAssembly build, and natively FFmpeg's speaker-render decoders.
+#[cfg(not(feature = "package"))]
 pub mod wasm;
 /// The WebGPU-Player audio decoder package build (`--features package`).
 #[cfg(feature = "package")]
