@@ -6,4 +6,6 @@ data class Sound(
     val dialogueBoost: Int = 0,
     val nightMode: Boolean = false,
     val ac3Encode: Boolean = false,
+    /** Dolby Atmos and surround rendered for the device's own two speakers (mpv only). */
+    val speakers: Boolean = false,
 )

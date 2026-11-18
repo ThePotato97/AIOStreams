@@ -15,12 +15,13 @@ import io.github.viren070.aiostreams.playback.Sound
 
 /**
  * The engine drawing beneath the page: the one the page picked, or with
- * `auto`, ExoPlayer for each file and mpv for a file ExoPlayer can't play.
+ * `auto`, ExoPlayer for each file and mpv for a file ExoPlayer can't play, or mpv for every file
+ * while the speaker render is on (only mpv has it).
  */
 class Playback(private val context: Context, private val announce: (engine: String) -> Unit) {
     private val saved = context.getSharedPreferences("playback", Context.MODE_PRIVATE)
     private var choice = saved.getString("engine", null)?.takeIf { it in CHOICES } ?: AUTO
-    private var name = engineFor(choice)
+    private var name = if (choice == MPV) MPV else EXOPLAYER
 
     /** Where the engine's view goes. */
     val stage = FrameLayout(context)
@@ -42,6 +43,12 @@ class Playback(private val context: Context, private val announce: (engine: Stri
             field = value
             engine.setSound(value)
         }
+
+    private fun engineFor(choice: String) = when {
+        choice == MPV -> MPV
+        choice == AUTO && sound.speakers -> MPV
+        else -> EXOPLAYER
+    }
 
     var upscaling = false
         set(value) {
@@ -128,7 +135,5 @@ class Playback(private val context: Context, private val announce: (engine: Stri
         const val MPV = "mpv"
         const val EXOPLAYER = "exoplayer"
         val CHOICES = setOf(AUTO, MPV, EXOPLAYER)
-
-        fun engineFor(choice: String) = if (choice == MPV) MPV else EXOPLAYER
     }
 }

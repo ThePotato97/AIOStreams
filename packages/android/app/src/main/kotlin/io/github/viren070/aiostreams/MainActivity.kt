@@ -300,6 +300,7 @@ class MainActivity : ComponentActivity() {
                     dialogueBoost = message["dialogueBoost"]?.jsonPrimitive?.intOrNull ?: 0,
                     nightMode = message["nightMode"]?.jsonPrimitive?.booleanOrNull == true,
                     ac3Encode = message["ac3Encode"]?.jsonPrimitive?.booleanOrNull == true,
+                    speakers = message["speakerRender"]?.jsonPrimitive?.booleanOrNull == true,
                 )
             }
             "youtube-resolve" -> youtube.resolve(

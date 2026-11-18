@@ -870,6 +870,10 @@ msgstr "Built-in mpv"
 msgid "Built-in player"
 msgstr "Built-in player"
 
+#: src/app/settings/audio.tsx
+msgid "Built-in speakers"
+msgstr "Built-in speakers"
+
 #: src/app/settings/theme.tsx
 msgid "Buttons, progress bars and highlights."
 msgstr "Buttons, progress bars and highlights."
@@ -4090,6 +4094,10 @@ msgstr "Render only {label}"
 #: src/app/settings/audio.tsx
 msgid "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
 msgstr "Renders Dolby Atmos and surround sound for headphones, as Dolby Atmos for Headphones does. Not for sound passed through."
+
+#: src/app/settings/audio.tsx
+msgid "Renders Dolby Atmos and surround sound for this device's own two speakers, as Dolby Atmos for built-in speakers does. Plays through mpv. Not for sound passed through, or for headphones."
+msgstr "Renders Dolby Atmos and surround sound for this device's own two speakers, as Dolby Atmos for built-in speakers does. Plays through mpv. Not for sound passed through, or for headphones."
 
 #: src/features/playlists/playlists.tsx
 msgid "Repeat"

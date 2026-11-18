@@ -716,6 +716,11 @@ export const settings = {
     ),
     /** Dolby Atmos (and other surround) rendered for headphones by the WebGPU player's audio packages. */
     headphones: device<boolean>('aiostreams-web-audio-headphones', false),
+    /** The Android app: Dolby Atmos and surround rendered for the device's two speakers (mpv's atmos-render decoders). */
+    speakerRender: device<boolean>(
+      'aiostreams-web-audio-speaker-render',
+      false
+    ),
     /** Positive plays the sound later than the picture. */
     delayMs: device<number>(
       'aiostreams-web-audio-delay',

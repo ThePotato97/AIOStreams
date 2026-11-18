@@ -246,9 +246,20 @@ function SoundCard() {
   const [boost, setBoost] = useSetting(settings.audio.dialogueBoost);
   const [nightMode, setNightMode] = useSetting(settings.audio.nightMode);
   const [delay, setDelay] = useSetting(settings.audio.delayMs);
+  const [speakers, setSpeakers] = useSetting(settings.audio.speakerRender);
+  const android = currentHost().name === 'android-app';
   const delayLabel = audioDelayLabel(delay);
   return (
     <SettingsCard name="sound" title={t`Sound`} description={onDevice()}>
+      {android && (
+        <Switch
+          side="right"
+          label={t`Built-in speakers`}
+          help={t`Renders Dolby Atmos and surround sound for this device's own two speakers, as Dolby Atmos for built-in speakers does. Plays through mpv. Not for sound passed through, or for headphones.`}
+          value={speakers}
+          onValueChange={setSpeakers}
+        />
+      )}
       <Select
         label={t`Dialogue boost`}
         help={t`Raises the centre channel, where surround sound puts dialogue. Not for sound passed through.`}

@@ -68,6 +68,9 @@ class MpvEngine(private val context: Context) : Engine {
     @Volatile
     private var sound = Sound()
 
+    /** mpv's `ad`: atmos-render's speaker decoders first while the speaker render is on. */
+    private var decoders = ""
+
     // Used on the calls thread only.
     private var filters: SoundFilters? = null
     private var subtitleScale: Double? = null
@@ -371,8 +374,25 @@ class MpvEngine(private val context: Context) : Engine {
     }
 
     override fun setSound(sound: Sound) {
+        val decoders = if (sound.speakers) SPEAKER_DECODERS else ""
         this.sound = sound
-        calls.execute { filters?.apply(sound) }
+        calls.execute {
+            // A user's own `ad` in mpv.conf wins.
+            if (decoders != this.decoders && !configSets("ad")) {
+                this.decoders = decoders
+                set("ad", decoders)
+                reloadAudio()
+            }
+            filters?.apply(sound)
+        }
+    }
+
+    /** The decoders in use only change when the audio track is opened again. */
+    private fun reloadAudio() {
+        val aid = mpv.getPropertyString("aid") ?: return
+        if (aid == "no" || aid == "auto") return
+        set("aid", "no")
+        set("aid", aid)
     }
 
     private fun audioParams(params: MPVNode?) {
@@ -582,6 +602,13 @@ class MpvEngine(private val context: Context) : Engine {
     }
 
     companion object {
+        /**
+         * FFmpeg's libatmos speaker decoders (atmos-render): TrueHD, E-AC-3 and AC-3 at 48 kHz rendered
+         * for two built-in speakers, as Dolby Atmos for built-in speakers does. Any other stream, or
+         * one they refuse, takes mpv's usual decoder; passthrough still comes first.
+         */
+        const val SPEAKER_DECODERS = "libatmos_speakers_truehd,libatmos_speakers_eac3,libatmos_speakers_ac3"
+
         private val OBSERVED = listOf(
             "time-pos", "duration", "demuxer-cache-state", "pause", "paused-for-cache", "seeking",
             "idle-active", "volume", "volume-max", "mute", "speed", "aid", "sid",
