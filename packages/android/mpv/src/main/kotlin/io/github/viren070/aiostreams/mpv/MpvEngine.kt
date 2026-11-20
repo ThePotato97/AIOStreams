@@ -218,6 +218,20 @@ class MpvEngine(private val context: Context) : Engine {
         applyShaders()
     }
 
+    /**
+     * On the calls thread, for an HDR file. mpv shows it as SDR here, tone-mapped by libplacebo,
+     * and would draw subtitles afterwards at full SDR white, far above the picture's own white.
+     * Blended in before the tone mapping at SDR reference white (203 nits), as an HDR display
+     * would show them, they're mapped with the picture and land at its white. The cost: they stay
+     * inside the picture, not in black bars. For this file only; a user's own mpv.conf wins.
+     */
+    private fun toneMapSubtitles() {
+        for ((name, value) in SUBTITLE_TONE_MAPPING) {
+            if (configSets(name) || mpv.getPropertyString("file-local-options/$name") == value) continue
+            mpv.setPropertyString("file-local-options/$name", value)
+        }
+    }
+
     private fun watchDrops() {
         watchingDrops?.cancel(false)
         dropsSeen = 0
@@ -621,7 +635,10 @@ class MpvEngine(private val context: Context) : Engine {
             )
             "video-params" -> {
                 val params = value as? JsonObject ?: return
-                if ((params["gamma"] as? JsonPrimitive)?.contentOrNull in HDR_GAMMAS) calls.execute { blockUpscaling("HDR") }
+                if ((params["gamma"] as? JsonPrimitive)?.contentOrNull in HDR_GAMMAS) calls.execute {
+                    blockUpscaling("HDR")
+                    toneMapSubtitles()
+                }
                 return listener.onVideo(
                     width = (params["dw"] as? JsonPrimitive)?.intOrNull,
                     height = (params["dh"] as? JsonPrimitive)?.intOrNull,
@@ -782,6 +799,13 @@ class MpvEngine(private val context: Context) : Engine {
         /** Fewer frames than this in a check is a stall, which says nothing about the graphics chip. */
         private const val DROP_MIN_FRAMES = 30
         private val HDR_GAMMAS = setOf("pq", "hlg")
+
+        /** Text and picture (PGS) subtitles at SDR white inside the HDR picture, tone-mapped with it. */
+        private val SUBTITLE_TONE_MAPPING = listOf(
+            "blend-subtitles" to "yes",
+            "sub-hdr-peak" to "sdr",
+            "image-subs-hdr-peak" to "sdr",
+        )
         private const val LOG_ERROR = 20
         private const val LOG_WARN = 30
 
